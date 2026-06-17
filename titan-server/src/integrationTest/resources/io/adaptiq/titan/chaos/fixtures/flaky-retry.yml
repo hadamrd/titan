@@ -1,0 +1,15 @@
+# Chaos rig fixture — a step that always exits non-zero under a retry policy.
+# After maxAttempts the node fails terminally; the build fails.
+titan:
+  agent: chaos
+  stages:
+    - stage: Build
+      steps:
+        - sh: "true"
+    - stage: Flaky
+      dependsOn: [Build]
+      steps:
+        - sh: "exit 1"
+          retry:
+            maxAttempts: 3
+            backoff: { initial: 1s, multiplier: 2.0, max: 2s }

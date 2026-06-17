@@ -1,0 +1,80 @@
+# Titan k3s rig — DEMO values for titan.test.example.com.
+# Drafted by Claude for the GitHub-App golden-path demo.
+
+deploy:
+  namespace: titan
+  kubeContext: titan-k3s
+
+postgres:
+  image: postgres:16-alpine
+  database: titan
+  user: titan
+  storage: 5Gi
+  storageClassName: ""
+
+keycloak:
+  enabled: true
+  image: quay.io/keycloak/keycloak:25.0
+  # Inline realm JSON — set after writing this file (cat realm-titan-dev.json
+  # into here). For now the deploy will boot keycloak without a pre-seeded
+  # realm; admin can import it via console at /admin afterward.
+  realmJson: ""
+  adminUser: admin
+
+titanServer:
+  image: ghcr.io/hadamrd/titan-server
+  tag: "demo-latest"
+  imagePullPolicy: Always
+  replicas: 1
+  oidc:
+    issuerUrl: "http://keycloak:8080/realms/titan-dev"
+    publicIssuerUrl: "https://titan.test.example.com/realms/titan-dev"
+    clientId: titan-server
+    audience: titan-server
+  artifacts:
+    backend: fs
+    fs:
+      storage: 10Gi
+      mountPath: /var/titan/artifacts
+
+titanUi:
+  image: ghcr.io/hadamrd/titan-ui
+  tag: "demo-latest"
+  imagePullPolicy: Always
+  replicas: 1
+
+titanWorker:
+  enabled: true
+  image: ghcr.io/hadamrd/titan-worker
+  tag: "demo-latest"
+  imagePullPolicy: Always
+  replicas: 1
+  agentId: k3s-worker-01
+  agentName: "Titan Worker (k3s-01)"
+  labels: "k3s,linux,amd64"
+  executors: "2"
+  workspaceSize: 20Gi
+
+ingress:
+  enabled: true
+  className: nginx
+  clusterIssuer: letsencrypt-prod
+  host: titan.test.example.com
+  tls:
+    enabled: true
+    secretName: titan-tls
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 50m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+
+# DEMO inline secrets — replace with ExternalSecrets-backed values for prod.
+# These get materialised into a k8s Secret named "titan-secrets".
+secrets:
+  create: true
+  name: titan-secrets
+  # Will be filled in by the deploy script below — placeholders here so the
+  # file is git-diffable.
+  postgresPassword: "FILLED-AT-DEPLOY"
+  titanKek: "FILLED-AT-DEPLOY"
+  keycloakAdminPassword: "FILLED-AT-DEPLOY"

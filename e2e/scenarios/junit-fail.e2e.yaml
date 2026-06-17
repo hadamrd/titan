@@ -1,0 +1,32 @@
+# junit step — a failing test fails the step (JUnitStepHandler).
+# Titan has no UNSTABLE run state (design/26): a green node that swallowed a
+# failing test is worse than a red one, so the `junit` step goes FAILED on any
+# test failure. The `sh` step that produced the report still succeeds — only
+# the `junit` step, and therefore the build, goes red.
+name: junit — a failing test fails the step and the build
+pipeline: |
+  agent: titan-worker-1
+  stages:
+    - stage: report
+      steps:
+        - sh: |
+            mkdir -p target/surefire-reports
+            cat > target/surefire-reports/TEST-app.SmokeTest.xml <<'XML'
+            <?xml version="1.0" encoding="UTF-8"?>
+            <testsuite name="app.SmokeTest" tests="2" failures="1">
+            <testcase name="boots" classname="app.SmokeTest"/>
+            <testcase name="regresses" classname="app.SmokeTest">
+            <failure message="expected true, was false">stack trace here</failure>
+            </testcase>
+            </testsuite>
+            XML
+        - junit: "**/surefire-reports/TEST-*.xml"
+expect:
+  build: FAILURE
+  nodes:
+    report: { status: FAILED }
+    report-s0: { status: SUCCESS }
+    report-s1: { status: FAILED }
+  logContains:
+    - "1 passed, 1 failed, 0 skipped"
+    - "1 test(s) failed"

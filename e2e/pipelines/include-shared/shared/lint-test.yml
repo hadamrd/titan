@@ -1,0 +1,13 @@
+# Shared lint+test prelude (issue #1120 fixture).
+#
+# Customers migrating from GitLab CI / GHA reusable workflows / legacy shared libraries factor
+# their lint+test prelude into one file and `include:` it from every pipeline. This is the
+# canonical example: a sibling YAML fragment that declares two stages every repo runs.
+stages:
+  - stage: lint
+    steps:
+      - sh: ./scripts/lint.sh
+  - stage: test
+    dependsOn: lint
+    steps:
+      - sh: ./scripts/test.sh

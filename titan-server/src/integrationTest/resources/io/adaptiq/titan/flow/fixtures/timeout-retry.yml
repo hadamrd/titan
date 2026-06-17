@@ -1,0 +1,9 @@
+titan:
+  stages:
+    - stage: Flaky
+      steps:
+        - sh: ./flaky.sh
+          timeout: 2s
+          retry:
+            maxAttempts: 3
+            backoff: { initial: 1s, multiplier: 2.0, max: 2s }

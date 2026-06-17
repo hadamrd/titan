@@ -1,0 +1,7 @@
+# GOLDEN — minimal CI pipeline. `checkout:` with a null value (a no-argument
+# step), the `sh` scalar shorthand. The kind of pipeline a first-time user writes.
+stages:
+  - stage: CI
+    steps:
+      - checkout:
+      - sh: make test

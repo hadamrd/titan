@@ -1,0 +1,29 @@
+# Manual-judgement gate — the gate holds the DAG until approved (design/43 §4).
+# `build` runs, then a gate sits PAUSED awaiting a decision; the scenario
+# runner discovers the paused gate and approves it (the `gate:` block); the
+# downstream `deploy` then runs. The gate node id is slug("Release") = release.
+name: gate — manual judgement holds then approve
+gate:
+  approve: release
+pipeline: |
+  agent: titan-worker-1
+  stages:
+    - stage: build
+      steps:
+        - sh: echo built
+    - gate: Release
+      requiresApproval: true
+      dependsOn: [build]
+    - stage: deploy
+      dependsOn: [Release]
+      steps:
+        - sh: echo deployed
+expect:
+  build: SUCCESS
+  nodes:
+    build: { status: SUCCESS }
+    release: { status: SUCCESS }
+    deploy: { status: SUCCESS }
+  logContains:
+    - built
+    - deployed

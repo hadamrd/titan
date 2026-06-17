@@ -1,0 +1,9 @@
+# GOLDEN INVALID — `approver` (singular) instead of the grammar key `approvers`.
+# An unknown key on the closed `gate` context.
+stages:
+  - stage: Build
+    steps:
+      - sh: make
+  - gate: Sign-off
+    approver: alice
+    dependsOn: [build]

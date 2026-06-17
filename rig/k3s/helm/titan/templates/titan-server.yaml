@@ -1,0 +1,197 @@
+{{- include "titan.artifacts.validate" . -}}
+{{- include "titan.secretsBackend.validate" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: titan-server
+  labels:
+    {{- include "titan.labels" . | nindent 4 }}
+    app: titan-server
+  {{- if .Values.monitoring.scrapeAnnotations.enabled }}
+  annotations:
+    # Picked up by vanilla Prometheus `kubernetes_sd_configs` with the
+    # `service` role when relabel_configs honour these conventional keys.
+    # ServiceMonitor users should leave scrapeAnnotations.enabled=true too
+    # (annotations are inert without a matching scrape config).
+    prometheus.io/scrape: "true"
+    prometheus.io/path: "/q/metrics"
+    prometheus.io/port: {{ .Values.titanServer.service.port | quote }}
+  {{- end }}
+spec:
+  type: {{ .Values.titanServer.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.titanServer.service.port }}
+      targetPort: 8080
+  selector:
+    app: titan-server
+---
+{{- if eq .Values.titanServer.artifacts.backend "fs" }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: titan-artifacts
+  labels:
+    {{- include "titan.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.titanServer.artifacts.fs.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.titanServer.artifacts.fs.storage | quote }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: titan-server
+  labels:
+    {{- include "titan.labels" . | nindent 4 }}
+    app: titan-server
+spec:
+  replicas: {{ .Values.titanServer.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: titan-server
+  template:
+    metadata:
+      labels:
+        {{- include "titan.selectorLabels" . | nindent 8 }}
+        app: titan-server
+      {{- if .Values.monitoring.scrapeAnnotations.enabled }}
+      annotations:
+        # Pod-level annotations for Prometheus `role: pod` auto-discovery.
+        # Mirrors the Service annotations so either SD role works.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/q/metrics"
+        prometheus.io/port: "8080"
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.postgres.image | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "waiting for postgres ..."
+              until pg_isready -h postgres -U {{ .Values.postgres.user }} -d {{ .Values.postgres.database }}; do
+                sleep 2
+              done
+      containers:
+        - name: titan-server
+          image: "{{ .Values.titanServer.image }}:{{ .Values.titanServer.tag }}"
+          imagePullPolicy: {{ .Values.titanServer.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: TITAN_PUBLIC_URL
+              value: {{ .Values.titanServer.publicUrl | quote }}
+            - name: TITAN_DB_URL
+              value: "jdbc:postgresql://postgres:5432/{{ .Values.postgres.database }}"
+            - name: TITAN_DB_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: TITAN_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "titan.secretName" . }}
+                  key: POSTGRES_PASSWORD
+            # OIDC — discovery happens in-cluster, but the JWT `iss` claim is
+            # whatever the browser sees. titan-server discovers from
+            # TITAN_OIDC_ISSUER and accepts tokens carrying publicIssuerUrl
+            # via QUARKUS_OIDC_TOKEN_ISSUER.
+            - name: TITAN_OIDC_ISSUER
+              value: {{ .Values.titanServer.oidc.issuerUrl | quote }}
+            - name: QUARKUS_OIDC_TOKEN_ISSUER
+              value: {{ .Values.titanServer.oidc.publicIssuerUrl | quote }}
+            - name: TITAN_OIDC_CLIENT_ID
+              value: {{ .Values.titanServer.oidc.clientId | quote }}
+            - name: TITAN_OIDC_AUDIENCE
+              value: {{ .Values.titanServer.oidc.audience | quote }}
+            - name: TITAN_KEK
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "titan.secretName" . }}
+                  key: TITAN_KEK
+            - name: TITAN_SECRETS_BACKEND
+              value: {{ .Values.titanServer.secretsBackend | quote }}
+            {{- if eq .Values.titanServer.secretsBackend "infisical" }}
+            # Infisical-sourced credentials (#1227). Token from titan-secrets;
+            # coordinates from titanServer.infisical. See values-infisical-e2e.yaml.
+            {{- include "titan.infisicalEnv" (dict "secretName" (include "titan.secretName" .) "infisical" .Values.titanServer.infisical) | nindent 12 }}
+            {{- end }}
+            - name: QUARKUS_PROFILE
+              value: "prod"
+            # ── Pulsar SCM convergence ───────────────────────────────────────
+            # Enables the @Scheduled Pulsar poll scanner (pulsar.scan.enabled)
+            # and points PulsarCheckReporter at the reachable Pulsar node base
+            # URL. Chart-sourced so a helm re-apply keeps them (previously set
+            # imperatively via `kubectl set env`, wiped on every redeploy).
+            - name: PULSAR_SCAN_ENABLED
+              value: {{ .Values.titanServer.pulsar.scanEnabled | quote }}
+            - name: PULSAR_NODE_BASE_URL
+              value: {{ .Values.titanServer.pulsar.nodeBaseUrl | quote }}
+            # ── artifact backend ─────────────────────────────────────────────
+            {{- if eq .Values.titanServer.artifacts.backend "fs" }}
+            - name: TITAN_ARTIFACT_STORE
+              value: "fs"
+            - name: TITAN_ARTIFACT_ROOT
+              value: {{ .Values.titanServer.artifacts.fs.mountPath | quote }}
+            {{- else if eq .Values.titanServer.artifacts.backend "s3" }}
+            - name: TITAN_ARTIFACT_STORE
+              value: "s3"
+            - name: TITAN_ARTIFACT_BUCKET
+              value: {{ .Values.titanServer.artifacts.s3.bucket | quote }}
+            - name: TITAN_ARTIFACT_ENDPOINT
+              value: {{ .Values.titanServer.artifacts.s3.endpoint | quote }}
+            - name: TITAN_ARTIFACT_REGION
+              value: {{ .Values.titanServer.artifacts.s3.region | quote }}
+            - name: TITAN_ARTIFACT_PATHSTYLE
+              value: {{ .Values.titanServer.artifacts.s3.pathStyle | quote }}
+            - name: TITAN_ARTIFACT_ACCESSKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "titan.secretName" . }}
+                  key: ARTIFACTS_ACCESS_KEY
+            - name: TITAN_ARTIFACT_SECRETKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "titan.secretName" . }}
+                  key: ARTIFACTS_SECRET_KEY
+            {{- end }}
+          resources:
+            {{- toYaml .Values.titanServer.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 6
+          {{- if eq .Values.titanServer.artifacts.backend "fs" }}
+          volumeMounts:
+            - name: artifacts
+              mountPath: {{ .Values.titanServer.artifacts.fs.mountPath | quote }}
+          {{- end }}
+      {{- if eq .Values.titanServer.artifacts.backend "fs" }}
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: titan-artifacts
+      {{- end }}

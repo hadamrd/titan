@@ -1,0 +1,187 @@
+{{- /*
+titan-worker — pull-based execution agent. Mirrors the local rig's worker.
+
+NOT externally exposed — no Service is needed for the worker itself (it polls
+titan-server outbound). The dind sidecar IS the docker daemon for any
+containerised pipeline `image:` step; reached at tcp://localhost:2375 from
+the worker container only (shared pod localhost).
+*/ -}}
+{{- if .Values.titanWorker.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: titan-worker
+  labels:
+    {{- include "titan.labels" . | nindent 4 }}
+    app: titan-worker
+spec:
+  serviceName: titan-worker
+  replicas: {{ .Values.titanWorker.replicas }}
+  selector:
+    matchLabels:
+      app: titan-worker
+  template:
+    metadata:
+      labels:
+        {{- include "titan.selectorLabels" . | nindent 8 }}
+        app: titan-worker
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        # Block until the controller's Flyway migrations have produced the
+        # titan schema. The worker registers a row into titan.agents on
+        # startup and crashes if that table does not exist yet.
+        - name: wait-for-titan-schema
+          image: {{ .Values.postgres.image | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "waiting for the titan schema (table titan.agents) ..."
+              until psql -h postgres -U {{ .Values.postgres.user }} \
+                  -d {{ .Values.postgres.database }} \
+                  -tAc 'select 1 from titan.agents limit 0' >/dev/null 2>&1; do
+                sleep 3
+              done
+              echo "titan schema is ready"
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "titan.secretName" . }}
+                  key: POSTGRES_PASSWORD
+      containers:
+        {{- if .Values.titanWorker.dind.enabled }}
+        - name: dind
+          image: {{ .Values.titanWorker.dind.image | quote }}
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          args:
+            - --host=tcp://0.0.0.0:2375
+            - --tls=false
+          volumeMounts:
+            - name: dind-storage
+              mountPath: /var/lib/docker
+            # Workspace at the SAME path as in the worker container — the
+            # ContainerExecutor bind-mounts workspace into image-stage
+            # containers by host path; the dind daemon resolves that path
+            # against its own filesystem, so the volume must be visible here.
+            - name: workspace
+              mountPath: /titan
+          readinessProbe:
+            exec:
+              command: ["docker", "info"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+        {{- end }}
+        - name: worker
+          image: "{{ .Values.titanWorker.image }}:{{ .Values.titanWorker.tag }}"
+          imagePullPolicy: {{ .Values.titanWorker.imagePullPolicy }}
+          env:
+            - name: TITAN_DB_URL
+              value: "jdbc:postgresql://postgres:5432/{{ .Values.postgres.database }}"
+            - name: TITAN_DB_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: TITAN_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "titan.secretName" . }}
+                  key: POSTGRES_PASSWORD
+            {{- if .Values.titanWorker.dind.enabled }}
+            - name: DOCKER_HOST
+              value: "tcp://localhost:2375"
+            {{- end }}
+            - name: TITAN_AGENT_ID
+              value: {{ .Values.titanWorker.agentId | quote }}
+            - name: TITAN_AGENT_NAME
+              value: {{ .Values.titanWorker.agentName | quote }}
+            - name: TITAN_QUEUE
+              value: {{ .Values.titanWorker.queue | quote }}
+            - name: TITAN_LABELS
+              value: {{ .Values.titanWorker.labels | quote }}
+            - name: TITAN_EXECUTORS
+              value: {{ .Values.titanWorker.executors | quote }}
+            - name: TITAN_REMOTE_FS
+              value: "/titan"
+            - name: TITAN_WORKSPACE
+              value: "/titan/workspace"
+            # Audit #10 / #936: TITAN_LIBRARIES_ROOT must be set explicitly in
+            # production — the worker refuses to boot without it unless
+            # TITAN_DEV_MODE=true (local rig only).
+            - name: TITAN_LIBRARIES_ROOT
+              value: "/titan/libraries"
+            - name: TITAN_MODE
+              value: "NORMAL"
+            # The worker resolves a pipeline's bound credentials into the build
+            # env, so it runs the SAME SecretsBackend as the server. db-envelope
+            # by default; values-infisical-e2e.yaml flips both to `infisical`.
+            - name: TITAN_SECRETS_BACKEND
+              value: {{ .Values.titanWorker.secretsBackend | default "db-envelope" | quote }}
+            {{- if eq (.Values.titanWorker.secretsBackend | default "db-envelope") "infisical" }}
+            # Infisical-sourced credentials (#1227). Token from titan-secrets;
+            # coordinates from titanWorker.infisical. The worker MUST carry these
+            # — it (not the server) resolves the bound secret into the build env.
+            {{- include "titan.infisicalEnv" (dict "secretName" (include "titan.secretName" .) "infisical" .Values.titanWorker.infisical) | nindent 12 }}
+            {{- end }}
+            - name: TITAN_POLL_MS
+              value: "1000"
+            - name: TITAN_HEARTBEAT_MS
+              value: "10000"
+            # The worker mirrors the server's artifact backend so it can write
+            # archived artifacts to the same place the server serves them.
+            {{- if eq .Values.titanServer.artifacts.backend "fs" }}
+            - name: TITAN_ARTIFACT_STORE
+              value: "fs"
+            - name: TITAN_ARTIFACT_ROOT
+              value: "/titan/artifacts"
+            {{- else if eq .Values.titanServer.artifacts.backend "s3" }}
+            - name: TITAN_ARTIFACT_STORE
+              value: "s3"
+            - name: TITAN_ARTIFACT_BUCKET
+              value: {{ .Values.titanServer.artifacts.s3.bucket | quote }}
+            - name: TITAN_ARTIFACT_ENDPOINT
+              value: {{ .Values.titanServer.artifacts.s3.endpoint | quote }}
+            - name: TITAN_ARTIFACT_REGION
+              value: {{ .Values.titanServer.artifacts.s3.region | quote }}
+            - name: TITAN_ARTIFACT_PATHSTYLE
+              value: {{ .Values.titanServer.artifacts.s3.pathStyle | quote }}
+            - name: TITAN_ARTIFACT_ACCESSKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "titan.secretName" . }}
+                  key: ARTIFACTS_ACCESS_KEY
+            - name: TITAN_ARTIFACT_SECRETKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "titan.secretName" . }}
+                  key: ARTIFACTS_SECRET_KEY
+            {{- end }}
+          resources:
+            {{- toYaml .Values.titanWorker.resources | nindent 12 }}
+          volumeMounts:
+            - name: workspace
+              mountPath: /titan
+      volumes:
+        {{- if .Values.titanWorker.dind.enabled }}
+        - name: dind-storage
+          emptyDir: {}
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.titanWorker.workspaceStorageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.titanWorker.workspaceSize | quote }}
+{{- end }}

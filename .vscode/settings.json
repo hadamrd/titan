@@ -1,0 +1,21 @@
+{
+    "java.jdt.ls.java.home": "/usr/lib/jvm/java-17-openjdk-amd64",
+    "java.configuration.updateBuildConfiguration": "automatic",
+    "java.import.maven.enabled": true,
+    "files.associations": {
+        "*.jelly": "xml"
+    },
+    "java.compile.nullAnalysis.mode": "automatic",
+    "cSpell.words": [
+        "antisamy",
+        "finalise",
+        "Navigo",
+        "reentrancy",
+        "Servlet",
+        "swapoff",
+        "swaptotal"
+    ],
+    "githubPullRequests.ignoredPullRequestBranches": [
+        "trunk"
+    ]
+}

@@ -1,0 +1,6 @@
+titan:
+  stages:
+    - stage: Unroutable
+      agent: nonexistent-label
+      steps:
+        - sh: 'echo hello'

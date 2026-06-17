@@ -1,0 +1,12 @@
+# Titan pipeline test fixture — a step with a retry: policy carrying a
+# retryableExitCodes allowlist (design/44 §3). A failure with an exit code NOT
+# in the list fails fast (no retry); a code in the list retries.
+titan:
+  stages:
+    - stage: Flaky
+      steps:
+        - sh: ./flaky.sh
+          retry:
+            maxAttempts: 3
+            backoff: { initial: 1s, multiplier: 2.0, max: 2s }
+            retryableExitCodes: [2, 75]

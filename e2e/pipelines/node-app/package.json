@@ -1,0 +1,11 @@
+{
+  "name": "titan-fixture-node-app",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Real-shaped Node service fixture for Titan PDL e2e (issue #1119).",
+  "scripts": {
+    "test": "node --test src/index.test.js",
+    "build": "node -e \"require('fs').mkdirSync('dist',{recursive:true});require('fs').copyFileSync('src/index.js','dist/index.js');console.log('built dist/index.js')\"",
+    "start": "node src/index.js"
+  }
+}

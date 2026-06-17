@@ -1,0 +1,32 @@
+# Go service — vet, build, test.
+#
+# A minimal, idiomatic Go CI pipeline. `vet` is a fast static-analysis gate
+# that fans into `build` and `test` once it passes.
+
+env:
+  CGO_ENABLED: "0"
+  GOFLAGS: "-mod=readonly"
+
+stages:
+  - stage: vet
+    steps:
+      - sh: go vet ./...
+
+  - stage: build
+    dependsOn: [vet]
+    steps:
+      - sh: go build ./...
+      # Build a release binary and archive it.
+      - sh: go build -o dist/app ./cmd/app
+      - archiveArtifacts:
+          artifacts: "dist/app"
+          fingerprint: true
+
+  - stage: test
+    dependsOn: [vet]
+    steps:
+      # gotestsum (or go-junit-report) converts `go test` output to JUnit XML.
+      - sh: |
+          go install gotest.tools/gotestsum@latest
+          gotestsum --junitfile reports/go-junit.xml -- -race -count=1 ./...
+      - junit: "reports/go-junit.xml"

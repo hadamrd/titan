@@ -1,0 +1,12 @@
+# GH #1093 — structured `when: { branch: <glob> }` runtime fixture.
+# The middle step is guarded on a feature-branch glob: it runs on a feature
+# branch and is SKIPPED on trunk. The surrounding steps always run, proving a
+# skipped step neither fails the build nor blocks the stage.
+stages:
+  - stage: build
+    steps:
+      - sh: echo building
+      - sh: echo deploy-preview
+        when:
+          branch: "feature/*"
+      - sh: echo done

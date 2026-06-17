@@ -1,0 +1,376 @@
+# titan chart — DEFAULT values.
+#
+# Holds SAFE, GENERIC defaults + documents every key. Copy
+# rig/k3s/rig-values.yaml.example to rig/k3s/rig-values.yaml, edit it, and run
+# `task deploy:k3s` (which runs `helm upgrade --install ... -f rig-values.yaml`).
+# Values in rig-values.yaml override what is here.
+#
+# The chart is the Kubernetes-shaped translation of the 5-container local rig
+# (rig/local/docker-compose.yml). Container images, env vars and ports mirror
+# that contract — keep the two in lock-step.
+#
+# DESIGN NOTE — typed config, no magic strings.
+# Each component has its own typed block (titanServer/titanUi/titanWorker/...).
+# No "type: ..." discriminator strings parsed at runtime; everything is plain
+# keyed structure.
+
+# ---------------------------------------------------------------------------
+# Deploy-time settings — read by deploy.sh, NOT consumed by any template.
+# (Helm ignores unknown values; these live here so one file holds everything.)
+# ---------------------------------------------------------------------------
+deploy:
+  namespace: titan        # namespace the rig installs into
+  kubeContext: titan-k3s  # kube context name (KUBE_CONTEXT env overrides)
+
+# ---------------------------------------------------------------------------
+# Image pull secrets — applied to every pod that pulls from a private registry.
+# Default points at `titan-registry-pull` (created by ops in the deploy
+# namespace; holds the htpasswd-derived basic-auth dockerconfigjson for
+# registry.test.example.com). Override or extend in rig-values.yaml.
+# ---------------------------------------------------------------------------
+imagePullSecrets:
+  - name: titan-registry-pull
+
+# ---------------------------------------------------------------------------
+# Postgres — Titan engine database. titan-server runs Flyway on boot.
+# ---------------------------------------------------------------------------
+postgres:
+  image: postgres:16-alpine
+  imagePullPolicy: IfNotPresent
+  database: titan
+  user: titan
+  # DEV-ONLY default. For real rigs put the real password under
+  # secrets.postgresPassword in rig-values.yaml (or wire an ExternalSecret).
+  storage: 5Gi
+  storageClassName: ""    # empty = cluster default StorageClass
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+# ---------------------------------------------------------------------------
+# Keycloak — OIDC issuer. Pre-seeds the `titan-dev` realm via realm-import
+# (mirrors the local rig). For production, point titanServer.oidc at an
+# external issuer and set keycloak.enabled=false.
+# ---------------------------------------------------------------------------
+keycloak:
+  enabled: true
+  image: quay.io/keycloak/keycloak:25.0
+  imagePullPolicy: IfNotPresent
+  # The realm import is a configmap; for a real rig you bake the realm.json
+  # into your values (keycloak.realmJson) or disable keycloak.
+  realmJson: ""           # raw JSON; empty = no realm import (admin creates by hand)
+  # admin credentials — DEV defaults. Override in rig-values.yaml.
+  adminUser: admin
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: 250m
+      memory: 768Mi
+    limits:
+      cpu: "1"
+      memory: 1536Mi
+
+# ---------------------------------------------------------------------------
+# titan-server — Quarkus HTTP API + Titan engine.
+# ---------------------------------------------------------------------------
+titanServer:
+  image: registry.test.example.com/titan-server
+  # Default to the head-of-trunk floating tag published by
+  # `task ci:publish-trunk` (dev/release/publish-trunk.sh). With
+  # imagePullPolicy: Always + a `kubectl rollout restart` post-helm
+  # (deploy.sh), a redeploy actually rolls pods when only the digest behind
+  # `latest-trunk` changed. Override to `trunk-<sha>` (or a release tag like
+  # `0.1.0`) in rig-values.yaml for a reproducible pin. See issue #921.
+  tag: "latest-trunk"
+  # Public-facing URL of titan-server — required in %prod boot (#935/#996).
+  # Override per-rig in rig-values.yaml; default left blank so a misconfigured
+  # rig fails fast instead of silently using localhost.
+  publicUrl: ""
+  imagePullPolicy: Always
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: 500m
+      memory: 768Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+  # OIDC wiring — typed block, no string parsing. Default points at the in-
+  # cluster keycloak service; override `oidc.issuerUrl` to use an external IDP.
+  oidc:
+    # The issuer Quarkus discovers OIDC config from (used by titan-server).
+    # In-cluster keycloak: http://keycloak:8080/realms/<realm>
+    issuerUrl: "http://keycloak:8080/realms/titan-dev"
+    # The issuer URL the BROWSER sees and bakes into `iss` of the JWT. Must
+    # match what titan-server's QUARKUS_OIDC_TOKEN_ISSUER expects.
+    publicIssuerUrl: "https://auth.example.com/realms/titan-dev"
+    clientId: titan-server
+    audience: titan-server
+
+  # Pulsar SCM convergence — typed block. Rendered as the PULSAR_SCAN_ENABLED
+  # and PULSAR_NODE_BASE_URL env vars on titan-server (Quarkus config
+  # pulsar.scan.enabled / pulsar.node-base-url). These were previously set
+  # imperatively via `kubectl set env` and got wiped on every helm re-apply,
+  # silently breaking the live Pulsar→Titan convergence (scanner off /
+  # check-back posted to the unreachable default http://pulsar:8080).
+  pulsar:
+    # Enables the @Scheduled Pulsar poll scanner. Rendered as a quoted string.
+    scanEnabled: true
+    # Pulsar node base URL the PulsarCheckReporter posts the `build` CI check
+    # to. Must be reachable from the k3s cluster (the default
+    # http://pulsar:8080 is not).
+    nodeBaseUrl: "https://pulsar.test.example.com"
+
+  # Credential envelope KEK — base64 AES-256 key. Set under
+  # secrets.titanKek in rig-values.yaml.
+  #
+  # Which SecretsBackend the engine resolves pipeline `credentials:` through:
+  #   db-envelope  (default) — secrets created via POST /api/v1/credentials,
+  #                            stored AES-envelope-encrypted in titan.
+  #   infisical              — secrets live in Infisical, read-only via
+  #                            InfisicalSecretsBackend (#1227). Opt-in for the
+  #                            spec-46 e2e via values-infisical-e2e.yaml; needs
+  #                            the infisical:* coordinates below + an
+  #                            INFISICAL_TOKEN key in titan-secrets.
+  secretsBackend: "db-envelope"
+
+  # Infisical coordinates — consumed ONLY when secretsBackend=infisical. The
+  # token itself is NEVER in this file: it comes from titan-secrets/INFISICAL_TOKEN
+  # (set via secrets.infisicalToken or an ExternalSecret). Mirrors the env
+  # contract InfisicalClient reads (INFISICAL_PROJECT_ID / _ENV / _SECRET_PATH /
+  # _API_URL).
+  infisical:
+    projectId: ""                       # INFISICAL_PROJECT_ID (workspace id)
+    env: "prod"                         # INFISICAL_ENV slug — `staging` for the e2e
+    secretPath: "/"                     # INFISICAL_SECRET_PATH
+    apiUrl: "https://app.infisical.com" # INFISICAL_API_URL
+
+  # Artifact backend. Two typed branches — `fs` writes to a PVC, `s3` writes
+  # to an S3-compatible bucket. Pick one.
+  artifacts:
+    backend: fs           # fs | s3
+    fs:
+      # Storage size for the artifact PVC when backend=fs.
+      storage: 10Gi
+      storageClassName: ""
+      mountPath: /var/titan/artifacts
+    s3:
+      bucket: ""
+      endpoint: ""
+      region: auto
+      pathStyle: "true"
+      # Access/secret keys come from the k8s Secret created by the chart
+      # (secrets.artifactsAccessKey / secrets.artifactsSecretKey in rig-
+      # values.yaml), NOT from this file.
+
+# ---------------------------------------------------------------------------
+# titan-ui — React SPA served by nginx. The image is built with build-time
+# Vite env vars baked into the bundle; the chart cannot change them at deploy
+# time, only point at the image you built.
+# ---------------------------------------------------------------------------
+titanUi:
+  image: registry.test.example.com/titan-ui
+  # See titanServer.tag for the floating-tag rationale (#921).
+  tag: "latest-trunk"
+  imagePullPolicy: Always
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
+
+# ---------------------------------------------------------------------------
+# titan-worker — pull-based execution agent. No externally-exposed port.
+# ---------------------------------------------------------------------------
+titanWorker:
+  enabled: true
+  image: registry.test.example.com/titan-worker
+  # See titanServer.tag for the floating-tag rationale (#921).
+  tag: "latest-trunk"
+  imagePullPolicy: Always
+  replicas: 1
+  agentId: k3s-worker-01
+  agentName: "Titan Worker (k3s-01)"
+  queue: k3s-worker-01
+  labels: "k3s,linux,amd64"
+  executors: "2"
+  workspaceSize: 20Gi
+  workspaceStorageClassName: ""
+  # The worker resolves a pipeline's bound `credentials:` into the build env, so
+  # it runs the SAME SecretsBackend as the server. Keep this in lock-step with
+  # titanServer.secretsBackend (the values-infisical-e2e.yaml overlay flips both).
+  #   db-envelope (default) | infisical
+  secretsBackend: "db-envelope"
+  # Infisical coordinates for the worker — consumed ONLY when
+  # secretsBackend=infisical. INFISICAL_TOKEN is sourced from
+  # titan-secrets/INFISICAL_TOKEN (never from this file), same as the server.
+  infisical:
+    projectId: ""
+    env: "prod"
+    secretPath: "/"
+    apiUrl: "https://app.infisical.com"
+  resources:
+    requests:
+      cpu: 500m
+      memory: 768Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+  # Docker-in-Docker sidecar — k3s runs containerd, not Docker, so the worker
+  # carries its own daemon for containerised `image:` pipeline stages.
+  dind:
+    enabled: true
+    image: docker:27-dind
+
+# ---------------------------------------------------------------------------
+# Ingress — a SINGLE ingress fronts UI + server + keycloak on one host.
+#
+#   /              → titan-ui     (SPA; nginx already proxies /api + /q
+#                                  inside the UI pod to titan-server)
+#   /realms/       → keycloak     (OIDC issuer routes)
+#   /resources/    → keycloak     (Keycloak static assets — login page)
+#   /admin/        → keycloak     (Keycloak admin console)
+#
+# `/api` and `/q` are NOT routed by this Ingress: they hit the UI's nginx
+# proxy first (same-origin), which forwards to titan-server inside the
+# cluster. This keeps the browser on one origin, which the SPA's CSP +
+# OIDC redirect-uri assume.
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: nginx
+  clusterIssuer: letsencrypt-prod
+  host: titan.example.com
+  tls:
+    enabled: true
+    secretName: titan-tls
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 50m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+
+# ---------------------------------------------------------------------------
+# Monitoring — Prometheus scrape wiring for titan-server /q/metrics.
+#
+# Two independent toggles so the chart works on any cluster shape:
+#
+#   scrapeAnnotations.enabled  — vanilla Prometheus path. Stamps the
+#       conventional prometheus.io/* annotations on the titan-server Service
+#       AND Pod template so either `role: service` or `role: pod`
+#       kubernetes_sd_configs pick it up. Safe to leave on always — the
+#       annotations are inert without a scraper that honours them.
+#
+#   serviceMonitor.enabled     — kube-prometheus-stack path. Requires the
+#       monitoring.coreos.com/v1 ServiceMonitor CRD to be installed on the
+#       cluster (Prometheus Operator). Leave OFF unless that CRD exists, or
+#       `helm install` will fail with "no matches for kind ServiceMonitor".
+#
+# Verify after deploy (port-forward your Prometheus then query):
+#   kubectl -n monitoring port-forward svc/prometheus 9090:9090
+#   open http://localhost:9090/graph?g0.expr=titan_builds_started_total
+# ---------------------------------------------------------------------------
+monitoring:
+  scrapeAnnotations:
+    enabled: true
+  serviceMonitor:
+    enabled: false
+    interval: "30s"
+    scrapeTimeout: "10s"
+    # Extra labels for Prometheus Operator's serviceMonitorSelector
+    # (e.g. `release: kube-prometheus-stack`). Add what your stack expects.
+    labels: {}
+  grafanaDashboard:
+    # Starter dashboard for the titan_* series exposed at /q/metrics.
+    # Rendered as a ConfigMap labelled `grafana_dashboard: "1"` so the
+    # kube-prometheus-stack Grafana sidecar auto-discovers it.
+    # requires kube-prometheus-stack Operator (same family as serviceMonitor).
+    enabled: false
+    # Grafana folder annotation (sidecar reads `grafana_folder`).
+    folder: "Titan"
+    # Extra labels to satisfy your sidecar's dashboardLabelSelector if it
+    # filters beyond `grafana_dashboard=1`.
+    labels: {}
+
+# ---------------------------------------------------------------------------
+# Secrets — the chart materialises ONE k8s Secret (`titan-secrets`) from this
+# block. Every other manifest references it via secretKeyRef. Put REAL
+# secrets in rig-values.yaml (which is gitignored), NEVER in this file or in
+# rig-values.yaml.example.
+#
+# If you sync secrets from Infisical/Vault/etc., set secrets.create=false and
+# point your ExternalSecret at the same key names.
+# ---------------------------------------------------------------------------
+secrets:
+  # Create the plaintext `titan-secrets` Secret from the literals below. This
+  # is the DEFAULT (back-compat). MUTUALLY EXCLUSIVE with externalSecret.enabled
+  # — a k8s Secret can only have one owner, so enabling externalSecret auto-
+  # suppresses this plaintext Secret (see `titan.plaintextSecretEnabled` in
+  # _helpers.tpl — silent suppression, not a render-time fail).
+  create: true
+  name: titan-secrets
+  # Postgres user `titan` password.
+  #
+  # WARNING — postgres only honours POSTGRES_PASSWORD on the FIRST init of an
+  # empty data dir. On a PVC-backed StatefulSet the password is frozen at first
+  # boot; changing this literal afterwards drifts the Secret away from the live
+  # DB and titan-server crash-loops with `password authentication failed`
+  # (#1160). On the k3s rig prefer externalSecret.enabled=true so postgres init
+  # and titan-server read the SAME, stable Infisical value across helm upgrades.
+  postgresPassword: "CHANGE-ME-postgres-password"
+  # Credential envelope KEK (base64 AES-256). openssl rand -base64 32
+  titanKek: "CHANGE-ME-base64-aes256-key"
+  # Keycloak admin password (only used when keycloak.enabled=true).
+  keycloakAdminPassword: "CHANGE-ME-keycloak-admin"
+  # S3 artifact backend creds — only consumed when titanServer.artifacts.backend=s3.
+  artifactsAccessKey: ""
+  artifactsSecretKey: ""
+  # Infisical machine-identity / service token — rendered into
+  # titan-secrets/INFISICAL_TOKEN ONLY when titanServer.secretsBackend or
+  # titanWorker.secretsBackend is `infisical`. Leave EMPTY here and in
+  # rig-values.yaml.example: supply the real token out-of-band at deploy time
+  # (`--set secrets.infisicalToken=$INFISICAL_TOKEN`) or via the ExternalSecret,
+  # so the token is never committed to git. The spec-46 overlay uses the
+  # `staging`-scoped svc token.
+  infisicalToken: ""
+
+  # --- ExternalSecret (Infisical → titan-secrets) ---------------------------
+  # When enabled, an ExternalSecret (External-Secrets Operator) becomes the
+  # SOLE owner of `titan-secrets` and syncs POSTGRES_PASSWORD from Infisical
+  # (mirrors the titan-registry chart's REGISTRY_HTPASSWD pattern). This keeps
+  # the postgres password STABLE across `helm upgrade` — ESO re-syncs the same
+  # Infisical value, it is never regenerated and never a CHANGE-ME placeholder
+  # (#1160). The remaining keys (TITAN_KEK, KEYCLOAK_ADMIN_PASSWORD, S3 creds)
+  # stay on the existing values path: they are injected as literals via the
+  # ExternalSecret's target template, NOT re-sourced from Infisical.
+  #
+  # Requires: ESO installed on the cluster + a SecretStore/ClusterSecretStore
+  # named `infisical` + the remoteKey below present in the matching Infisical
+  # env (staging). Default OFF so existing rigs and `helm lint` keep working.
+  externalSecret:
+    enabled: false
+    refreshInterval: "1h"
+    # Must reference a SecretStore/ClusterSecretStore that already exists on
+    # the cluster. The Adaptiq cluster runs `infisical` (ClusterSecretStore),
+    # same store titan-registry uses.
+    secretStore:
+      kind: ClusterSecretStore
+      name: infisical
+    # The Infisical key (staging env) holding the postgres `titan` user
+    # password. Must exist BEFORE first deploy — see rig-values.yaml.example.
+    remoteKey: POSTGRES_PASSWORD

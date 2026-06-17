@@ -1,0 +1,18 @@
+{
+  "name": "release-flow-ui-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Playwright UI smoke + visual-regression tests for the release-flow dashboard, run against the live test rig (titan.test.example.com) or any --base-url passed at the CLI.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "test:rig": "RF_BASE=https://titan.test.example.com playwright test",
+    "test:report": "playwright show-report",
+    "install-browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.10.0"
+  }
+}

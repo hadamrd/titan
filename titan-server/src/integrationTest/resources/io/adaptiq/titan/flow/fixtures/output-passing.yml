@@ -1,0 +1,13 @@
+# Titan pipeline test fixture — output passing (design/29 §6, Chunk 6E).
+# Build publishes an output; Deploy consumes it via a ${{ … }} reference that
+# the orchestrator resolves at dispatch time.
+titan:
+  stages:
+    - stage: Build
+      steps:
+        - sh: make build
+
+    - stage: Deploy
+      dependsOn: [Build]
+      steps:
+        - sh: "deploy --version ${{ steps['Build'].outputs.version }}"

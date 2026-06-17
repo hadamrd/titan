@@ -1,0 +1,47 @@
+# Adversarial golden-path: stage 2 of 3 fails — issue #1116 / EPIC #831.
+#
+# Customer story: "My first real pipeline will fail somewhere. If Titan can't
+# tell me where it failed and why, I'm back on my old CI by lunch."
+#
+# Asserts:
+#   - overall build verdict FAILURE (the PR check goes red)
+#   - the failing stage (`test`) is FAILED and surfaces the error line in the
+#     captured log — `assertLog` proves the log carries the failing command's
+#     stderr verbatim so build-detail can render + auto-scroll to it
+#   - the downstream `deploy` stage is SKIPPED (not PENDING, not FAILED) —
+#     blockOnFailure is the default, and PENDING here would mean the
+#     orchestrator never decided, which is the bug class this fixture guards
+#
+# Pairs with failure-block.e2e.yaml (which only had two stages) — this
+# fixture catches the regression where the middle of a chain fails and the
+# orchestrator forgets to mark the tail SKIPPED (design/43 §4).
+name: failing-step — middle stage fails, downstream SKIPPED not PENDING
+pipeline: |
+  agent: titan-worker-1
+  failurePolicy: blockOnFailure
+  stages:
+    - stage: build
+      steps:
+        - sh: echo build-ok
+    - stage: test
+      dependsOn: [build]
+      steps:
+        - sh: |
+            echo "running tests"
+            echo "ERROR: assertion failed at line 42" >&2
+            exit 1
+    - stage: deploy
+      dependsOn: [test]
+      steps:
+        - sh: echo should-never-run
+expect:
+  build: FAILURE
+  nodes:
+    build: { status: SUCCESS }
+    test: { status: FAILED }
+    deploy: { status: SKIPPED }
+  logContains:
+    - build-ok
+    - 'ERROR: assertion failed at line 42'
+  logExcludes:
+    - should-never-run

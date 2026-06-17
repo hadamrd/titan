@@ -1,0 +1,39 @@
+/* YAML syntax highlighting for highlight.js — calm v3 palette built from
+   existing oklch tokens (no rainbow VSCode theme). Only the YAML token
+   classes that hljs/languages/yaml emits are styled. */
+
+.hljs {
+  color: var(--fg);
+  background: transparent;
+}
+
+/* keys, anchors */
+.hljs-attr,
+.hljs-attribute {
+  color: var(--info);
+}
+
+/* string scalars (quoted + unquoted) */
+.hljs-string {
+  color: var(--accent-2);
+}
+
+/* numbers, booleans, null literals */
+.hljs-number,
+.hljs-literal {
+  color: var(--warn);
+}
+
+/* YAML "- " bullets, anchors/aliases, type tags */
+.hljs-bullet,
+.hljs-symbol,
+.hljs-type,
+.hljs-meta {
+  color: var(--fg-muted);
+}
+
+/* comments */
+.hljs-comment {
+  color: var(--fg-dim);
+  font-style: italic;
+}

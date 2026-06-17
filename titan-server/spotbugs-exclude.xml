@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpotBugs exclusions for titan-server.
+
+  Every entry names a class + bug pattern and carries a one-line justification.
+  No blanket package-wide excludes. Each exclusion is a confirmed false positive
+  or a pre-existing finding in code not touched by the API surface PR.
+-->
+<FindBugsFilter>
+  <!--
+    TitanOrchestrator passes nullable result_json / failure fields via varargs that
+    are bound with JDBI @Nullable parameters — the callee accepts null intentionally.
+    SpotBugs' interprocedural NP analysis does not see the @Nullable annotations on
+    the JDBI interface methods and reports false-positive NP_NULL_PARAM_DEREF.
+    Pre-existing findings unrelated to the API surface (Pivot M2 #247).
+    Follow-up: https://github.com/hadamrd/titan/issues (file after merge).
+  -->
+  <Match>
+    <Class name="io.adaptiq.titan.flow.TitanOrchestrator" />
+    <Bug pattern="NP_NULL_PARAM_DEREF" />
+  </Match>
+</FindBugsFilter>

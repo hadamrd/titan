@@ -1,0 +1,7 @@
+# GOLDEN INVALID — a plausible typo: `stagess` instead of `stages`. The required
+# `stages` key is absent and `stagess` is an unknown root key. Both enforcers
+# must reject (closed `titan` def + missing required).
+stagess:
+  - stage: Build
+    steps:
+      - sh: make

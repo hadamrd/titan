@@ -1,0 +1,30 @@
+# Linear pipeline — the happy path (design/43 §4).
+# Three stages in a dependency chain; each runs one shell step; all green.
+name: linear pipeline — happy path
+pipeline: |
+  agent: titan-worker-1
+  stages:
+    - stage: build
+      steps:
+        - sh: echo building
+    - stage: test
+      dependsOn: [build]
+      steps:
+        - sh: echo testing
+    - stage: deploy
+      dependsOn: [test]
+      steps:
+        - sh: echo deploying
+expect:
+  build: SUCCESS
+  nodes:
+    build: { status: SUCCESS }
+    test: { status: SUCCESS }
+    deploy: { status: SUCCESS }
+    build-s0: { status: SUCCESS }
+    test-s0: { status: SUCCESS }
+    deploy-s0: { status: SUCCESS }
+  logContains:
+    - building
+    - testing
+    - deploying

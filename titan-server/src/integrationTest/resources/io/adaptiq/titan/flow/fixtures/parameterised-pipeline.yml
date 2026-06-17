@@ -1,0 +1,31 @@
+# Titan pipeline test fixture — declared build parameters (design/29 §5, Chunk 6E).
+# A build supplies values; the bake applies defaults, validates, and resolves them into the
+# effective `params` that when: and ${{ params.* }} read.
+titan:
+  parameters:
+    - name: deployEnv
+      type: choice
+      choices: [dev, staging, prod]
+      default: dev
+    - name: runSmoke
+      type: boolean
+      default: true
+    - name: branch
+      type: string
+      required: true
+
+  stages:
+    - stage: Build
+      steps:
+        - sh: make build
+
+    - stage: Smoke
+      when: "params.runSmoke == true"
+      dependsOn: [Build]
+      steps:
+        - sh: make smoke
+
+    - stage: Deploy
+      dependsOn: [Build]
+      steps:
+        - sh: "deploy --env ${{ params.deployEnv }} --branch ${{ params.branch }}"

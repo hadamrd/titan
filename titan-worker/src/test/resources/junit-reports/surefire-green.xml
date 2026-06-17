@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- REAL Maven Surefire 3.0.2 output, captured from an actual `mvn test` run of an
+     all-passing class. The machine-specific <properties> block (absolute paths,
+     full classpath, env) was the only thing removed; the <testcase> elements are
+     verbatim tool output. tests=3, all passed. -->
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" version="3.0.2" name="io.adaptiq.titan.worker.step.builtin.JunitFixtureGenGreen" time="0.08" tests="3" errors="0" skipped="0" failures="0">
+  <testcase name="firstPasses" classname="io.adaptiq.titan.worker.step.builtin.JunitFixtureGenGreen" time="0.037"/>
+  <testcase name="secondPasses" classname="io.adaptiq.titan.worker.step.builtin.JunitFixtureGenGreen" time="0.002"/>
+  <testcase name="thirdPasses" classname="io.adaptiq.titan.worker.step.builtin.JunitFixtureGenGreen" time="0.003"/>
+</testsuite>

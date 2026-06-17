@@ -1,0 +1,131 @@
+# rig-values.yaml — site-specific overrides for `task deploy:k3s`.
+#
+# Copy this file to rig/k3s/rig-values.yaml (gitignored), edit, then deploy:
+#
+#   cp rig/k3s/rig-values.yaml.example rig/k3s/rig-values.yaml
+#   task deploy:k3s
+#
+# Every value here is a PLACEHOLDER — replace with real values for your rig.
+# NEVER commit real secrets. If you sync secrets from Infisical/Vault, set
+# secrets.create=false below and create the `titan-secrets` Secret yourself
+# (via ExternalSecret etc.) with the same key names the chart references.
+
+deploy:
+  namespace: titan
+  kubeContext: titan-k3s
+
+# ── Postgres ────────────────────────────────────────────────────────────────
+postgres:
+  storage: 10Gi
+  storageClassName: ""   # cluster default
+
+# ── Keycloak ────────────────────────────────────────────────────────────────
+keycloak:
+  enabled: true
+  # Inline realm JSON for first boot. Paste the contents of
+  # rig/local/keycloak/realm-titan-dev.json (or your own) as a literal block.
+  realmJson: ""
+
+# ── titan-server ────────────────────────────────────────────────────────────
+# Image tag policy (#921):
+#   - Chart default = "latest-trunk" (published by `task ci:publish-trunk`,
+#     re-pulled on every redeploy via imagePullPolicy: Always + a
+#     `kubectl rollout restart` baked into deploy.sh). Good for a dogfood rig
+#     that should always run head-of-trunk.
+#   - Override to a `trunk-<sha>` tag (also published by ci:publish-trunk) or
+#     a release tag like "0.1.0" for reproducible rollouts in a real rig.
+titanServer:
+  image: ghcr.io/hadamrd/titan-server
+  # tag: "latest-trunk"   # chart default — head-of-trunk dogfood
+  # tag: "trunk-abc1234"  # reproducible pin — see dev/release/publish-trunk.sh
+  oidc:
+    issuerUrl: "http://keycloak:8080/realms/titan-dev"
+    publicIssuerUrl: "https://titan.example.com/realms/titan-dev"
+    clientId: titan-server
+    audience: titan-server
+  # Pulsar SCM convergence — rendered as PULSAR_SCAN_ENABLED /
+  # PULSAR_NODE_BASE_URL on titan-server. scanEnabled turns on the @Scheduled
+  # Pulsar poll scanner; nodeBaseUrl is where the `build` CI check is posted
+  # back (must be reachable from the cluster — the default http://pulsar:8080
+  # is not). Chart-sourced so a `helm upgrade` re-apply keeps them.
+  pulsar:
+    scanEnabled: true
+    nodeBaseUrl: "https://pulsar.test.example.com"
+  artifacts:
+    backend: fs           # fs | s3
+    fs:
+      storage: 20Gi
+
+# ── titan-ui ────────────────────────────────────────────────────────────────
+titanUi:
+  image: ghcr.io/hadamrd/titan-ui
+  # tag: "latest-trunk"   # chart default — see titanServer.tag for policy
+
+# ── titan-worker ────────────────────────────────────────────────────────────
+# Pull-based — workers poll task_queue independently, and Postgres-side
+# `SELECT … FOR UPDATE SKIP LOCKED` (TaskQueueDao.selectClaimable*Id)
+# guarantees each task is claimed by exactly one replica. The
+# MultiWorkerClaimIsolationIT pins this invariant; if you change the claim
+# query, that IT MUST still pass.
+titanWorker:
+  enabled: true
+  image: ghcr.io/hadamrd/titan-worker
+  # tag: "latest-trunk"   # chart default — see titanServer.tag for policy
+  # Horizontal scale — the public demo (docs/ops/runbooks/k3s-public-demo.md)
+  # ships with 3 to prove multi-worker fan-out. Bump for heavier load.
+  replicas: 3
+  executors: "2"
+  workspaceSize: 20Gi
+
+# ── Ingress (cert-manager + ingress-nginx) ──────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  clusterIssuer: letsencrypt-prod
+  host: titan.example.com
+  tls:
+    enabled: true
+    secretName: titan-tls
+
+# ── Secrets — PLACEHOLDER VALUES. REPLACE BEFORE DEPLOY. ────────────────────
+# Two mutually-exclusive ways to own the `titan-secrets` Secret:
+#
+#   1. Plaintext (secrets.create=true, the block below) — chart literals. Fine
+#      for a throwaway rig, but the postgres password is FROZEN at the
+#      StatefulSet's first init: editing postgresPassword later drifts the
+#      Secret away from the live DB and titan-server crash-loops with
+#      `password authentication failed` on the next `helm upgrade` (#1160).
+#
+#   2. ExternalSecret (secrets.externalSecret.enabled=true) — RECOMMENDED for
+#      the k3s rig. The External-Secrets Operator becomes the SOLE owner of
+#      `titan-secrets` and syncs POSTGRES_PASSWORD from Infisical, STABLE across
+#      `helm upgrade` (no regeneration, no CHANGE-ME placeholder). Enabling it
+#      auto-suppresses the plaintext Secret — you do NOT also set create=false.
+#
+# Before first deploy, ensure these keys exist in the Infisical `staging` env
+# (the same project/env titan-registry's REGISTRY_HTPASSWD lives in):
+#   - POSTGRES_PASSWORD   the postgres `titan` user password. Synced into
+#                         titan-secrets/POSTGRES_PASSWORD by the ExternalSecret
+#                         when secrets.externalSecret.enabled=true (#1160).
+#   - REGISTRY_HTPASSWD   (existing) htpasswd body for the in-cluster registry.
+secrets:
+  create: true
+  name: titan-secrets
+  postgresPassword: "REPLACE-with-openssl-rand-hex-16"
+  titanKek: "REPLACE-with-openssl-rand-base64-32"
+  keycloakAdminPassword: "REPLACE-strong-password"
+  # Only when titanServer.artifacts.backend=s3:
+  artifactsAccessKey: ""
+  artifactsSecretKey: ""
+  # Pin the postgres password from Infisical instead of the literal above.
+  # When enabled, POSTGRES_PASSWORD is sourced from Infisical (remoteKey) and
+  # the plaintext Secret is auto-suppressed; TITAN_KEK + KEYCLOAK_ADMIN_PASSWORD
+  # stay on the literals above (NOT re-sourced from Infisical). Requires ESO +
+  # a ClusterSecretStore named `infisical` on the cluster.
+  externalSecret:
+    enabled: false
+    refreshInterval: "1h"
+    secretStore:
+      kind: ClusterSecretStore
+      name: infisical
+    remoteKey: POSTGRES_PASSWORD

@@ -1,0 +1,122 @@
+{{- /*
+Keycloak — OIDC issuer. Mirrors rig/local/docker-compose.yml (start-dev,
+optional realm import). Use ONLY for non-production rigs — for production
+point titanServer.oidc at an external IDP and set keycloak.enabled=false.
+*/ -}}
+{{- if .Values.keycloak.enabled }}
+{{- if .Values.keycloak.realmJson }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm
+  labels:
+    {{- include "titan.labels" . | nindent 4 }}
+data:
+  realm.json: |-
+{{ .Values.keycloak.realmJson | indent 4 }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  labels:
+    {{- include "titan.labels" . | nindent 4 }}
+    app: keycloak
+spec:
+  type: {{ .Values.keycloak.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.keycloak.service.port }}
+      targetPort: 8080
+  selector:
+    app: keycloak
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  labels:
+    {{- include "titan.labels" . | nindent 4 }}
+    app: keycloak
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        {{- include "titan.selectorLabels" . | nindent 8 }}
+        app: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          image: {{ .Values.keycloak.image | quote }}
+          imagePullPolicy: {{ .Values.keycloak.imagePullPolicy }}
+          args:
+            - start-dev
+            {{- if .Values.keycloak.realmJson }}
+            - --import-realm
+            {{- end }}
+            - --http-port=8080
+          env:
+            - name: KEYCLOAK_ADMIN
+              value: {{ .Values.keycloak.adminUser | quote }}
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "titan.secretName" . }}
+                  key: KEYCLOAK_ADMIN_PASSWORD
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            # The hostname the browser uses — must match the `oidc.authority`
+            # host served by titan-server's GET /api/v1/system/ui-config (the
+            # SPA fetches it at boot post-#898). Behind the Ingress this is
+            # the ingress.host on https.
+            {{- if .Values.ingress.enabled }}
+            - name: KC_HOSTNAME_URL
+              value: {{ printf "https://%s" .Values.ingress.host | quote }}
+            {{- end }}
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_HOSTNAME_STRICT_BACKCHANNEL
+              value: "false"
+            - name: KC_PROXY
+              value: edge
+            - name: KC_HTTP_RELATIVE_PATH
+              value: "/"
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            {{- toYaml .Values.keycloak.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /realms/master/.well-known/openid-configuration
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /realms/master/.well-known/openid-configuration
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 6
+          {{- if .Values.keycloak.realmJson }}
+          volumeMounts:
+            - name: realm-import
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+          {{- end }}
+      {{- if .Values.keycloak.realmJson }}
+      volumes:
+        - name: realm-import
+          configMap:
+            name: keycloak-realm
+      {{- end }}
+{{- end }}

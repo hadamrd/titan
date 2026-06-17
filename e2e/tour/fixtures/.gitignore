@@ -1,0 +1,3 @@
+# Fixture PNGs are committed — integration tests run against them.
+# Re-allow PNGs that the root *.png rule otherwise filters out.
+!screenshots/*.png

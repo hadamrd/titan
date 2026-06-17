@@ -1,0 +1,18 @@
+apiVersion: v2
+name: titan-registry
+description: |
+  In-cluster OCI registry for the Titan k3s rig (issue #958).
+
+  Deploys CNCF distribution (`registry:2.8`) behind nginx-ingress + cert-manager.
+  Basic-auth credentials (htpasswd) are synced from Infisical via an
+  ExternalSecret — the operator the cluster already runs for the `titan` and
+  `adaptiq` namespaces.
+
+  This chart is INFRASTRUCTURE BOOTSTRAP, not a Titan product component — it
+  lives in its OWN namespace and its OWN release. It must be deployed BEFORE
+  any rig that wants to pull images from `registry.test.example.com`.
+type: application
+version: 0.1.0
+appVersion: "2.8.3"
+maintainers:
+  - name: Titan contributors

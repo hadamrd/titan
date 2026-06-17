@@ -1,0 +1,812 @@
+# Titan — the single entry point for build / test / deploy / dev setup.
+#
+#   task              list every task
+#   task setup        one-time dev environment bootstrap
+#   task gradle:build build all Gradle product modules
+#   task dev:titan    bring up the Titan-only local rig (postgres + keycloak + server + ui + worker)
+#   task deploy:k3s   build + deploy to the public k3s rig
+#
+# Runs from WSL/Linux, plain bash. Build is self-contained via the Gradle
+# wrapper (./gradlew) — no system gradle/maven needed. Requires: task, a JDK
+# 21, docker, kubectl. `task setup` provisions the JDK + git hooks.
+version: '3'
+
+vars:
+  GRADLE: ./gradlew
+  WORKER_JAR: titan-worker/build/libs/titan-worker.jar
+  # The k3s rig is reached via a named kube context merged into ~/.kube/config
+  # by `task k3s:kubeconfig` — no KUBECONFIG env juggling.
+  KUBE_CONTEXT: titan-k3s
+
+tasks:
+  default:
+    cmds: [task --list]
+    silent: true
+
+  # ── Gradle build (the only build system now) ──────────────────────────────
+
+  gradle:build:
+    desc: "Build all Gradle product modules (assembleable artifacts; tests run via gradle:check / gradle:integrationTest per best-practices row 8)"
+    cmds:
+      - "{{.GRADLE}} assemble"
+
+  gradle:check:
+    desc: "Run Gradle unit tests + Spotless + SpotBugs + JaCoCo on all product modules"
+    cmds:
+      - "{{.GRADLE}} check"
+
+  gradle:integrationTest:
+    desc: "Run Testcontainers integration tests on all product modules (needs Docker)"
+    cmds:
+      - "{{.GRADLE}} integrationTest"
+
+  gradle:publishToMavenLocal:
+    desc: "Publish all Gradle jars to ~/.m2/repository (kept for downstream consumers)"
+    cmds:
+      - "{{.GRADLE}} publishToMavenLocal"
+
+  verify:
+    desc: "Full verify — Gradle product modules (build + check) + titan-ui (type-check + vitest + vite build) + e2e type-check (#1276) + cross-package page-size parity (#1200)"
+    cmds:
+      - task: gradle:check
+      - task: verify:ui
+      - task: verify:e2e
+      - task: check:builds-limit-sync
+
+  ci:verify:
+    desc: "CI gate — full suite that MUST pass on every PR. gradle check + integrationTest + Quarkus app-build (ARC/DI + config augmentation, #1153/#1156) + dup-migration scan (#1157) + ui verify + routeTree freshness (#1155). See docs/ops/runbooks/ci-on-pr.md (closes #381, #1159)."
+    cmds:
+      - task: gradle:check
+      - task: gradle:integrationTest
+      # Build the DEPLOYABLE artifact, not just compile+unit-test. quarkusBuild
+      # runs ARC/DI wiring + config-injection validation + build-time
+      # augmentation — the breaks (#1153 DI-scope, #1156 empty-default config)
+      # that compile green, pass unit tests, and only explode at rig boot (#1159).
+      - task: ci:quarkus-build
+      # Flyway duplicate-version scan — a second V<N>__*.sql is a boot-time
+      # crash Flyway only surfaces at startup (#1157). Catch it pre-merge.
+      - task: verify:migrations
+      - task: verify:ui
+      # e2e specs run through esbuild at runtime (types stripped), so Playwright
+      # green ≠ type-honest. tsc --noEmit is the ONLY thing keeping the e2e
+      # workspace type-clean; wire it here so the gate can't silently rot (#1276).
+      - task: verify:e2e
+      # routeTree.gen.ts must match what `pnpm build` (run by verify:ui above)
+      # regenerated — a stale committed copy drifts at runtime (#1155).
+      - task: verify:routetree
+      # Cross-package page-size parity: the auth canary (#1200) must probe the
+      # SAME /builds page size the SPA requests. e2e/ can't import titan-ui's
+      # PAGE_SIZE (separate pnpm workspace), so this greps both and fails on drift.
+      - task: check:builds-limit-sync
+      - 'echo "BUILD SUCCESSFUL — task ci:verify passed (gradle check + integrationTest + quarkusBuild + dup-migration + ui verify + routeTree freshness + builds-limit parity)"'
+
+  ci:quarkus-build:
+    desc: "Quarkus app-build (augmentation) for titan-server — runs ARC/DI wiring + config-injection validation that plain `gradle check` skips. Catches #1153 (DI scope) / #1156 (empty-default config) pre-merge. Mirrors dev/release/publish-trunk.sh's invocation."
+    cmds:
+      - |
+        set -euo pipefail
+        echo "[ci:quarkus-build] Building the deployable Quarkus artifact (ARC/DI + config augmentation)..."
+        # `-x test` because gradle:check already ran the unit tests; we only want
+        # the build-time augmentation here. This is the same target dev/release/
+        # publish-trunk.sh builds before docker — proven to work.
+        if ! {{.GRADLE}} :titan-server:quarkusBuild -x test --console=plain; then
+          echo "" >&2
+          echo "[ci:quarkus-build] FAILED — the Quarkus app-build / augmentation step failed." >&2
+          echo "[ci:quarkus-build] This is the gate for the build-time break class (#1159):" >&2
+          echo "[ci:quarkus-build]   - DI-scope / @Inject-on-a-non-bean errors (ARC, #1153)" >&2
+          echo "[ci:quarkus-build]   - @ConfigProperty with no value AND no default (#1156)" >&2
+          echo "[ci:quarkus-build] These compile + unit-test green but break the rig at boot." >&2
+          echo "[ci:quarkus-build] Scroll up for the specific ARC/config error from Quarkus." >&2
+          exit 1
+        fi
+        echo "[ci:quarkus-build] OK — deployable artifact built; ARC/DI + config validated."
+
+  verify:migrations:
+    desc: "Flyway duplicate-version guard — scans the migration dirs and fails if two files share a version prefix (#1157). See dev/sprint-loop/check-duplicate-migrations.sh."
+    cmds:
+      - bash dev/sprint-loop/check-duplicate-migrations.sh
+
+  check:builds-limit-sync:
+    desc: "Cross-package page-size parity guard (#1200) — fails if titan-ui PAGE_SIZE and the auth-spec's TITAN_BUILDS_LIMIT default diverge. e2e/ can't import the constant (separate pnpm workspace), so this enforces what a comment can't. See dev/sprint-loop/check-builds-limit-sync.sh."
+    cmds:
+      - bash dev/sprint-loop/check-builds-limit-sync.sh
+
+  verify:routetree:
+    desc: "routeTree.gen.ts freshness guard — fails if the committed TanStack route tree drifted from what `pnpm build` regenerates (#1155). See dev/sprint-loop/check-routetree-fresh.sh."
+    # The freshness check is only meaningful AFTER `pnpm build` has regenerated
+    # the file in place — otherwise (working tree == HEAD) it trivially passes
+    # even when the committed file is genuinely stale (a false green). Depending
+    # on verify:ui guarantees a build ran first. verify:ui is `run: once`, so
+    # when ci:verify already invoked it this dep is a no-op (no double build)
+    # while a standalone `task verify:routetree` still gets one honest build.
+    deps: [verify:ui]
+    cmds:
+      - bash dev/sprint-loop/check-routetree-fresh.sh --git titan-ui/src/routeTree.gen.ts
+
+  verify:ui:
+    desc: "Canonical pre-PR check for titan-ui — type-check + lint + vitest + vite build (catches rollup-strict orphan imports vitest misses)"
+    # `run: once` so the (slow, 2-5 min) `pnpm build` executes at most ONCE per
+    # `task` invocation graph. ci:verify calls verify:ui directly AND again as a
+    # dep of verify:routetree; go-task's DEFAULT (`run: always`) would run it
+    # twice — `run: once` is what actually dedupes it (the default does not).
+    run: once
+    dir: titan-ui
+    cmds:
+      - pnpm install --frozen-lockfile
+      - pnpm type-check
+      - pnpm lint
+      - pnpm test --run
+      - pnpm build
+
+  verify:e2e:
+    desc: "e2e workspace type-check gate (#1276) — `tsc --noEmit` over the Playwright specs. esbuild transpiles specs untyped at runtime, so Playwright-green never exercises the type-checker; this is the ONLY guard keeping the e2e specs type-honest. Runs in `verify` + `ci:verify` so the gate can't silently rot again."
+    # `run: once` so a single `task` graph type-checks e2e at most once even if
+    # multiple aggregate tasks depend on it (mirrors verify:ui).
+    run: once
+    dir: e2e
+    cmds:
+      - pnpm install --frozen-lockfile
+      - pnpm type-check
+
+  ui:lint:
+    desc: "Run ESLint on titan-ui (fails on any violation, e.g. window.confirm/alert/prompt — see titan-ui/CONTRIBUTING.md)"
+    dir: titan-ui
+    cmds:
+      - pnpm install --frozen-lockfile
+      - pnpm lint
+
+  setup:
+    desc: "One-time dev environment bootstrap (JDK 21, git hooks)"
+    cmds:
+      - ./dev/setup-env.sh --yes
+      - task: install-hooks
+
+  install-hooks:
+    desc: "Install the repo git hooks"
+    cmds:
+      - for: { var: HOOKS }
+        cmd: install -m 0755 "{{.ITEM}}" ".git/hooks/$(basename '{{.ITEM}}')"
+    vars:
+      HOOKS:
+        sh: ls dev/git-hooks/* 2>/dev/null || true
+
+  build:worker:
+    desc: "Build the standalone titan-worker fat jar (Gradle)"
+    cmds:
+      # Scrub stale jars before building so the docker image (which picks the
+      # newest-mtime jar from libs/ — see rig/local/Dockerfile.titan-worker)
+      # can't accidentally bake in a leftover SNAPSHOT from before a version
+      # bump. Belt-and-suspenders with the Dockerfile's `ls -t` selector.
+      - "rm -f titan-worker/build/libs/titan-worker-*.jar"
+      - "{{.GRADLE}} :titan-worker:shadowJar"
+    generates:
+      - '{{.WORKER_JAR}}'
+
+  lint:
+    desc: "Check formatting (Spotless)"
+    cmds:
+      - "{{.GRADLE}} spotlessCheck"
+
+  format:
+    desc: "Auto-fix formatting (Spotless)"
+    cmds:
+      - "{{.GRADLE}} spotlessApply"
+
+  quality:metrics:
+    desc: "Complexity-based metrics report (cyclomatic complexity, collaborators, test:source ratio, fan-in). See docs/design/71-complexity-metrics.md."
+    cmds:
+      - bash dev/git-hooks/quality-metrics.sh report
+
+  quality:hot:
+    desc: "Cross-reference churn (find-hot-files.sh) with current complexity — picks the next decomposition target."
+    cmds:
+      - bash dev/git-hooks/quality-metrics.sh hot
+
+  quality:test:
+    desc: "Run the quality-metrics self-tests."
+    cmds:
+      - bash dev/git-hooks/test-quality-metrics.sh
+
+  # ── Titan-only local rig ───────────────────────────────────────────────────
+  ui:build:
+    desc: "Build the titan-ui static bundle (pnpm install + vite build)"
+    dir: titan-ui
+    cmds:
+      - pnpm install --frozen-lockfile
+      - pnpm build
+
+  dev:titan:
+    desc: "Bring up the Titan-only local rig (postgres + keycloak + server + ui + worker). For GitHub App flows also run `task dev:tunnel` in a side terminal — see docs/ops/runbooks/github-app-dev.md."
+    deps: [gradle:build, build:worker, ui:build]
+    dir: rig/local
+    cmds:
+      - test -f .env || cp .env.example .env
+      - docker compose --env-file .env up -d --build
+      - bash seed-data.sh
+      - 'echo "Titan UI  : http://localhost:5180"'
+      - 'echo "Keycloak  : http://localhost:8081  (admin / admin)"'
+      - 'echo "Login as  : dev / dev"'
+
+  dev:down:
+    desc: "Tear down the local rig and wipe all volumes (fresh start next boot)"
+    dir: rig/local
+    cmds:
+      - docker compose down -v
+
+  dev:logs:
+    desc: "Tail logs from all local rig services"
+    dir: rig/local
+    cmds:
+      - docker compose logs -f --tail=200
+
+  dev:worker:
+    desc: "Run a NATIVE (non-containerised) titan-worker against the local rig with the dev `fs` artifact backend pre-wired (closes #848). Useful for stepping through worker code in an IDE while the rest of the rig runs in docker."
+    deps: [build:worker]
+    env:
+      TITAN_DB_URL: "jdbc:postgresql://localhost:5432/titan"
+      TITAN_DB_USER: "titan"
+      TITAN_DB_PASSWORD: "titan-dev-only"
+      TITAN_AGENT_ID: "native-worker-01"
+      TITAN_AGENT_NAME: "Native Worker 01"
+      TITAN_LABELS: "linux,amd64"
+      TITAN_QUEUE: "default"
+      TITAN_EXECUTORS: "1"
+      TITAN_WORKSPACE: "/tmp/titan-native-worker/ws"
+      TITAN_REMOTE_FS: "/tmp/titan-native-worker"
+      # The fs artifact backend so archiveArtifacts steps don't fail with
+      # "no artifact store is configured for this worker" (#848). Matches the
+      # docker-compose worker; the path is local-host this time.
+      TITAN_ARTIFACT_STORE: "fs"
+      TITAN_ARTIFACT_ROOT: "/tmp/titan-native-worker/artifacts"
+    cmds:
+      - mkdir -p /tmp/titan-native-worker/ws /tmp/titan-native-worker/artifacts
+      - "java -jar {{.WORKER_JAR}}"
+
+  dev:tunnel:
+    desc: "Relay GitHub webhooks to the local rig via smee.io (foreground). Required when iterating on the Titan GitHub App — see docs/ops/runbooks/github-app-dev.md."
+    cmds:
+      - |
+        if ! command -v smee >/dev/null 2>&1; then
+          echo "smee-client not installed. Run: pnpm i -g smee-client"
+          exit 1
+        fi
+        mkdir -p dev
+        if [ ! -s dev/.smee-channel ]; then
+          echo "[dev:tunnel] provisioning a fresh smee channel..."
+          # smee.io/new returns 307 with `Location: https://smee.io/<channel>`.
+          # -D writes the response headers, -o discards the body, then we
+          # extract the Location URL. Works on macOS/BSD curl + Linux curl.
+          curl --max-time 5 -sS -D dev/.smee-channel-raw -o /dev/null https://smee.io/new
+          CHANNEL=$(grep -i '^location:' dev/.smee-channel-raw | grep -oE 'https://smee\.io/[A-Za-z0-9]+' | head -1)
+          if [ -z "$CHANNEL" ]; then
+            echo "[dev:tunnel] failed to parse channel URL from smee.io response:" >&2
+            cat dev/.smee-channel-raw >&2
+            exit 1
+          fi
+          echo "$CHANNEL" > dev/.smee-channel
+          rm -f dev/.smee-channel-raw
+        fi
+        CHANNEL=$(cat dev/.smee-channel)
+        echo "============================================================"
+        echo " Titan dev tunnel"
+        echo " channel : $CHANNEL"
+        echo " target  : http://localhost:8080/api/v1/github-app/events"
+        echo " paste the channel URL into your GitHub App's Webhook URL"
+        echo "============================================================"
+        exec smee --url "$CHANNEL" --target http://localhost:8080/api/v1/github-app/events
+
+  dogfood:fire:
+    desc: "Fire a real titan-demo build on the running rig (worker actually executes it; logs stream live)"
+    dir: rig/local
+    cmds:
+      - bash dogfood-fire.sh
+
+  deploy:k3s:
+    desc: "Deploy the standalone Titan k3s rig via Helm (postgres + keycloak + server + ui + worker). Assumes images already published — use deploy:k3s:trunk to publish-and-deploy head-of-trunk in one shot."
+    env:
+      KUBE_CONTEXT: '{{.KUBE_CONTEXT}}'
+    cmds:
+      - bash rig/k3s/deploy.sh
+
+  deploy:k3s:trunk:
+    desc: "Publish head-of-trunk images to the in-cluster registry (ci:publish-trunk) then deploy the k3s rig — the one-shot path the dogfood rig should use (#921, #958). After the helm upgrade we run verify:rig to catch in-cluster bundle split-brain (#1041)."
+    cmds:
+      - task: ci:publish-trunk
+      - task: deploy:k3s
+      - task: verify:rig
+
+  verify:rig:
+    desc: "Post-deploy bundle-parity check — compares the index-<hash>.js served by the public rig ingress against the index.html in the live titan-ui pod. Catches in-cluster split-brain (#1041). See docs/ops/runbooks/rig-parity.md."
+    cmds:
+      - bash dev/release/verify-rig-parity.sh
+
+  verify:rig:test:
+    desc: "Run the bats unit suite for verify-rig-parity.sh (requires bats — apt install bats)"
+    cmds:
+      - bats tests/shell/verify-rig-parity.bats
+
+  k3s:test:secrets:
+    desc: "Helm-template unit tests for the postgres-password ExternalSecret (#1160; requires bats + helm)"
+    cmds:
+      - bats tests/shell/helm-secrets-externalsecret.bats
+
+  k3s:test:infisical:
+    desc: "Helm-template + seed-script unit tests for the Infisical-secret e2e posture (#1242; requires bats + helm)"
+    cmds:
+      - bats tests/shell/helm-infisical-e2e.bats
+      - bats tests/shell/seed-infisical-e2e-secret.bats
+
+  k3s:seed:infisical:
+    desc: "Idempotently pre-seed the ONE Infisical secret spec 46 binds (env staging). Requires INFISICAL_TOKEN + INFISICAL_PROJECT_ID; no plaintext in git (#1242). See rig/k3s/README.md."
+    cmds:
+      - bash rig/k3s/seed-infisical-e2e-secret.sh
+
+  k3s:kubeconfig:
+    desc: "Open the SSH tunnel + merge the k3s cluster into ~/.kube/config"
+    cmds:
+      - bash rig/k3s/fetch-kubeconfig.sh
+
+  k3s:lint:
+    desc: "Helm-lint the Titan chart against the example values"
+    cmds:
+      - helm lint rig/k3s/helm/titan -f rig/k3s/rig-values.yaml.example
+
+  k3s:template:
+    desc: "Render the Titan chart and pipe it through `kubectl apply --dry-run=client`"
+    cmds:
+      - helm template titan rig/k3s/helm/titan -f rig/k3s/rig-values.yaml.example | kubectl apply --dry-run=client -f -
+
+  # ── In-cluster registry (#958) ────────────────────────────────────────────
+  k3s:registry:lint:
+    desc: "Helm-lint the titan-registry chart against its defaults"
+    cmds:
+      - helm lint rig/k3s/helm/titan-registry
+
+  k3s:registry:template:
+    desc: "Render the titan-registry chart and dry-run-apply it"
+    cmds:
+      - helm template titan-registry rig/k3s/helm/titan-registry | kubectl apply --dry-run=client -f -
+
+  k3s:registry:deploy:
+    desc: "Deploy / upgrade the in-cluster OCI registry chart (titan-registry ns). Idempotent."
+    cmds:
+      - helm --kube-context {{.KUBE_CONTEXT}} upgrade --install titan-registry rig/k3s/helm/titan-registry --namespace titan-registry --create-namespace --wait --timeout 5m
+
+  k3s:status:
+    desc: "k3s rig — pod status"
+    cmds:
+      - kubectl --context {{.KUBE_CONTEXT}} -n titan get pods
+
+  k3s:logs:
+    desc: "k3s rig — tail the titan-server log"
+    cmds:
+      - kubectl --context {{.KUBE_CONTEXT}} -n titan logs -f deploy/titan-server
+
+  # ── CI dogfood (publish trunk images to the in-cluster registry) ──────────
+  #
+  # Defaults to the in-cluster registry deployed by `rig/k3s/helm/titan-registry`
+  # (#958): registry.test.example.com/titan-{server,ui,worker}:<tag>.
+  # GHCR remains available as an override — see comments below.
+  #
+  # Credentials are sourced from Infisical (project: adaptiq, env: staging,
+  # key: REGISTRY_HTPASSWD). The script reads them via REGISTRY_USER +
+  # REGISTRY_PASSWORD env vars — the operator exports them from Infisical
+  # before calling task. See docs/ops/runbooks/in-cluster-registry.md.
+  #
+  #   In-cluster (default):
+  #     REGISTRY_USER=releaseflow REGISTRY_PASSWORD=$(infisical get ...) \
+  #         task ci:publish-trunk
+  #
+  #   GHCR (legacy fallback):
+  #     REGISTRY=ghcr.io REGISTRY_NS=hadamrd/ \
+  #         REGISTRY_USER=hadamrd REGISTRY_PASSWORD=<PAT> \
+  #         task ci:publish-trunk
+  ci:publish-trunk:
+    desc: "Build + push head-of-trunk images to the configured OCI registry (default: in-cluster registry.test.example.com). Requires REGISTRY_USER + REGISTRY_PASSWORD (sourced from Infisical REGISTRY_HTPASSWD)."
+    cmds:
+      - bash dev/release/publish-trunk.sh {{.CLI_ARGS}}
+
+  # ── E2E (Playwright) ──────────────────────────────────────────────────────
+  # ── titan-mcp (#1062) ─────────────────────────────────────────────────────
+  # The MCP server is generated from titan-server's OpenAPI schema. The bundled
+  # snapshot ships under titan-mcp/src/titan_mcp/schema/openapi.json; refresh
+  # it from a live controller with `task titan-mcp:gen`. See docs/reference/mcp.md.
+  titan-mcp:gen:
+    desc: "Refresh the bundled OpenAPI snapshot from a live controller ($TITAN_BASE_URL, $TITAN_TOKEN optional)"
+    cmds:
+      - |
+        set -euo pipefail
+        : "${TITAN_BASE_URL:?TITAN_BASE_URL must be set (e.g. http://localhost:18080)}"
+        OUT=titan-mcp/src/titan_mcp/schema/openapi.json
+        AUTH=()
+        if [ -n "${TITAN_TOKEN:-}" ]; then AUTH=(-H "Authorization: Bearer ${TITAN_TOKEN}"); fi
+        echo "[titan-mcp] fetching ${TITAN_BASE_URL}/q/openapi?format=JSON -> ${OUT}"
+        curl -sSf --max-time 20 "${AUTH[@]}" \
+          "${TITAN_BASE_URL%/}/q/openapi?format=JSON" \
+          -o "${OUT}.tmp"
+        python3 -m json.tool "${OUT}.tmp" > /dev/null
+        mv "${OUT}.tmp" "${OUT}"
+        echo "[titan-mcp] wrote $(wc -c < "${OUT}") bytes; run \`titan-mcp diagnose\` to verify"
+
+  titan-mcp:test:
+    desc: "Run the titan-mcp Python test suite (pytest in a local venv)"
+    dir: titan-mcp
+    cmds:
+      - |
+        set -euo pipefail
+        if [ ! -d .venv ]; then python3 -m venv .venv; fi
+        .venv/bin/pip install --quiet -e '.[test]'
+        .venv/bin/pytest -q
+
+  e2e:
+    desc: "Run Playwright E2E against the running local rig (requires `task dev:titan`). Extra args after `--` are forwarded — e.g. `task e2e -- --grep @parkour`."
+    dir: e2e
+    cmds:
+      - "curl -sf http://localhost:18080/q/health/ready > /dev/null || (echo 'Rig not up. Run `task dev:titan` first.'; exit 1)"
+      - "pnpm exec playwright test {{.CLI_ARGS}}"
+
+  # ── Auth bad-realm negative (#1200) ───────────────────────────────────────
+  # The bad-realm login negative in specs/v3/56-golden-path-auth.spec.ts is
+  # test.skip-guarded behind TITAN_E2E_NEGATIVE_REALM=1 because it deliberately
+  # drives a missing realm. WITHOUT a target that sets the flag the "opt-in" is
+  # de-facto permanent (no schedule ever exercises it), so this is the schedule:
+  # a nightly / rig-health profile invokes `task e2e:auth-negative`, which flips
+  # the flag and runs ONLY that negative. Keeps the canary's sad-path branch
+  # genuinely exercised rather than perpetually skipped. (closes the sev3 thread
+  # on the opt-in flag never being set.)
+  e2e:auth-negative:
+    desc: "Run the bad-realm auth negative (sets TITAN_E2E_NEGATIVE_REALM=1) — proves login fails LOUD on a missing realm (#1200). For nightly / rig-health schedules."
+    dir: e2e
+    env:
+      TITAN_E2E_NEGATIVE_REALM: "1"
+    cmds:
+      - "curl -sf http://localhost:18080/q/health/ready > /dev/null || (echo 'Rig not up. Run `task dev:titan` first.'; exit 1)"
+      - "pnpm exec playwright test specs/v3/56-golden-path-auth.spec.ts --grep 'bad realm' {{.CLI_ARGS}}"
+
+  # ── Layer-2 independent-verification e2e (#1241) ──────────────────────────
+  # Specs 54 (R2) + 49 (Nexus) read artifact bytes STRAIGHT FROM the object
+  # store (not via Titan's API), so they're the only proof the artifact-publish
+  # path isn't "green by accident". They `test.skip()` until creds + rig are
+  # wired; these two targets wire them repeatably, sourcing secrets at runtime
+  # (no plaintext in git). See e2e/.env.layer2.example.
+
+  e2e:layer2:
+    desc: "Run spec 54 (R2 independent-verify) against the R2-writing rig. Sets LAYER2_RIG_AVAILABLE=1 and sources R2 creds from Infisical staging (R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_ACCOUNT_ID → TITAN_R2_*). Skips cleanly if creds absent (no false RED). #1241."
+    dir: e2e
+    cmds:
+      # The resolver wrapper: fills TITAN_R2_* from env-then-Infisical, sets
+      # LAYER2_RIG_AVAILABLE=1, then execs Playwright. Spec 54 targets the public
+      # k3s rig (its worker writes to R2) by default; override with TITAN_RIG_URL.
+      - "bash ./resolve-r2-env.sh -- pnpm exec playwright test specs/v3/54-r2-independent-verify.spec.ts {{.CLI_ARGS}}"
+
+  e2e:nexus:
+    desc: "Boot the local rig's Nexus, bootstrap the raw `titan-artifacts` repo, and run spec 49 (Nexus publish independent-GET) against the local rig with TITAN_ARTIFACT_STORE=nexus. Dev creds admin/admin123. Skips cleanly if NEXUS_* absent. #1241."
+    dir: rig/local
+    env:
+      # Spec 49 polls the LOCAL rig (its compose header says so), not the public
+      # k3s rig the spec defaults to.
+      TITAN_RIG_URL: "http://localhost:18080"
+      # Independent-GET creds the spec reads (dev-only Nexus admin; pinned by
+      # NEXUS_SECURITY_RANDOMPASSWORD=false in docker-compose.nexus.yml).
+      NEXUS_URL: "http://localhost:8085"
+      NEXUS_REPOSITORY: "titan-artifacts"
+      NEXUS_USERNAME: "admin"
+      NEXUS_PASSWORD: "admin123"
+      NEXUS_WRITE_POLICY: "allow"
+    cmds:
+      # Stack the Nexus override so titan-server + titan-worker boot with
+      # TITAN_ARTIFACT_STORE=nexus and a `nexus` service is up. --build keeps the
+      # app images current; idempotent re-up on an already-running rig.
+      - docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.nexus.yml --env-file .env up -d --build
+      # One-time (idempotent) raw-hosted repo bootstrap — waits for Nexus, then
+      # creates `titan-artifacts` if absent (Nexus has no declarative seeding).
+      - bash ./bootstrap-nexus.sh
+      # Readiness gate on the local controller before driving a build.
+      - "curl -sf --max-time 5 http://localhost:18080/q/health/ready > /dev/null || (echo 'Local rig not ready on :18080 — `task dev:titan` first, then `task e2e:nexus`.'; exit 1)"
+      - "cd ../../e2e && pnpm exec playwright test specs/v3/49-nexus-publish.spec.ts {{.CLI_ARGS}}"
+
+  e2e:layer2:test:
+    desc: "Unit tests (bats) for the Layer-2 env-wiring scripts: resolve-r2-env.sh + bootstrap-nexus.sh (#1241; requires bats)."
+    cmds:
+      - bats tests/shell/resolve-r2-env.bats
+      - bats tests/shell/bootstrap-nexus.bats
+
+  # ── Infisical-secret e2e (spec 46, #1242) ─────────────────────────────────
+  # spec 46 proves leak-proof binding of an INFISICAL-sourced secret. It
+  # `test.skip()`s unless the rig runs TITAN_SECRETS_BACKEND=infisical AND the
+  # two coordinates below are exported. This target supplies them and runs ONLY
+  # spec 46. Provision the rig first with rig/k3s/values-infisical-e2e.yaml and
+  # pre-seed the secret with rig/k3s/seed-infisical-e2e-secret.sh — see
+  # rig/k3s/README.md ("Infisical-secret e2e").
+  #
+  #   E2E_INFISICAL_CRED   the scope/key the pipeline binds (MUST contain '/').
+  #                        Default titan-e2e/E2E_INFISICAL_SECRET; its `key` part
+  #                        equals the pre-seeded Infisical secret name.
+  #   E2E_INFISICAL_VALUE  the known plaintext (for the length + non-leak
+  #                        assertions). If unset, it is re-read from Infisical
+  #                        (needs INFISICAL_TOKEN + INFISICAL_PROJECT_ID), so the
+  #                        value is never committed to git.
+  #   TITAN_API_URL        the controller base (default http://localhost:18080).
+  e2e:infisical:
+    desc: "Run spec 46 (Infisical-sourced secret, no-leak) against an infisical-backed rig. Exports E2E_INFISICAL_CRED + E2E_INFISICAL_VALUE. Requires the values-infisical-e2e.yaml overlay + a pre-seeded secret (#1242)."
+    dir: e2e
+    cmds:
+      - |
+        set -euo pipefail
+        CRED="${E2E_INFISICAL_CRED:-titan-e2e/E2E_INFISICAL_SECRET}"
+        case "$CRED" in
+          */*) : ;;
+          *)   echo "[e2e:infisical] E2E_INFISICAL_CRED ('$CRED') must be a scope/key — it must contain '/'." >&2; exit 1 ;;
+        esac
+        KEY="${CRED##*/}"
+        VALUE="${E2E_INFISICAL_VALUE:-}"
+        if [ -z "$VALUE" ]; then
+          command -v infisical >/dev/null 2>&1 \
+            || { echo "[e2e:infisical] E2E_INFISICAL_VALUE unset and 'infisical' CLI not on PATH — cannot resolve the value." >&2; exit 1; }
+          : "${INFISICAL_TOKEN:?[e2e:infisical] set E2E_INFISICAL_VALUE, or INFISICAL_TOKEN to re-read it from Infisical}"
+          : "${INFISICAL_PROJECT_ID:?[e2e:infisical] set E2E_INFISICAL_VALUE, or INFISICAL_PROJECT_ID to re-read it from Infisical}"
+          echo "[e2e:infisical] resolving '$KEY' from Infisical env ${INFISICAL_ENV:-staging}"
+          VALUE="$(infisical secrets get "$KEY" --token "$INFISICAL_TOKEN" --projectId "$INFISICAL_PROJECT_ID" --env "${INFISICAL_ENV:-staging}" --path "${INFISICAL_SECRET_PATH:-/}" --plain)"
+        fi
+        [ -n "$VALUE" ] || { echo "[e2e:infisical] resolved value is empty — was '$KEY' seeded? (rig/k3s/seed-infisical-e2e-secret.sh)" >&2; exit 1; }
+        echo "[e2e:infisical] cred=$CRED value-len=${#VALUE} — running spec 46"
+        export E2E_INFISICAL_CRED="$CRED" E2E_INFISICAL_VALUE="$VALUE"
+        pnpm exec playwright test specs/v3/46-infisical-secret.spec.ts {{.CLI_ARGS}}
+
+  # ── Operator tour: screenshot capture half (#1132) ────────────────────────
+  # Capture full-page screenshots of the 10 critical pages at desktop + mobile,
+  # generate report.html with side-by-side baseline-vs-current comparisons.
+  # The analyze half (#1137, below) consumes the same e2e/tour/current/ output.
+  tour:run:
+    desc: "Capture the 10-page operator tour screenshots @ desktop+mobile, then build report.html (requires `task dev:titan` running)"
+    dir: e2e
+    cmds:
+      - "curl -sf --max-time 5 ${TITAN_RIG_URL:-http://localhost:18080}/q/health/ready > /dev/null || (echo 'Rig not up. Run `task dev:titan` first.'; exit 1)"
+      - "rm -rf tour/current && mkdir -p tour/current"
+      - "pnpm exec playwright test --config tour/playwright.tour.config.ts"
+      - "node tour/report.mjs || true   # report exits non-zero on diffs; that's expected"
+      - "echo 'tour: open e2e/tour/report.html'"
+
+  tour:accept:
+    desc: "Promote e2e/tour/current/*.png → e2e/tour/baseline/ (run after a verified tour:run)"
+    dir: e2e
+    cmds:
+      - "test -d tour/current || (echo 'no tour/current — run `task tour:run` first'; exit 1)"
+      - "find tour/current -maxdepth 1 -name '*.png' -exec cp -v {} tour/baseline/ \\;"
+      - "git add tour/baseline/"
+      - "echo 'tour: promoted current → baseline. Commit the staged baseline/ changes.'"
+
+  # ── Operator tour: vision-model analysis half (#1137) ─────────────────────
+  # `task tour:run` (issue #1132, above) captures screenshots into e2e/tour/current/.
+  # The tasks below close the loop: screenshots → rubric'd findings → diff vs
+  # baseline → Markdown summary. Exits non-zero if there's a NEW fail vs
+  # baseline so CI can gate on regressions (warns-only is exit 0).
+  tour:analyze:
+    desc: "Run the vision-model analyzer over e2e/tour/current/ screenshots (provider via TOUR_VISION_PROVIDER; default mock)"
+    dir: e2e
+    cmds:
+      - node tour/analyzer.mjs analyze
+
+  tour:diff:
+    desc: "Diff e2e/tour/current/findings.json against e2e/tour/baseline/findings.json → diff.md"
+    dir: e2e
+    cmds:
+      - node tour/analyzer.mjs diff
+
+  tour:run:analyze:
+    desc: "Tour analyze + diff in one shot (CI-friendly; non-zero on new fails)"
+    dir: e2e
+    cmds:
+      - node tour/analyzer.mjs run
+
+  tour:test:
+    desc: "Unit + integration tests for the tour analyzer (node:test, no extra deps)"
+    dir: e2e
+    cmds:
+      - node --test tour/__tests__/*.test.mjs
+
+  # ── Rig smoke (the loop's dogfood gate, closes #787) ──────────────────────
+  # task rig:smoke — boot rig if needed, wait for /api/v1/system/info, run only
+  # the @golden Playwright subset, append a one-line JSON result to
+  # docs/ops/rig-smoke.jsonl. Designed to run every 5th loop tick to keep the
+  # rig hot and surface integration drift fast.
+  rig:smoke:golden-guard:
+    desc: "Fail if fewer than RIG_SMOKE_GOLDEN_MIN (default 12) tests are tagged @golden — prevents quiet shrinking of the V1-shippable bar (#1048)"
+    cmds:
+      - bash dev/rig-smoke/check-golden-count.sh
+
+  # task rig:smoke:mark-3-green — V1-shippable-bar gate (#1048). Scans
+  # docs/ops/rig-smoke.jsonl for the last 3 non-marker runs, and if all
+  # three satisfy passed>=RIG_SMOKE_GOLDEN_MIN AND failed==0 appends a
+  # `"marker":"3-consecutive-green target met YYYY-MM-DD"` line. Idempotent
+  # (re-runs on the same day do not duplicate). Used by the loop tick to
+  # declare the V1 bar met without manual jsonl-eyeballing.
+  rig:smoke:mark-3-green:
+    desc: "Append 3-consecutive-green marker to docs/ops/rig-smoke.jsonl if the last 3 runs all hit ≥RIG_SMOKE_GOLDEN_MIN passed / 0 failed (#1048)."
+    cmds:
+      - bash dev/sprint-loop/check-3-consecutive.sh docs/ops/rig-smoke.jsonl
+
+  rig:smoke:
+    desc: "Boot rig if down, wait for /api/v1/system/info, run @golden Playwright specs, append result to docs/ops/rig-smoke.jsonl (closes #787, #1048)"
+    cmds:
+      - bash dev/rig-smoke/check-golden-count.sh
+      - |
+        set -euo pipefail
+        RUNNING=$(docker ps --filter name=titan -q | wc -l | tr -d ' ')
+        if [ "$RUNNING" -eq 0 ]; then
+          echo "[rig:smoke] no titan-* containers running — bringing rig up via task dev:titan"
+          task dev:titan
+        else
+          echo "[rig:smoke] $RUNNING titan-* containers running — reusing existing rig"
+        fi
+      - |
+        set -euo pipefail
+        # Readiness gate: /q/health/ready is the canonical Quarkus probe the
+        # rig actually exposes (the brief's /api/v1/system/info doesn't exist
+        # in this codebase — `task e2e` uses /q/health/ready for the same reason).
+        echo "[rig:smoke] polling http://localhost:18080/q/health/ready (max 60s)"
+        for i in $(seq 1 60); do
+          if curl -sf -o /dev/null http://localhost:18080/q/health/ready; then
+            echo "[rig:smoke] health/ready OK after ${i}s"
+            break
+          fi
+          if [ "$i" -eq 60 ]; then
+            echo "[rig:smoke] health/ready never became ready" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+      - |
+        set -euo pipefail
+        START_MS=$(date +%s%3N)
+        cd e2e
+        set +e
+        pnpm exec playwright test --grep @golden --reporter=line | tee /tmp/rig-smoke-out.txt
+        EXIT=${PIPESTATUS[0]}
+        set -e
+        END_MS=$(date +%s%3N)
+        DUR=$((END_MS - START_MS))
+        # Parse + append + propagate exit through the unit-tested helper
+        # (#1048 adversarial guard — dev/rig-smoke/tests/test_rig_smoke_parse.sh).
+        bash ../dev/rig-smoke/rig-smoke-parse.sh /tmp/rig-smoke-out.txt "$EXIT" "$DUR" ../docs/ops/rig-smoke.jsonl
+
+  # ── Parkour smoke (adversarial sweep, #1061) ──────────────────────────────
+  # task rig:smoke:parkour — boot the rig if needed, wait for /q/health/ready,
+  # then run the @parkour Playwright subset (every v3 route × happy +
+  # adversarial-rows + flaky-network variants + the meta guard). Designed to
+  # run weekly by operators before tagging a release candidate.
+  # See docs/ops/runbooks/parkour-smoke.md for the full playbook.
+  rig:smoke:parkour:
+    desc: "Adversarial sweep of every v3 route (long unicode / null fields / 5% flaky net). Boots rig if down, runs @parkour specs. See docs/ops/runbooks/parkour-smoke.md. Closes #1061."
+    cmds:
+      - |
+        set -euo pipefail
+        RUNNING=$(docker ps --filter name=titan -q | wc -l | tr -d ' ')
+        if [ "$RUNNING" -eq 0 ]; then
+          echo "[rig:smoke:parkour] no titan-* containers running — bringing rig up via task dev:titan"
+          task dev:titan
+        else
+          echo "[rig:smoke:parkour] $RUNNING titan-* containers running — reusing existing rig"
+        fi
+      - |
+        set -euo pipefail
+        echo "[rig:smoke:parkour] polling http://localhost:18080/q/health/ready (max 60s)"
+        for i in $(seq 1 60); do
+          if curl -sf -o /dev/null --max-time 5 http://localhost:18080/q/health/ready; then
+            echo "[rig:smoke:parkour] health/ready OK after ${i}s"
+            break
+          fi
+          if [ "$i" -eq 60 ]; then
+            echo "[rig:smoke:parkour] health/ready never became ready" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+      - |
+        set -euo pipefail
+        cd e2e
+        # Forward extra args so an operator can scope further:
+        #   task rig:smoke:parkour -- --grep "empty-state"
+        pnpm exec playwright test --grep @parkour --reporter=line {{.CLI_ARGS}}
+
+  # ── Layer-2 (real-commit) rig smoke (#1051) ───────────────────────────────
+  # task rig:smoke:real — runs the @real-commit Playwright subset against the
+  # k3s rig (titan.test.example.com by default). Each spec cuts a real
+  # branch on hadamrd/titan-e2e-fixture, pushes, polls the rig, and cleans up
+  # in finally{}. Unlike rig:smoke this needs:
+  #   - LAYER2_RIG_AVAILABLE=1       (opt-in switch — never runs on local dev)
+  #   - gh CLI authenticated         (to push to the fixture repo)
+  #   - TITAN_RIG_URL/LAYER2_RIG_URL pointing at the public rig (defaults to
+  #     https://titan.test.example.com)
+  #   - Keycloak bearer reachable from this host
+  # Timeout budget: 30 min — the real-commit roundtrip waits on GitHub App
+  # webhook + k3s worker provisioning, which is materially slower than the
+  # local rig.
+  rig:smoke:real:
+    desc: "Layer-2 real-commit Playwright smoke (@real-commit). Requires LAYER2_RIG_AVAILABLE=1 + gh auth. Closes #1051."
+    cmds:
+      - |
+        set -euo pipefail
+        if [ -z "${LAYER2_RIG_AVAILABLE:-}" ]; then
+          echo "[rig:smoke:real] LAYER2_RIG_AVAILABLE not set — refusing to run."
+          echo "[rig:smoke:real] Set LAYER2_RIG_AVAILABLE=1 to opt in. This task pushes"
+          echo "[rig:smoke:real] real commits to hadamrd/titan-e2e-fixture and polls the"
+          echo "[rig:smoke:real] public rig at \${TITAN_RIG_URL:-https://titan.test.example.com}."
+          exit 0
+        fi
+        if ! gh auth status >/dev/null 2>&1; then
+          echo "[rig:smoke:real] gh CLI not authenticated — cannot cut fixture branches" >&2
+          exit 1
+        fi
+        cd e2e
+        # Longer per-test timeout than rig:smoke (real GitHub App + k3s scheduling).
+        TITAN_TEST_TIMEOUT_MS=${TITAN_TEST_TIMEOUT_MS:-1200000} \
+          pnpm exec playwright test --grep @real-commit --reporter=line
+
+  # ── Golden-path PR round-trip demo gate (#1239) ───────────────────────────
+  # task rig:smoke:golden-roundtrip — the re-runnable pre-demo proof that the
+  # headline experience works end-to-end: signed pull_request webhook → build
+  # dispatched ≤15s → SSE log delta in the UI → `success` ci/titan status on
+  # the PR HEAD SHA (not base) → target_url resolving to /builds/:id.
+  #
+  # Runs the GREEN legs of specs 55 / 40 / 50 (excludes the adversarial
+  # red-check leg — separate ticket). Needs, beyond rig:smoke:
+  #   - LAYER2_RIG_AVAILABLE=1            (opt-in; unset → graceful skip)
+  #   - gh CLI authenticated             (spec 50 cuts a real PR)
+  #   - TITAN_E2E_GH_APP_WEBHOOK_SECRET / _INSTALLATION_ID / _REPO_ID from
+  #     App provisioning (fail-closed if missing — never a silent green skip)
+  # Drop those in a gitignored e2e/.env.golden-roundtrip (template:
+  # e2e/.env.golden-roundtrip.example) and the gate sources it for you.
+  # See docs/ops/runbooks/layer2-e2e.md.
+  rig:smoke:golden-roundtrip:
+    desc: "Golden-path PR round-trip demo gate (specs 55/40/50 green legs). Requires LAYER2_RIG_AVAILABLE=1 + gh auth + App provisioning vars. Closes #1239."
+    cmds:
+      - bash dev/rig-smoke/golden-roundtrip.sh
+
+  rig:status:
+    desc: "Print docker compose ps for the local rig + the timestamp of the most recent build via /api/v1/builds?limit=1"
+    cmds:
+      - docker compose -f rig/local/docker-compose.yml ps
+      - |
+        set -euo pipefail
+        echo ""
+        echo "[rig:status] last build (via /api/v1/builds?limit=1):"
+        curl -sf "http://localhost:18080/api/v1/builds?limit=1" \
+          || echo "[rig:status] /api/v1/builds unreachable — rig likely down"
+
+  # ── Forge loop (#1059 — retired the in-tree loop package) ────────────────
+  # The loop harness is now the OSS `forge-loop` package
+  # (hadamrd/forge-loop). This repo only carries the project-specific
+  # config (`forge-loop.yaml`) + brief overrides under `.forge-loop/`.
+  #
+  # Install once on the operator host:
+  #   uv tool install --from git+https://github.com/hadamrd/forge-loop forge-loop
+  #
+  # Then run from the repo root — forge-loop autodetects forge-loop.yaml.
+  # The thin task wrappers below exist so muscle memory (`task loop:status`)
+  # still works; everything else is forge-loop's CLI directly.
+  # Full operator playbook: docs/ops/runbooks/forge-loop.md.
+  loop:status:
+    desc: "Print forge-loop state (current tick, dispatched workers, last outcomes)."
+    cmds:
+      - forge-loop status
+
+  loop:events:
+    desc: "Tail the forge-loop structured event log (JSONL)."
+    cmds:
+      - forge-loop events -n 30
+
+  loop:pause:
+    desc: "Pause the loop (current tick finishes; next tick skipped until loop:resume)."
+    cmds:
+      - forge-loop pause
+
+  loop:resume:
+    desc: "Resume a paused loop."
+    cmds:
+      - forge-loop resume
+
+  loop:stop:
+    desc: "Graceful stop. Current tick finishes; loop exits cleanly."
+    cmds:
+      - forge-loop stop

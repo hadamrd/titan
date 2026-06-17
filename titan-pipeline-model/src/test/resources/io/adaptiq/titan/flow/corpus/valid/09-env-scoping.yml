@@ -1,0 +1,32 @@
+# Valid: env: injection at all three scopes — pipeline, stage, and step (GH #239).
+# Resolution: step > stage > pipeline (later layer wins on key collision).
+env:
+  REGISTRY: registry.example.com
+  LOG_LEVEL: info
+  SHARED_KEY: pipeline-value
+stages:
+  - stage: Build
+    env:
+      BUILD_OPTS: "-Dmaven.test.skip=true"
+      SHARED_KEY: stage-value
+    steps:
+      - sh: mvn package
+        env:
+          MAVEN_COLOR: "true"
+          SHARED_KEY: step-value
+      - sh: docker build .
+        env:
+          DOCKER_BUILDKIT: "1"
+  - stage: Test
+    dependsOn: Build
+    env:
+      TEST_PROFILE: ci
+    steps:
+      - sh: mvn verify
+  - stage: Deploy
+    dependsOn: Test
+    steps:
+      - sh: ./deploy.sh
+        env:
+          DEPLOY_ENV: production
+          DRY_RUN: "false"

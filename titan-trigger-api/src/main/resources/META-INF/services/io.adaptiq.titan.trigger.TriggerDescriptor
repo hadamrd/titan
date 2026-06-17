@@ -1,0 +1,4 @@
+io.adaptiq.titan.trigger.CronTrigger$DescriptorImpl
+io.adaptiq.titan.trigger.GithubTrigger$DescriptorImpl
+io.adaptiq.titan.trigger.GitlabTrigger$DescriptorImpl
+io.adaptiq.titan.trigger.BitbucketTrigger$DescriptorImpl

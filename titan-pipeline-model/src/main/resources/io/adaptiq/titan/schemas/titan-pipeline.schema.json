@@ -1,0 +1,912 @@
+{
+  "$schema" : "https://json-schema.org/draft/2020-12/schema",
+  "$id" : "https://github.com/hadamrd/titan/blob/trunk/titan-pipeline-model/src/main/resources/io/adaptiq/titan/schemas/titan-pipeline.schema.json",
+  "title" : "Titan Pipeline",
+  "description" : "Titan YAML pipeline definition (design/29 §3). The pipeline body is accepted in either shape: at the document root (the canonical form) or nested under a top-level 'titan:' key (the legacy wrapper, kept for back-compat). This schema is the editor/tooling contract; TitanYamlParser is the runtime enforcer of the same contract.",
+  "oneOf" : [ {
+    "description" : "Canonical form — the pipeline body at the document root.",
+    "$ref" : "#/$defs/titan"
+  }, {
+    "description" : "Legacy wrapper form — the pipeline body nested under 'titan:'.",
+    "type" : "object",
+    "required" : [ "titan" ],
+    "additionalProperties" : false,
+    "properties" : {
+      "titan" : {
+        "$ref" : "#/$defs/titan"
+      }
+    }
+  } ],
+  "$defs" : {
+    "titan" : {
+      "type" : "object",
+      "description" : "The pipeline definition.",
+      "required" : [ "stages" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "agent" : {
+          "type" : "string",
+          "description" : "Default agent label for the whole pipeline. Optional. A stage with no 'agent' of its own inherits this; if neither is set, the work runs on any available agent."
+        },
+        "failurePolicy" : {
+          "type" : "string",
+          "description" : "What the engine does when a node fails. 'blockOnFailure' (default) skips every non-terminal node on the first failure; 'continueOnFailure' lets the DAG run past a failure (only the dependent subgraph is cut).",
+          "enum" : [ "blockOnFailure", "continueOnFailure" ]
+        },
+        "libraries" : {
+          "$ref" : "#/$defs/librariesMap",
+          "description" : "Shared libraries to load for this pipeline. A map of <alias>: <coordinate-or-{url,credential}> (design/53). Each alias drives the `<alias>.<method>` dotted-step dispatch."
+        },
+        "parameters" : {
+          "type" : "array",
+          "description" : "Build parameters this pipeline declares.",
+          "items" : {
+            "$ref" : "#/$defs/parameter"
+          }
+        },
+        "triggers" : {
+          "type" : "array",
+          "description" : "Schedules that start a build automatically (design/50). Each entry is a trigger — either a 'cron:' schedule or a 'github:' webhook (issue #397). Exactly one discriminator key per entry.",
+          "items" : {
+            "$ref" : "#/$defs/trigger"
+          }
+        },
+        "credentials" : {
+          "type" : "array",
+          "description" : "Stored credentials bound into every step of every stage (design/42). Flattened onto each step at parse time; stage- and step-level 'credentials' are appended after these, so precedence is step > stage > pipeline.",
+          "items" : {
+            "$ref" : "#/$defs/credentialBinding"
+          }
+        },
+        "env" : {
+          "type" : "object",
+          "description" : "Environment variables injected into every step of every stage (GH #239). Stage- and step-level 'env' override these (step > stage > pipeline precedence). Values must be strings.",
+          "additionalProperties" : {
+            "type" : "string",
+            "oneOf" : [ {
+              "not" : {
+                "pattern" : "^secret:"
+              }
+            }, {
+              "pattern" : "^secret:[^:\\s]+$"
+            } ]
+          }
+        },
+        "timeout" : {
+          "type" : "string",
+          "description" : "Pipeline-level execution deadline (issue #244). The outermost safety net: if no step- or stage-level 'timeout:' fires, the controller reaps the build at this deadline and marks it FAILED. Grammar: '30s', '5m', '2h', '1d', or a bare number of seconds."
+        },
+        "notify" : {
+          "type" : "array",
+          "description" : "Lifecycle hooks fired by the orchestrator at the build's terminal state (#245), regardless of which step ran. Each entry is a webhook (today) or slack (future) sink; auth tokens MUST travel via 'credentialsId', never inline in 'url'.",
+          "items" : {
+            "$ref" : "#/$defs/notifyHook"
+          }
+        },
+        "concurrency" : {
+          "$ref" : "#/$defs/concurrency",
+          "description" : "Per-job concurrency limit (#1101). Caps the number of RUNNING builds of this job; new builds either queue, cancel the oldest RUNNING build, or cancel other QUEUED builds, per 'on_overflow'. Absent: unlimited (legacy default)."
+        },
+        "priority" : {
+          "$ref" : "#/$defs/priority",
+          "description" : "Per-job queue priority (#1100). Discriminated-union string — one of 'high' (10), 'normal' (0, default), or 'low' (-10). Builds of higher-priority jobs are claimed from task_queue before lower-priority ones; same-priority builds preserve FIFO. Bare integers are rejected by design — use the named tier."
+        },
+        "buildRetention" : {
+          "$ref" : "#/$defs/buildRetention",
+          "description" : "Per-job build-history retention override (#640). Caps this job's titan.builds rows at the last 'keepLast' entries; older builds (and their flow_nodes / artifact / test_result / task_queue / logs / task_archive rows) are dropped by the daily prune. When absent, the server-wide TITAN_JOB_BUILD_RETENTION default applies. 'keepLast: 0' is the per-job opt-out — keeps full history regardless of the global default."
+        },
+        "include" : {
+          "type" : "array",
+          "description" : "Pipeline fragments to inline before parsing (issue #1120). Each entry is either a repo-relative path string (sibling YAML fragment) or an object { repo, ref, path[, credential] } for a cross-repo fragment. Includes are resolved depth-first with cycle detection; list keys (stages, parameters, triggers, notify, credentials) are concatenated with the main file's, map keys (libraries, env) are shallow-merged with the main file winning, and all other keys are overridden by the main file.",
+          "items" : {
+            "$ref" : "#/$defs/includeEntry"
+          }
+        },
+        "stages" : {
+          "type" : "array",
+          "description" : "The pipeline DAG: stage, gate and precondition nodes. Order of this list does not imply order of execution — 'dependsOn' does. Sibling nodes with the same 'dependsOn' run in parallel.",
+          "minItems" : 1,
+          "items" : {
+            "$ref" : "#/$defs/node"
+          }
+        }
+      }
+    },
+    "stringOrList" : {
+      "description" : "A single string, or a list of strings.",
+      "oneOf" : [ {
+        "type" : "string"
+      }, {
+        "type" : "array",
+        "items" : {
+          "type" : "string"
+        }
+      } ]
+    },
+    "librariesMap" : {
+      "description" : "Map of <alias>: <coordinate-or-{url,credential}>.",
+      "type" : "object",
+      "additionalProperties" : {
+        "oneOf" : [ {
+          "type" : "string"
+        }, {
+          "type" : "object",
+          "additionalProperties" : false,
+          "properties" : {
+            "url" : {
+              "type" : "string"
+            },
+            "credential" : {
+              "type" : "string"
+            }
+          },
+          "required" : [ "url" ]
+        } ]
+      }
+    },
+    "parameter" : {
+      "type" : "object",
+      "required" : [ "name" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "name" : {
+          "type" : "string",
+          "description" : "Parameter name."
+        },
+        "type" : {
+          "type" : "string",
+          "description" : "Parameter type.",
+          "examples" : [ "string", "boolean", "choice" ]
+        },
+        "default" : {
+          "description" : "Default value when the build does not supply one."
+        },
+        "description" : {
+          "type" : "string"
+        },
+        "required" : {
+          "type" : "boolean",
+          "description" : "Whether a value must be supplied."
+        },
+        "choices" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "Allowed values for a choice parameter."
+        }
+      }
+    },
+    "trigger" : {
+      "type" : "object",
+      "description" : "A build trigger — exactly one of a 'cron' schedule (design/50), a 'github' webhook (issue #397), a 'gitlab' webhook (issue #1078) or a 'bitbucket' webhook (issue #1079).",
+      "additionalProperties" : false,
+      "properties" : {
+        "cron" : {
+          "type" : "string",
+          "description" : "A standard 5-field cron schedule (with 'H' for a hashed/jittered value), with the @daily/@hourly aliases and a 'TZ=' prefix all supported."
+        },
+        "github" : {
+          "$ref" : "#/$defs/githubTrigger",
+          "description" : "A GitHub webhook trigger (issue #397). Fires when a verified delivery from github.com arrives at /api/v1/triggers/github whose repository matches this job and whose branch matches one of the configured globs."
+        },
+        "gitlab" : {
+          "$ref" : "#/$defs/gitlabTrigger",
+          "description" : "A GitLab webhook trigger (issue #1078). Fires when a verified delivery from gitlab.com (or a self-hosted instance) arrives at /api/v1/triggers/gitlab whose X-Gitlab-Token matches the configured shared-secret credential and whose event kind / ref matches the configured filters."
+        },
+        "bitbucket" : {
+          "$ref" : "#/$defs/bitbucketTrigger",
+          "description" : "A Bitbucket Cloud webhook trigger (issue #1079). Fires when a verified delivery from bitbucket.org arrives at /api/v1/triggers/bitbucket whose X-Hub-Signature HMAC matches the configured secret credential and whose event kind / ref matches the configured filters."
+        }
+      },
+      "oneOf" : [ {
+        "required" : [ "cron" ],
+        "allOf" : [ {
+          "not" : {
+            "required" : [ "github" ]
+          }
+        }, {
+          "not" : {
+            "required" : [ "gitlab" ]
+          }
+        }, {
+          "not" : {
+            "required" : [ "bitbucket" ]
+          }
+        } ]
+      }, {
+        "required" : [ "github" ],
+        "allOf" : [ {
+          "not" : {
+            "required" : [ "cron" ]
+          }
+        }, {
+          "not" : {
+            "required" : [ "gitlab" ]
+          }
+        }, {
+          "not" : {
+            "required" : [ "bitbucket" ]
+          }
+        } ]
+      }, {
+        "required" : [ "gitlab" ],
+        "allOf" : [ {
+          "not" : {
+            "required" : [ "cron" ]
+          }
+        }, {
+          "not" : {
+            "required" : [ "github" ]
+          }
+        }, {
+          "not" : {
+            "required" : [ "bitbucket" ]
+          }
+        } ]
+      }, {
+        "required" : [ "bitbucket" ],
+        "allOf" : [ {
+          "not" : {
+            "required" : [ "cron" ]
+          }
+        }, {
+          "not" : {
+            "required" : [ "github" ]
+          }
+        }, {
+          "not" : {
+            "required" : [ "gitlab" ]
+          }
+        } ]
+      } ]
+    },
+    "githubTrigger" : {
+      "type" : "object",
+      "description" : "A GitHub-webhook trigger value (issue #397) — the inner object under a `github:` discriminator on a trigger entry.",
+      "required" : [ "credentialsId" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "branches" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "Glob patterns the delivery's branch must match. Empty / omitted means any branch. Patterns follow Titan's glob convention — e.g. 'trunk', 'feat/**', 'release-*'."
+        },
+        "events" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "GitHub event types this trigger accepts — 'push' and / or 'pull_request'. Defaults to ['push']."
+        },
+        "credentialsId" : {
+          "type" : "string",
+          "description" : "The credentials-store id of the HMAC secret GitHub signs deliveries with. Resolved at receive time via CredentialsService — the plaintext secret is NEVER stored in the pipeline config."
+        }
+      }
+    },
+    "gitlabTrigger" : {
+      "type" : "object",
+      "description" : "A GitLab-webhook trigger value (issue #1078) — the inner object under a `gitlab:` discriminator on a trigger entry.",
+      "required" : [ "credentialsId" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "branches" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "Glob patterns the delivery's ref must match. Empty / omitted means any ref. Applies to the branch name for push, the tag name for tag_push, and the source-branch name for merge_request."
+        },
+        "events" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "GitLab event kinds this trigger accepts — any of 'push', 'merge_request', 'tag_push'. Defaults to ['push']."
+        },
+        "credentialsId" : {
+          "type" : "string",
+          "description" : "The credentials-store id of the shared-secret token GitLab sends in X-Gitlab-Token. Resolved at receive time via CredentialsService — the plaintext token is NEVER stored in the pipeline config and NEVER logged."
+        }
+      }
+    },
+    "bitbucketTrigger" : {
+      "type" : "object",
+      "description" : "A Bitbucket-webhook trigger value (issue #1079) — the inner object under a `bitbucket:` discriminator on a trigger entry.",
+      "required" : [ "credentialsId" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "branches" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "Glob patterns the delivery's ref must match. Empty / omitted means any ref. Applies to the pushed branch name for push and the source (head) branch for pull_request."
+        },
+        "events" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "Bitbucket event kinds this trigger accepts — any of 'push', 'pull_request'. Defaults to ['push']."
+        },
+        "credentialsId" : {
+          "type" : "string",
+          "description" : "The credentials-store id of the HMAC secret Bitbucket signs deliveries with (X-Hub-Signature). Resolved at receive time via CredentialsService — the plaintext secret is NEVER stored in the pipeline config and NEVER logged."
+        }
+      }
+    },
+    "node" : {
+      "description" : "One DAG node: exactly one of a stage, a gate, or a precondition.",
+      "oneOf" : [ {
+        "$ref" : "#/$defs/stage"
+      }, {
+        "$ref" : "#/$defs/gate"
+      }, {
+        "$ref" : "#/$defs/precondition"
+      } ]
+    },
+    "stage" : {
+      "type" : "object",
+      "description" : "A stage: a named group of steps.",
+      "required" : [ "stage" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "stage" : {
+          "type" : "string",
+          "description" : "Stage name (also the basis of its node id)."
+        },
+        "agent" : {
+          "type" : "string",
+          "description" : "Agent label for this stage's steps. Optional — omit it to inherit 'titan.agent'."
+        },
+        "steps" : {
+          "type" : "array",
+          "description" : "The steps this stage runs, in order.",
+          "items" : {
+            "$ref" : "#/$defs/step"
+          }
+        },
+        "use" : {
+          "$ref" : "#/$defs/use",
+          "description" : "Stage-level local-template inlining (design/56). The template's step list replaces the stage's steps at parse time, with ${param.<name>} substituted from 'with'. Mutually exclusive with 'steps:', 'matrix:' and 'each:' on the same stage."
+        },
+        "credentials" : {
+          "type" : "array",
+          "description" : "Stored credentials bound into every step of this stage (design/39). Flattened onto each step at parse time; a step's own 'credentials' are appended after these.",
+          "items" : {
+            "$ref" : "#/$defs/credentialBinding"
+          }
+        },
+        "sshAgent" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "SSH-agent credential ids (each an SSHUserPrivateKey) loaded for every sh/script step of this stage (design/41). Flattened onto each step at parse time, de-duplicated; a step's own 'sshAgent' ids are appended after these."
+        },
+        "image" : {
+          "type" : "string",
+          "description" : "Default container image for this stage's steps."
+        },
+        "retry" : {
+          "$ref" : "#/$defs/retryPolicy",
+          "description" : "Default retry policy for every step of this stage (design/44). Flattened onto each step at parse time; a step's own 'retry' wins."
+        },
+        "timeout" : {
+          "type" : "string",
+          "description" : "Default execution deadline for every step of this stage (e.g. 30s, 5m, 2h). Flattened onto each step; a step's own 'timeout' wins."
+        },
+        "when" : {
+          "type" : "string",
+          "description" : "Condition expression — the stage runs only if it evaluates true."
+        },
+        "dependsOn" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "Node ids this stage waits for. Empty = runs immediately."
+        },
+        "onFailure" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "Upstream stage names whose failure triggers this stage (design/68). When set, this stage is a failure handler: it advances iff at least one listed upstream reached FAILED, AND the optional 'when:' expression is true. Mutually exclusive with 'dependsOn:' on the same stage."
+        },
+        "env" : {
+          "type" : "object",
+          "description" : "Environment variables injected into every step of this stage (GH #239). Each key must be a non-blank string; each value must be a string. Step-level env overrides stage-level; stage-level overrides pipeline-level.",
+          "additionalProperties" : {
+            "type" : "string",
+            "oneOf" : [ {
+              "not" : {
+                "pattern" : "^secret:"
+              }
+            }, {
+              "pattern" : "^secret:[^:\\s]+$"
+            } ]
+          }
+        },
+        "matrix" : {
+          "$ref" : "#/$defs/matrix",
+          "description" : "Stage-level matrix (design/54). Cartesian product of named axes, optionally filtered by 'exclude' and augmented by 'include'. Fans the stage out into one stage per cell at parse time; step arguments may reference the cell with ${matrix.<axis>}."
+        },
+        "each" : {
+          "$ref" : "#/$defs/each",
+          "description" : "Stage-level 1D iteration (design/55). Fans the stage out into one stage per element of 'in' at parse time; step arguments may reference the cell with ${each.<var>}. Mutually exclusive with 'matrix:' in v1."
+        },
+        "notify" : {
+          "type" : "array",
+          "description" : "Lifecycle hooks fired by the orchestrator when this stage reaches its terminal state, regardless of which step ran (#245). Each entry is a webhook (today) or slack (future) sink; auth tokens MUST travel via 'credentialsId', never inline in 'url'.",
+          "items" : {
+            "$ref" : "#/$defs/notifyHook"
+          }
+        }
+      }
+    },
+    "gate" : {
+      "type" : "object",
+      "description" : "A gate: a pause point in the DAG, typically a human approval.",
+      "required" : [ "gate" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "gate" : {
+          "type" : "string",
+          "description" : "Gate name."
+        },
+        "requiresApproval" : {
+          "type" : "boolean",
+          "description" : "Whether the gate needs a human approval to advance.",
+          "default" : true
+        },
+        "approvers" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "Users or groups allowed to approve."
+        },
+        "dependsOn" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "Node ids this gate waits for."
+        }
+      }
+    },
+    "precondition" : {
+      "type" : "object",
+      "description" : "A precondition: an expression that must hold for the DAG to proceed past it.",
+      "required" : [ "precondition", "expression" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "precondition" : {
+          "type" : "string",
+          "description" : "Precondition name."
+        },
+        "expression" : {
+          "type" : "string",
+          "description" : "Expression that must evaluate true for downstream nodes to run."
+        },
+        "dependsOn" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "Node ids this precondition waits for."
+        }
+      }
+    },
+    "step" : {
+      "type" : "object",
+      "description" : "A step: exactly one descriptor key (sh, script, checkout, …) — plus an optional 'image' for the container it runs in. The descriptor set is open (the StepHandler SPI is extensible); a few common ones are listed here for assistance.",
+      "minProperties" : 1,
+      "properties" : {
+        "credentials" : {
+          "type" : "array",
+          "description" : "Stored credentials bound into this step as masked, step-scoped environment (design/39 / D6). Resolved on the controller at dispatch; the worker never sees the credentials store.",
+          "items" : {
+            "$ref" : "#/$defs/credentialBinding"
+          }
+        },
+        "sshAgent" : {
+          "$ref" : "#/$defs/stringOrList",
+          "description" : "SSH-agent credential ids (each an SSHUserPrivateKey) loaded into a per-step ssh-agent for the step's shell process (design/41). Valid on 'sh' and 'script' steps only; rejected on any other descriptor. Resolved on the controller at dispatch."
+        },
+        "image" : {
+          "type" : "string",
+          "description" : "Container image this step runs in (overrides the stage 'image')."
+        },
+        "retry" : {
+          "$ref" : "#/$defs/retryPolicy",
+          "description" : "Declarative per-step retry policy (design/44). Valid on any executable step. Absent = no retry; the controller re-enqueues a failed step's task with backoff up to maxAttempts."
+        },
+        "timeout" : {
+          "type" : "string",
+          "description" : "Execution deadline for this step (e.g. 30s, 5m, 2h). When the step overruns it, the controller fails the node and the worker kills the process."
+        },
+        "when" : {
+          "description" : "Condition guarding this step (GH #1093). Either a CEL string, or a structured block with exactly one of: branch (glob), previous (success|failure|always), files_changed (glob list). A false condition skips the step (status SKIPPED).",
+          "oneOf" : [ {
+            "type" : "string"
+          }, {
+            "$ref" : "#/$defs/whenCondition"
+          } ]
+        },
+        "env" : {
+          "type" : "object",
+          "description" : "Environment variables injected into this step (GH #239). Merged with pipeline- and stage-level env at dispatch time (step > stage > pipeline precedence). Values must be strings.",
+          "additionalProperties" : {
+            "type" : "string",
+            "oneOf" : [ {
+              "not" : {
+                "pattern" : "^secret:"
+              }
+            }, {
+              "pattern" : "^secret:[^:\\s]+$"
+            } ]
+          }
+        },
+        "sh" : {
+          "description" : "Run a shell command on the agent.",
+          "oneOf" : [ {
+            "type" : "string"
+          }, {
+            "type" : "object"
+          }, {
+            "type" : "null"
+          } ]
+        },
+        "echo" : {
+          "type" : "string",
+          "description" : "Print a message to the build log."
+        },
+        "checkout" : {
+          "description" : "Check out source for the build.",
+          "oneOf" : [ {
+            "type" : "object"
+          }, {
+            "type" : "null"
+          } ]
+        },
+        "script" : {
+          "$ref" : "#/$defs/scriptStep"
+        }
+      }
+    },
+    "scriptStep" : {
+      "type" : "object",
+      "description" : "A 'script' step: a body of code run by a named runtime on the agent.",
+      "required" : [ "runtime", "body" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "runtime" : {
+          "type" : "string",
+          "description" : "The runtime that executes the body.",
+          "examples" : [ "groovy", "bash", "python" ]
+        },
+        "body" : {
+          "type" : "string",
+          "description" : "The script source."
+        }
+      }
+    },
+    "credentialBinding" : {
+      "type" : "object",
+      "description" : "One credential binding (design/39 / design/32 D6): a credential-store id bound into the step as masked, step-scoped environment. Not a wrapping step — Titan has no blocks; a binding is a declarative property of the step.",
+      "required" : [ "id", "type" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "id" : {
+          "type" : "string",
+          "description" : "The credential-store id to resolve."
+        },
+        "type" : {
+          "type" : "string",
+          "enum" : [ "usernamePassword", "string", "file", "sshKey" ],
+          "description" : "The binding type."
+        },
+        "usernameVariable" : {
+          "type" : "string",
+          "description" : "Env var bound to the username (usernamePassword, sshKey)."
+        },
+        "passwordVariable" : {
+          "type" : "string",
+          "description" : "Env var bound to the password (usernamePassword)."
+        },
+        "variable" : {
+          "type" : "string",
+          "description" : "Env var bound to the secret value (string) or the secret file's path (file)."
+        },
+        "keyFileVariable" : {
+          "type" : "string",
+          "description" : "Env var bound to the path of the materialised private-key file (sshKey)."
+        },
+        "passphraseVariable" : {
+          "type" : "string",
+          "description" : "Env var bound to the key passphrase (sshKey)."
+        }
+      }
+    },
+    "retryPolicy" : {
+      "description" : "A declarative per-step retry policy (design/44 §2) — a Temporal-shaped policy with bounded attempts, exponential backoff with a cap, and an optional retryable-exit-code allowlist. Two forms: an integer shorthand 'retry: N' (N attempts, default backoff), or the object form.",
+      "oneOf" : [ {
+        "type" : "integer",
+        "minimum" : 1,
+        "description" : "Shorthand: total attempts including the first (1 = no retry), with the default backoff (initial 10s, multiplier 2.0, max 5m)."
+      }, {
+        "type" : "object",
+        "additionalProperties" : false,
+        "properties" : {
+          "maxAttempts" : {
+            "type" : "integer",
+            "minimum" : 1,
+            "default" : 1,
+            "description" : "Total attempts including the first; 1 = no retry."
+          },
+          "backoff" : {
+            "type" : "object",
+            "additionalProperties" : false,
+            "description" : "The exponential-backoff schedule. The delay before retry k (1-indexed) is min(initial * multiplier^(k-1), max).",
+            "properties" : {
+              "initial" : {
+                "type" : "string",
+                "pattern" : "^[0-9]+[smh]$",
+                "default" : "10s",
+                "description" : "Delay before the first retry — a duration suffixed s/m/h."
+              },
+              "multiplier" : {
+                "type" : "number",
+                "minimum" : 1.0,
+                "default" : 2.0,
+                "description" : "Exponential coefficient applied per attempt."
+              },
+              "max" : {
+                "type" : "string",
+                "pattern" : "^[0-9]+[smh]$",
+                "default" : "5m",
+                "description" : "Cap on the computed delay — a duration suffixed s/m/h; must be >= initial."
+              }
+            }
+          },
+          "retryableExitCodes" : {
+            "type" : "array",
+            "items" : {
+              "type" : "integer"
+            },
+            "description" : "If set, retry only when the step's exit code is in this list; any other non-zero exit fails fast. If absent, any non-zero exit is retryable."
+          }
+        }
+      } ]
+    },
+    "whenCondition" : {
+      "type" : "object",
+      "description" : "A structured step condition (GH #1093): a discriminated union — declare exactly one of branch, previous or files_changed. A false condition skips the step (SKIPPED).",
+      "additionalProperties" : false,
+      "oneOf" : [ {
+        "required" : [ "branch" ]
+      }, {
+        "required" : [ "previous" ]
+      }, {
+        "required" : [ "files_changed" ]
+      } ],
+      "properties" : {
+        "branch" : {
+          "type" : "string",
+          "description" : "Run only when the build's branch matches this glob (e.g. 'main', 'release/*')."
+        },
+        "previous" : {
+          "type" : "string",
+          "enum" : [ "success", "failure", "always" ],
+          "description" : "Run based on the prior step's outcome: success (prior succeeded). NOTE: 'failure' and 'always' are [experimental] — under the engine's default fail-fast mode an upstream failure halts the build before a downstream step is dispatched, so a 'failure'/'always' guard does not yet fire in the upstream-failed scenario (the AncestorClosure fail-fast exemption is a tracked follow-up; see docs/design/75-pdl-when.md). 'success' and all parse/evaluation semantics are fully supported today."
+        },
+        "files_changed" : {
+          "type" : "array",
+          "items" : {
+            "type" : "string"
+          },
+          "minItems" : 1,
+          "description" : "Run only when at least one changed file in the build matches one of these globs."
+        }
+      }
+    },
+    "matrix" : {
+      "type" : "object",
+      "description" : "Stage-level matrix (design/54). A Cartesian product of named axes, optionally filtered by 'exclude' and augmented by 'include'. Fans the stage out into one stage per cell at parse time; step arguments may reference the cell with ${matrix.<axis>}.",
+      "required" : [ "axes" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "axes" : {
+          "type" : "object",
+          "description" : "Named axes of the product. Order is preserved. Each axis is a non-empty list of scalar values (strings, numbers, booleans).",
+          "minProperties" : 1,
+          "additionalProperties" : {
+            "type" : "array",
+            "minItems" : 1,
+            "items" : {
+              "oneOf" : [ {
+                "type" : "string"
+              }, {
+                "type" : "number"
+              }, {
+                "type" : "boolean"
+              } ]
+            }
+          }
+        },
+        "exclude" : {
+          "type" : "array",
+          "description" : "Cells (full or partial — every key matches) to drop from the Cartesian product.",
+          "items" : {
+            "type" : "object",
+            "minProperties" : 1,
+            "additionalProperties" : {
+              "oneOf" : [ {
+                "type" : "string"
+              }, {
+                "type" : "number"
+              }, {
+                "type" : "boolean"
+              } ]
+            }
+          }
+        },
+        "include" : {
+          "type" : "array",
+          "description" : "Off-grid cells to add to the matrix after 'exclude'. Each entry must name every declared axis.",
+          "items" : {
+            "type" : "object",
+            "minProperties" : 1,
+            "additionalProperties" : {
+              "oneOf" : [ {
+                "type" : "string"
+              }, {
+                "type" : "number"
+              }, {
+                "type" : "boolean"
+              } ]
+            }
+          }
+        },
+        "maxParallel" : {
+          "type" : "integer",
+          "minimum" : 1,
+          "description" : "Cap on how many cells run concurrently. Carried onto every generated cell stage; engine-honoured at dispatch."
+        },
+        "fail_fast" : {
+          "type" : "boolean",
+          "default" : true,
+          "description" : "When true (default), any cell failure aborts the fan-out group. When false, every remaining cell runs to completion and the parent stage reports failure only after all cells finish. (#1092)"
+        }
+      }
+    },
+    "each" : {
+      "type" : "object",
+      "description" : "Stage-level 1D iteration (design/55). Fans the stage out into one stage per element of 'in' at parse time; step arguments may reference the cell with ${each.<var>}. Mutually exclusive with 'matrix:' in v1.",
+      "required" : [ "var", "in" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "var" : {
+          "type" : "string",
+          "pattern" : "^[A-Za-z_][A-Za-z0-9_]*$",
+          "description" : "The binding name. Substitution syntax is ${each.<var>}. Must be a valid identifier and must not collide with a reserved name (each, matrix, env, params)."
+        },
+        "in" : {
+          "type" : "array",
+          "minItems" : 1,
+          "description" : "Non-empty list of scalar values to iterate over.",
+          "items" : {
+            "oneOf" : [ {
+              "type" : "string"
+            }, {
+              "type" : "number"
+            }, {
+              "type" : "boolean"
+            } ]
+          }
+        },
+        "maxParallel" : {
+          "type" : "integer",
+          "minimum" : 1,
+          "description" : "Cap on how many cells run concurrently. Carried onto every generated cell stage; engine-honoured at dispatch."
+        }
+      }
+    },
+    "use" : {
+      "type" : "object",
+      "description" : "Stage-level local-template inlining (design/56). 'from' is a repo-relative path to a template file; 'with' supplies keyword args. The template's step list replaces the stage's steps at parse time, with ${param.<name>} substituted. Mutually exclusive with 'steps:', 'matrix:' and 'each:' on the same stage.",
+      "required" : [ "from" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "from" : {
+          "type" : "string",
+          "description" : "Relative local path to the template file, resolved against the pipeline file's directory. Traversal within the repo root is allowed; escaping the repo root is a parse error. Remote / git-ref'd reuse is the domain of 'libraries:' (design/53)."
+        },
+        "with" : {
+          "type" : "object",
+          "description" : "Keyword args passed to the template — each key must name a 'params:' entry declared by the template; values are typed-coerced where safe.",
+          "additionalProperties" : {
+            "oneOf" : [ {
+              "type" : "string"
+            }, {
+              "type" : "number"
+            }, {
+              "type" : "boolean"
+            } ]
+          }
+        }
+      }
+    },
+    "includeEntry" : {
+      "description" : "One include entry (#1120). Either a repo-relative path string to a sibling YAML fragment, or an object { repo, ref, path[, credential] } for a cross-repo fragment fetched via the controller's library fetcher.",
+      "oneOf" : [ {
+        "type" : "string",
+        "description" : "Local include: a repo-relative path to a sibling YAML fragment. URI schemes and absolute paths are rejected (use the object form for cross-repo)."
+      }, {
+        "type" : "object",
+        "required" : [ "repo", "ref", "path" ],
+        "additionalProperties" : false,
+        "properties" : {
+          "repo" : {
+            "type" : "string",
+            "description" : "Git URL of the source repo (https://, ssh://, file://, ...)."
+          },
+          "ref" : {
+            "type" : "string",
+            "description" : "Tag, branch, or full commit SHA to fetch at."
+          },
+          "path" : {
+            "type" : "string",
+            "description" : "Path inside the source repo to the YAML fragment."
+          },
+          "credential" : {
+            "type" : "string",
+            "description" : "Optional secret-store id used to authenticate the fetch (design/40). Plaintext secrets MUST NOT appear here."
+          }
+        }
+      } ]
+    },
+    "notifyHook" : {
+      "type" : "object",
+      "description" : "One lifecycle hook entry (#245). Fired by the orchestrator at the owning scope's terminal state, regardless of which step ran.",
+      "required" : [ "type" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "type" : {
+          "type" : "string",
+          "enum" : [ "webhook", "slack" ],
+          "description" : "The hook kind. 'webhook' = plain HTTP POST (url required, credentialsId optional). 'slack' = Slack inbound-webhook (credentialsId REQUIRED — the stored secret is the workspace-token-bearing URL; url MUST NOT be inline — CONSTITUTION §6)."
+        },
+        "on" : {
+          "type" : "array",
+          "description" : "Terminal-state predicates this hook fires on. Empty means 'always'.",
+          "items" : {
+            "type" : "string",
+            "enum" : [ "success", "failure", "recovery", "always" ]
+          }
+        },
+        "url" : {
+          "type" : "string",
+          "description" : "The POST target URL. Required for 'type: webhook'."
+        },
+        "credentialsId" : {
+          "type" : "string",
+          "description" : "CredentialsService id resolved at dispatch time (design/39). Required for 'type: slack' (the stored secret is the workspace-token-bearing URL); optional for 'type: webhook' (auth header). NEVER store the literal secret here — this is an id reference (CONSTITUTION §6 — NO plaintext secret in config_json)."
+        },
+        "channel" : {
+          "type" : "string",
+          "description" : "Optional Slack channel override (e.g. '#deploys'). Plain display string, not a secret. Only valid for 'type: slack'."
+        }
+      }
+    },
+    "buildRetention" : {
+      "type" : "object",
+      "description" : "Per-job build-retention override (#640). 'keepLast: N' caps this job's build history at the last N rows; 'keepLast: 0' keeps full history for this job regardless of the server-wide default.",
+      "required" : [ "keepLast" ],
+      "additionalProperties" : false,
+      "properties" : {
+        "keepLast" : {
+          "type" : "integer",
+          "minimum" : 0,
+          "description" : "Maximum builds to retain for this job. 0 disables the prune for this job (keeps full history)."
+        }
+      }
+    },
+    "concurrency" : {
+      "description" : "Per-job concurrency limit (#1101). Caps the number of RUNNING builds of this job. Either an integer (short form) or {max, on_overflow}.",
+      "oneOf" : [ {
+        "type" : "integer",
+        "minimum" : 1,
+        "description" : "Short form: maximum RUNNING builds of this job, >= 1."
+      }, {
+        "type" : "object",
+        "required" : [ "max" ],
+        "additionalProperties" : false,
+        "properties" : {
+          "max" : {
+            "type" : "integer",
+            "minimum" : 1,
+            "description" : "Maximum RUNNING builds of this job, >= 1."
+          },
+          "on_overflow" : {
+            "type" : "string",
+            "enum" : [ "queue", "cancel_oldest", "cancel_pending" ],
+            "description" : "Behaviour when a new build arrives at the concurrency ceiling. 'queue' (default) holds the new build until the cap clears; 'cancel_oldest' SIGTERMs the oldest RUNNING build; 'cancel_pending' cancels other QUEUED builds of this job and lets the new build through."
+          }
+        }
+      } ]
+    },
+    "priority" : {
+      "type" : "string",
+      "description" : "Per-job queue priority (#1100). One of: 'high' (weight 10), 'normal' (0, default), 'low' (-10). Higher-priority builds are claimed from task_queue first.",
+      "enum" : [ "high", "normal", "low" ]
+    }
+  }
+}

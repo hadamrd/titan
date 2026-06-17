@@ -1,0 +1,30 @@
+# #1213 contrast fixture — identical to complex-polyglot-matrix.yml but with
+# `fail_fast: false`. Proves a failed cell does NOT cancel its siblings: they run
+# to SUCCESS, only the failed cell's descendants + the fan-in Publish are SKIPPED.
+titan:
+  agent: linux
+  failurePolicy: blockOnFailure
+
+  env:
+    CI: "true"
+    REGISTRY: registry.example.com
+
+  stages:
+    - stage: Build
+      matrix:
+        axes:
+          os: [linux, windows]
+          jdk: [17, 21]
+        exclude:
+          - { os: windows, jdk: 17 }
+        fail_fast: false
+      steps:
+        - sh: "build --os ${matrix.os} --jdk ${matrix.jdk}"
+        - junit: { results: "target/surefire-reports/*.xml" }
+        - archiveArtifacts: { artifacts: "target/app-${matrix.os}-${matrix.jdk}.jar" }
+
+    - stage: Publish
+      dependsOn: [Build]
+      steps:
+        - sh: "publish --registry $REGISTRY"
+        - setOutput: { name: published, value: "true" }

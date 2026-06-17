@@ -1,0 +1,295 @@
+package io.adaptiq.titan.api;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import edu.umd.cs.findbugs.annotations.NonNull;
+import edu.umd.cs.findbugs.annotations.Nullable;
+import io.adaptiq.titan.build.BuildEnqueuer;
+import io.adaptiq.titan.scm.github.GithubAppWebhookSecretComparator;
+import io.adaptiq.titan.scm.pulsar.PulsarChangeDiscovery;
+import io.adaptiq.titan.scm.pulsar.PulsarClientFactory;
+import io.adaptiq.titan.scm.pulsar.PulsarEventSource;
+import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PulsarTrigger;
+import io.adaptiq.titan.store.TitanStores;
+import io.adaptiq.titan.store.rows.JobRow;
+import jakarta.annotation.security.PermitAll;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Collections;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+
+/**
+ * Jakarta REST resource: {@code POST /api/v1/pulsar/events} — the Pulsar App-pattern webhook sink
+ * (issue #1287, convergence axis 2 / scm-depth). The real trigger path: a Pulsar node delivers a
+ * change-event (change opened / revision pushed), and this endpoint HMAC-verifies it, normalizes it
+ * through {@link PulsarEventSource#triggerFor} (clone change revision from Pulsar git smart-HTTP +
+ * discover {@code .titan/pipelines/*.yml}), and dispatches a real build via the SAME seam GitHub
+ * uses — a {@code QUEUED} build + an {@code ORCHESTRATE/SYNTHESIZE} task in one transaction
+ * (mirrors {@link GithubAppWebhookApi#receive}).
+ *
+ * <p><strong>Auth.</strong> {@code @PermitAll} — a Pulsar node does not speak OIDC. Signature
+ * verification is the entire auth check; constant-time HMAC compare via {@link
+ * GithubAppWebhookSecretComparator#constantTimeEquals} (mirrors GitHub's {@code
+ * X-Hub-Signature-256} handling). The secret is sourced from the {@code pulsar.webhook-secret}
+ * config; no secret configured → 401 rather than 500.
+ *
+ * <p><strong>Idempotency.</strong> A Pulsar node re-delivers on any non-2xx. The {@code
+ * X-Pulsar-Delivery} header carries a unique delivery id; absent that, the deterministic event id
+ * {@code <repo>:<changeId>:<revision>} is used. Recent ids are kept in a bounded in-memory LRU and
+ * duplicates within {@link #DELIVERY_TTL_MIN} are fast-skipped, so a redelivery never
+ * double-builds.
+ *
+ * <p><strong>Job resolution.</strong> A change's {@code repo} maps to the Titan job whose {@code
+ * full_name} equals that repo (the App-pattern linkage; UI install + a richer mapping land in
+ * #1283). No matching job → authenticated no-op (2xx, no build), mirroring GitHub's "no matching
+ * job" path.
+ */
+@Path("/api/v1/pulsar/events")
+@Produces(MediaType.APPLICATION_JSON)
+@ApplicationScoped
+@PermitAll
+public class PulsarWebhookApi {
+
+  private static final Logger LOGGER = Logger.getLogger(PulsarWebhookApi.class.getName());
+
+  private static final ObjectMapper MAPPER = new ObjectMapper();
+
+  /** Max delivery-ids retained in the in-memory replay-suppression LRU. */
+  static final int DELIVERY_LRU_CAP = 1024;
+
+  /** TTL after which a delivery id can replay. */
+  static final Duration DELIVERY_TTL_MIN = Duration.ofMinutes(10);
+
+  private final TitanStores stores;
+  private final Supplier<Optional<String>> webhookSecretSource;
+  private final Function<PulsarChangeDiscovery, Optional<PulsarTrigger>> triggerResolver;
+
+  /** Bounded insertion-ordered map → simple LRU for delivery-id replay suppression. */
+  private final Map<String, Instant> deliveryLru =
+      Collections.synchronizedMap(
+          new LinkedHashMap<>(DELIVERY_LRU_CAP * 4 / 3, 0.75f, false) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, Instant> eldest) {
+              return size() > DELIVERY_LRU_CAP;
+            }
+          });
+
+  /** Production constructor — wires the real {@link PulsarEventSource} for the node base URL. */
+  @Inject
+  public PulsarWebhookApi(
+      TitanStores stores,
+      @ConfigProperty(name = "pulsar.webhook-secret") Optional<String> webhookSecret,
+      @ConfigProperty(
+              name = "pulsar.node-base-url",
+              defaultValue = PulsarClientFactory.DEFAULT_ENDPOINT)
+          String nodeBaseUrl) {
+    this(
+        stores,
+        () -> webhookSecret.filter(s -> !s.isBlank()),
+        new PulsarEventSource(nodeBaseUrl)::triggerFor);
+  }
+
+  /** Test-only constructor — explicit secret source + trigger resolver, no network. */
+  PulsarWebhookApi(
+      @NonNull TitanStores stores,
+      @NonNull Supplier<Optional<String>> webhookSecretSource,
+      @NonNull Function<PulsarChangeDiscovery, Optional<PulsarTrigger>> triggerResolver) {
+    this.stores = stores;
+    this.webhookSecretSource = webhookSecretSource;
+    this.triggerResolver = triggerResolver;
+  }
+
+  // ── POST /api/v1/pulsar/events ───────────────────────────────────────────────
+
+  @POST
+  @Consumes(MediaType.APPLICATION_JSON)
+  public Response receive(@jakarta.ws.rs.core.Context HttpHeaders headers, byte[] body) {
+    String signatureHeader = firstHeader(headers, "X-Pulsar-Signature-256");
+    String deliveryId = firstHeader(headers, "X-Pulsar-Delivery");
+    byte[] rawBody = body == null ? new byte[0] : body;
+
+    if (signatureHeader == null || signatureHeader.isBlank()) {
+      return problem(401, "webhook-signature-invalid", "X-Pulsar-Signature-256 header missing");
+    }
+
+    // Step 1: verify signature BEFORE parsing — never let an unauthenticated body reach Jackson.
+    Optional<String> secret = webhookSecretSource.get();
+    if (secret.isEmpty()) {
+      return problem(
+          401,
+          "pulsar-webhook-not-configured",
+          "no pulsar.webhook-secret configured for this node");
+    }
+    if (!verifyHmac(secret.get(), rawBody, signatureHeader)) {
+      return problem(401, "webhook-signature-invalid", "X-Pulsar-Signature-256 did not match");
+    }
+
+    // Step 2: parse (signature already proven, so the body is trusted).
+    JsonNode payload;
+    try {
+      payload = MAPPER.readTree(rawBody);
+    } catch (IOException e) {
+      LOGGER.log(Level.FINE, "[pulsar] body is not JSON", e);
+      return problem(400, "webhook-malformed", "request body is not valid JSON");
+    }
+
+    String repo = payload.path("repo").asText("");
+    String changeId = payload.path("changeId").asText("");
+    String revision = payload.path("revision").asText("");
+    if (repo.isBlank() || changeId.isBlank() || revision.isBlank()) {
+      return problem(
+          400, "pulsar-event-malformed", "payload must carry repo, changeId and revision");
+    }
+
+    // Step 3: idempotency (after signature so an attacker can't poison the LRU). Prefer the
+    // explicit delivery id; fall back to the deterministic (repo,change,revision) identity.
+    String eventId =
+        deliveryId != null && !deliveryId.isBlank()
+            ? deliveryId
+            : eventId(repo, changeId, revision);
+    if (isDuplicateDelivery(eventId)) {
+      LOGGER.log(Level.FINE, "[pulsar] duplicate delivery {0} — skipping", new Object[] {eventId});
+      return Response.noContent().build();
+    }
+
+    // Step 4: resolve the target job BEFORE the (expensive) clone — no job, no work.
+    // A disabled job is the operator's hard stop, exactly like an unlinked repo: the GitHub
+    // mirror gates every match through shouldDispatch (enabled jobs only), so honor `enabled`
+    // here too — otherwise a disabled job would still build on a Pulsar change-event.
+    Optional<JobRow> job = stores.jobs().findByFullName(repo);
+    if (job.isEmpty() || !job.get().enabled) {
+      LOGGER.log(
+          Level.FINE,
+          "[pulsar] change {0}@{1}: no enabled job linked to repo — authenticated no-op",
+          new Object[] {changeId, repo});
+      return Response.noContent().build();
+    }
+
+    // Step 5: normalize via the merged event source (clone tip + discover .titan/pipelines/*.yml).
+    PulsarChangeDiscovery change = PulsarChangeDiscovery.of(repo, changeId, revision);
+    Optional<PulsarTrigger> trigger = triggerResolver.apply(change);
+    if (trigger.isEmpty()) {
+      // Honest no-op: a change with no pipeline file dispatches nothing, never an error.
+      return Response.noContent().build();
+    }
+
+    long buildId =
+        BuildEnqueuer.enqueue(
+            stores,
+            job.get().id,
+            "pulsar:change:" + changeId,
+            "pulsar",
+            "{\"commitSha\":\"" + revision + "\",\"changeId\":\"" + changeId + "\"}",
+            null);
+    LOGGER.log(
+        Level.INFO,
+        "[pulsar] enqueued build {0} for job {1} (change {2}@{3} rev {4})",
+        new Object[] {buildId, job.get().fullName, changeId, repo, revision});
+    return Response.status(202)
+        .entity(Map.of("accepted", true, "repo", repo, "changeId", changeId, "buildId", buildId))
+        .build();
+  }
+
+  // ── HMAC (mirrors GithubAppWebhookApi.verifyHmac) ────────────────────────────
+
+  /**
+   * Verify a {@code sha256=<hex>} header against the node's webhook secret using a constant-time
+   * compare ({@link GithubAppWebhookSecretComparator#constantTimeEquals}).
+   */
+  static boolean verifyHmac(
+      @NonNull String secret, @NonNull byte[] body, @NonNull String signatureHeader) {
+    String prefix = "sha256=";
+    if (!signatureHeader.startsWith(prefix)) {
+      return false;
+    }
+    String hex = signatureHeader.substring(prefix.length());
+    if (hex.isEmpty() || (hex.length() & 1) != 0) {
+      return false;
+    }
+    String expectedHex;
+    try {
+      expectedHex = HexFormat.of().formatHex(hmacSha256(secret, body));
+    } catch (RuntimeException e) {
+      return false;
+    }
+    return GithubAppWebhookSecretComparator.constantTimeEquals(
+        expectedHex, hex.toLowerCase(Locale.ROOT));
+  }
+
+  @NonNull
+  private static byte[] hmacSha256(@NonNull String secret, @NonNull byte[] body) {
+    try {
+      Mac mac = Mac.getInstance("HmacSHA256");
+      mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+      return mac.doFinal(body);
+    } catch (Exception e) {
+      throw new IllegalStateException("HMAC-SHA256 unavailable", e);
+    }
+  }
+
+  // ── idempotency LRU (mirrors GithubAppWebhookApi.isDuplicateDelivery) ────────
+
+  boolean isDuplicateDelivery(@NonNull String eventId) {
+    Instant now = Instant.now();
+    synchronized (deliveryLru) {
+      Instant prev = deliveryLru.get(eventId);
+      if (prev != null && Duration.between(prev, now).compareTo(DELIVERY_TTL_MIN) <= 0) {
+        return true;
+      }
+      deliveryLru.put(eventId, now);
+      return false;
+    }
+  }
+
+  // ── helpers ──────────────────────────────────────────────────────────────────
+
+  @NonNull
+  private static String eventId(
+      @NonNull String repo, @NonNull String changeId, @NonNull String revision) {
+    return repo + ":" + changeId + ":" + revision;
+  }
+
+  @Nullable
+  private static String firstHeader(@Nullable HttpHeaders headers, @NonNull String name) {
+    if (headers == null) {
+      return null;
+    }
+    String v = headers.getHeaderString(name);
+    if (v != null) {
+      return v;
+    }
+    return headers.getHeaderString(name.toLowerCase(Locale.ROOT));
+  }
+
+  @NonNull
+  private static Response problem(int status, @NonNull String slug, @NonNull String detail) {
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("type", "https://titan.adaptiq.io/problems/" + slug);
+    body.put("title", slug);
+    body.put("status", status);
+    body.put("detail", detail);
+    return Response.status(status).type("application/problem+json").entity(body).build();
+  }
+}

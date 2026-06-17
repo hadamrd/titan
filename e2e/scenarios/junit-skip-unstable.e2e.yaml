@@ -1,0 +1,34 @@
+# junit step — `skipMarkingBuildUnstable` keeps a failing report green.
+# Same failing report as junit-fail, but the step opts out of failing: the
+# escape hatch (a familiar parameter name) reports the step green and leaves
+# the tally — still published as step outputs — for a downstream gate to read.
+# Proven distinct from junit-pass by the console line the escape hatch logs.
+name: junit — skipMarkingBuildUnstable keeps a failing report green
+pipeline: |
+  agent: titan-worker-1
+  stages:
+    - stage: report
+      steps:
+        - sh: |
+            mkdir -p target/surefire-reports
+            cat > target/surefire-reports/TEST-app.SmokeTest.xml <<'XML'
+            <?xml version="1.0" encoding="UTF-8"?>
+            <testsuite name="app.SmokeTest" tests="2" failures="1">
+            <testcase name="boots" classname="app.SmokeTest"/>
+            <testcase name="regresses" classname="app.SmokeTest">
+            <failure message="expected true, was false">stack trace here</failure>
+            </testcase>
+            </testsuite>
+            XML
+        - junit:
+            testResults: "**/surefire-reports/TEST-*.xml"
+            skipMarkingBuildUnstable: true
+expect:
+  build: SUCCESS
+  nodes:
+    report: { status: SUCCESS }
+    report-s0: { status: SUCCESS }
+    report-s1: { status: SUCCESS }
+  logContains:
+    - "1 passed, 1 failed, 0 skipped"
+    - "skipMarkingBuildUnstable is set"

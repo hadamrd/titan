@@ -1,0 +1,50 @@
+# pr-roundtrip-fail — the deliberately-RED golden-path fixture (#1240).
+#
+# Deployed to the e2e fixture repo at:
+#   hadamrd/titan-e2e-fixture : .titan/pipelines/pr-roundtrip-fail.yml
+# This tracked copy is the source of truth / provenance for that deployed file;
+# the spec polls the live GitHub repo, not this path.
+#
+# WHY this exists
+#   A credible CI demo must prove BOTH outcomes. The GREEN leg (spec 55 `happy`)
+#   proves SUCCESS → green `ci/titan` check. This pipeline proves the SAD leg:
+#   a failing build must drive the `ci/titan` check to `failure` on the PR HEAD
+#   SHA, with the broken stage NAMED in the description. The worst failure mode
+#   for a CI tool is a broken build showing a misleading green check — this is
+#   the regression guard against exactly that.
+#
+# DETERMINISM
+#   The trigger is branch-scoped to `spec-55/fail-*` so this pipeline fires ONLY
+#   on spec 55's adversarial branch — it never collides with the happy leg's
+#   `spec-55/pass-*` PR (which would otherwise race a red check onto a SHA the
+#   happy leg expects green). credentialsId is required by the trigger grammar;
+#   in the GitHub-App flow the global App webhook secret authenticates the
+#   delivery, so the value is a structural placeholder, not a resolved secret.
+#
+# SHAPE
+#   install (ok) -> test (exit 1, FAILS) -> build (never runs — gated by test)
+agent: linux
+
+triggers:
+  - github:
+      events: ["pull_request", "push"]
+      branches: ["spec-55/fail-*"]
+      credentialsId: "github-app-webhook"
+
+stages:
+  - stage: install
+    steps:
+      - sh: "echo 'install ok'"
+
+  - stage: test
+    dependsOn: [install]
+    steps:
+      # Deliberate red: a non-zero exit maps to a terminal FAILED build, which
+      # GithubStatusReporter maps to GitHub `failure` and names "test" in the
+      # commit-status description ("Build failed: test").
+      - sh: "echo 'running tests' && exit 1"
+
+  - stage: build
+    dependsOn: [test]
+    steps:
+      - sh: "echo 'should never run — the failed test stage short-circuits this'"

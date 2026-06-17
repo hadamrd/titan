@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-01-01T00:00:00.000Z",
+  "provider": "mock",
+  "findings": [
+    {
+      "page": "/jobs",
+      "viewport": "desktop",
+      "rubric_item": "empty_state_present",
+      "verdict": "pass",
+      "evidence": "[mock] empty_state_present on /jobs@desktop → pass",
+      "screenshot": "tour/fixtures/screenshots/jobs--desktop.png"
+    },
+    {
+      "page": "/jobs",
+      "viewport": "desktop",
+      "rubric_item": "loading_state_present",
+      "verdict": "pass",
+      "evidence": "[mock] loading_state_present on /jobs@desktop → pass",
+      "screenshot": "tour/fixtures/screenshots/jobs--desktop.png"
+    },
+    {
+      "page": "/jobs",
+      "viewport": "desktop",
+      "rubric_item": "failure_state_distinguishable",
+      "verdict": "pass",
+      "evidence": "[mock] failure_state_distinguishable on /jobs@desktop → pass",
+      "screenshot": "tour/fixtures/screenshots/jobs--desktop.png"
+    },
+    {
+      "page": "/jobs",
+      "viewport": "desktop",
+      "rubric_item": "primary_affordance_above_fold",
+      "verdict": "fail",
+      "evidence": "[mock] primary_affordance_above_fold on /jobs@desktop → fail",
+      "screenshot": "tour/fixtures/screenshots/jobs--desktop.png"
+    },
+    {
+      "page": "/jobs",
+      "viewport": "desktop",
+      "rubric_item": "layout_balance",
+      "verdict": "pass",
+      "evidence": "[mock] layout_balance on /jobs@desktop → pass",
+      "screenshot": "tour/fixtures/screenshots/jobs--desktop.png"
+    },
+    {
+      "page": "/jobs",
+      "viewport": "desktop",
+      "rubric_item": "text_legibility",
+      "verdict": "warn",
+      "evidence": "[mock] text_legibility on /jobs@desktop → warn",
+      "screenshot": "tour/fixtures/screenshots/jobs--desktop.png"
+    },
+    {
+      "page": "/jobs",
+      "viewport": "mobile",
+      "rubric_item": "mobile_viewport_degradation",
+      "verdict": "pass",
+      "evidence": "[mock] mobile_viewport_degradation on /jobs@mobile → pass",
+      "screenshot": "tour/fixtures/screenshots/jobs--mobile.png"
+    },
+    {
+      "page": "/jobs",
+      "viewport": "mobile",
+      "rubric_item": "primary_affordance_above_fold",
+      "verdict": "warn",
+      "evidence": "[mock] primary_affordance_above_fold on /jobs@mobile → warn",
+      "screenshot": "tour/fixtures/screenshots/jobs--mobile.png"
+    },
+    {
+      "page": "/builds",
+      "viewport": "desktop",
+      "rubric_item": "empty_state_present",
+      "verdict": "pass",
+      "evidence": "[mock] empty_state_present on /builds@desktop → pass",
+      "screenshot": "tour/fixtures/screenshots/builds--desktop.png"
+    },
+    {
+      "page": "/builds",
+      "viewport": "desktop",
+      "rubric_item": "loading_state_present",
+      "verdict": "pass",
+      "evidence": "[mock] loading_state_present on /builds@desktop → pass",
+      "screenshot": "tour/fixtures/screenshots/builds--desktop.png"
+    },
+    {
+      "page": "/builds",
+      "viewport": "desktop",
+      "rubric_item": "failure_state_distinguishable",
+      "verdict": "fail",
+      "evidence": "[mock] failure_state_distinguishable on /builds@desktop → fail",
+      "screenshot": "tour/fixtures/screenshots/builds--desktop.png"
+    },
+    {
+      "page": "/builds",
+      "viewport": "desktop",
+      "rubric_item": "text_legibility",
+      "verdict": "pass",
+      "evidence": "[mock] text_legibility on /builds@desktop → pass",
+      "screenshot": "tour/fixtures/screenshots/builds--desktop.png"
+    },
+    {
+      "page": "/404",
+      "viewport": "desktop",
+      "rubric_item": "text_legibility",
+      "verdict": "warn",
+      "evidence": "[mock] text_legibility on /404@desktop → warn",
+      "screenshot": "tour/fixtures/screenshots/404--desktop.png"
+    },
+    {
+      "page": "/404",
+      "viewport": "desktop",
+      "rubric_item": "layout_balance",
+      "verdict": "pass",
+      "evidence": "[mock] layout_balance on /404@desktop → pass",
+      "screenshot": "tour/fixtures/screenshots/404--desktop.png"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "object_kind": "push",
+  "ref": "refs/heads/main",
+  "checkout_sha": "aabbccddeeff00112233445566778899aabbccdd",
+  "project": {
+    "id": 7,
+    "path_with_namespace": "adaptiq/group/titan"
+  }
+}

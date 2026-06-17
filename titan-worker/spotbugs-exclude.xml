@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpotBugs exclusions for titan-worker.
+
+  Every entry names a class + bug pattern and carries a one-line justification.
+  No blanket package-wide excludes. Each exclusion is a confirmed SpotBugs
+  false positive or intentional code — not a suppressed real bug.
+-->
+<FindBugsFilter>
+  <!--
+    GroovyStepBinding binds the `echo` / `error` / `setOutput` / `sh` builtins
+    as anonymous groovy.lang.Closure subclasses. Their doCall(...) methods are
+    invoked by the Groovy runtime via dynamic dispatch when the user script
+    calls the closure — SpotBugs' static analysis cannot see that call path
+    and wrongly reports them as uncallable.
+
+    (The regex pattern below tracks the io.adaptiq.titan namespace for the
+    GroovyStepBinding anonymous closures.)
+  -->
+  <Match>
+    <Class name="~io\.adaptiq\.titan\.worker\.step\.builtin\.GroovyStepBinding\$\d+" />
+    <Bug pattern="UMAC_UNCALLABLE_METHOD_OF_ANONYMOUS_CLASS" />
+  </Match>
+
+  <!--
+    StepHandlerDiscovery logs an INFO line when a provider was built against an
+    older step-SPI version that is still within the compatibility floor. While
+    StepApi.VERSION equals the floor that branch is currently dead, but it is
+    deliberate forward-compatibility code that becomes live as the SPI evolves.
+  -->
+  <Match>
+    <Class name="io.adaptiq.titan.worker.step.StepHandlerDiscovery" />
+    <Bug pattern="UC_USELESS_CONDITION" />
+  </Match>
+</FindBugsFilter>

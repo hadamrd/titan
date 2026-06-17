@@ -1,0 +1,13 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Maven: Clean Install",
+            "type": "shell",
+            "command": "/usr/bin/mvn clean install",
+            "group": "build",
+            "problemMatcher": [],
+            "detail": "Run Maven clean install"
+        }
+    ]
+}

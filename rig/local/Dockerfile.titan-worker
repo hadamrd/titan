@@ -1,0 +1,28 @@
+# titan-worker runtime image.
+#
+# Input (build context = repo root):
+#   titan-worker/build/libs/titan-worker.jar - shadow / fat jar produced by
+#                                              `./gradlew :titan-worker:shadowJar`.
+
+FROM eclipse-temurin:21-jre
+
+# git is a hard runtime dep — the worker shells out to it for SCM checkouts.
+# docker CLI lets a pipeline `image:` step talk to the host daemon via the
+# bind-mounted socket without needing DinD.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git docker.io \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/titan
+
+# shadowJar emits `titan-worker-<version>.jar`. Copy the whole libs/ tree —
+# the entrypoint then resolves the one fat jar by glob (the sources jar is
+# distinguishable by the `-sources` suffix). Pick by **mtime, newest first**
+# (`ls -t`) so a stale jar left behind by a previous build (e.g. an old
+# `titan-worker-0.1.0-SNAPSHOT.jar` sitting in libs/ from before the version
+# was bumped) doesn't win the alphabetical race against the current jar.
+# Lost ~2h of debugging on this on 2026-05-24 (#867); not again.
+COPY titan-worker/build/libs/ /opt/titan/lib/
+
+ENV JAVA_OPTS=""
+ENTRYPOINT ["sh", "-c", "JAR=$(ls -t /opt/titan/lib/titan-worker-*.jar | grep -v sources | head -1); exec java $JAVA_OPTS -jar \"$JAR\""]

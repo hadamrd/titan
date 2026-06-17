@@ -1,0 +1,27 @@
+# GOLDEN — hand-authored from design/29 §3's canonical example. Unambiguously
+# valid Titan: root-form pipeline, four node kinds, a script step body. Authored
+# by judgment, NOT derived from TitanGrammar — agreement here is a real cross-check.
+agent: linux
+failurePolicy: blockOnFailure
+stages:
+  - stage: Build
+    steps:
+      - sh: mvn clean package
+      - echo: built ok
+  - stage: Smoke Tests
+    when: "params.runSmokeTests == true"
+    dependsOn: [build]
+    steps:
+      - sh: ./smoke.sh
+  - gate: QA Approval
+    requiresApproval: true
+    approvers: [qa-team]
+    dependsOn: [smoke-tests]
+  - stage: Deploy Production
+    dependsOn: [qa-approval]
+    steps:
+      - script:
+          runtime: groovy
+          body: |
+            def v = readVersion()
+            deployHelm(chart: 'my-app', env: 'prod', version: v)

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- REAL pytest 9.0.3 junitxml output, captured from an actual pytest junitxml
+     run. Pretty-printed (insignificant whitespace only) and one absolute path in the
+     <skipped> body replaced with a relative one; every element, attribute and count
+     is verbatim tool output. This is the <testsuites>-wrapper dialect — distinct from
+     Surefire's bare <testsuite> root. tests=4 -> 2 passed, 1 failed, 1 skipped. -->
+<testsuites name="pytest tests">
+  <testsuite name="pytest" errors="0" failures="1" skipped="1" tests="4" time="0.172" timestamp="2026-05-17T20:20:57.192343+02:00" hostname="titan-rig">
+    <testcase classname="test_sample" name="test_addition_passes" time="0.002"/>
+    <testcase classname="test_sample" name="test_string_passes" time="0.001"/>
+    <testcase classname="test_sample" name="test_assertion_fails" time="0.002">
+      <failure message="AssertionError: assert 'expected' == 'actual'&#10;  &#10;  - actual&#10;  + expected">def test_assertion_fails():
+&gt;       assert "expected" == "actual"
+E       AssertionError: assert 'expected' == 'actual'
+E
+E         - actual
+E         + expected
+
+test_sample.py:13: AssertionError</failure>
+    </testcase>
+    <testcase classname="test_sample" name="test_is_skipped" time="0.001">
+      <skipped type="pytest.skip" message="fixture: a skipped test">test_sample.py:16: fixture: a skipped test</skipped>
+    </testcase>
+  </testsuite>
+</testsuites>

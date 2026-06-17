@@ -1,0 +1,3 @@
+# Invalid: the required `stages` key is absent from the pipeline body.
+agent: linux
+failurePolicy: blockOnFailure

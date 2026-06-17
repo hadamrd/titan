@@ -1,0 +1,76 @@
+{{- /*
+A single Ingress fronts the rig on one public host:
+
+  /admin/    → keycloak    (Keycloak admin console)
+  /realms/   → keycloak    (OIDC issuer endpoints — discovery, token, JWKS)
+  /resources/→ keycloak    (Keycloak login-page static assets)
+  /js/       → keycloak    (Keycloak JS adapter)
+  /          → titan-ui    (the SPA; its nginx proxies /api + /q to titan-server)
+
+Order matters — paths are evaluated longest-prefix first by nginx-ingress, so
+specific keycloak prefixes win over the SPA catch-all.
+*/ -}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: titan
+  labels:
+    {{- include "titan.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.ingress.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className | quote }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName | quote }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          {{- if .Values.keycloak.enabled }}
+          - path: /admin
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: {{ .Values.keycloak.service.port }}
+          - path: /realms
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: {{ .Values.keycloak.service.port }}
+          - path: /resources
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: {{ .Values.keycloak.service.port }}
+          - path: /js
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: {{ .Values.keycloak.service.port }}
+          {{- end }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: titan-ui
+                port:
+                  number: {{ .Values.titanUi.service.port }}
+{{- end }}

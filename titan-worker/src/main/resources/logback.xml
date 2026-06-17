@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  titan-worker logging — JSON-per-line via logstash-logback-encoder (#315 PR 3).
+
+  Mirrors the server's structured-log policy (titan-server uses Quarkus's
+  quarkus-logging-json — application.properties enables console JSON with a
+  fixed service.name + service.version). The worker has no Quarkus runtime
+  so it ships its own Logback config: the same JSON-per-line wire format,
+  the same service.name discipline (so Loki / Datadog / Grafana Cloud can
+  union worker + server logs on `service.name`).
+
+  Trace correlation: spans created via the OTel SDK bound in TitanWorker.main
+  publish trace_id / span_id into the SLF4J MDC; the encoder's
+  `includeMdcKeyName` lines surface them at the top level of every JSON record
+  so a log line's trace_id keys directly into the originating server span
+  (continued from task_queue.trace_parent, see TitanWorker#runTask).
+-->
+<configuration>
+
+  <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <!-- Fixed structured fields — match the server's logging discipline. -->
+      <customFields>{"service.name":"titan-worker"}</customFields>
+      <!-- Surface OTel correlation keys at the top level. The OTel SDK's
+           Logback MDC instrumentation populates these on every log statement
+           emitted from a span scope; without `includeMdcKeyName` they would
+           land under a nested `mdc` object, which our log pipeline does not
+           query on. -->
+      <includeMdcKeyName>trace_id</includeMdcKeyName>
+      <includeMdcKeyName>span_id</includeMdcKeyName>
+      <includeMdcKeyName>trace_flags</includeMdcKeyName>
+    </encoder>
+  </appender>
+
+  <!-- Quiet down the noisier transitive libraries — same defaults the server
+       sets in application.properties (io.adaptiq.titan at INFO). -->
+  <logger name="io.adaptiq.titan" level="INFO"/>
+  <logger name="com.zaxxer.hikari" level="WARN"/>
+  <logger name="org.flywaydb" level="WARN"/>
+  <logger name="com.github.dockerjava" level="WARN"/>
+
+  <root level="INFO">
+    <appender-ref ref="JSON"/>
+  </root>
+
+</configuration>

@@ -1,0 +1,35 @@
+# titan-server runtime image.
+#
+# Inputs (build context = repo root):
+#   titan-server/build/quarkus-app/   - the Quarkus fast-jar layout produced by
+#                                       `./gradlew :titan-server:build`.
+#
+# The Dockerfile does NOT compile Java — `task dev:titan` runs the Gradle build
+# first and then `docker compose up`. Keeping compile out of the image keeps
+# the inner loop fast (no JDK + Gradle cache inside the image).
+
+FROM eclipse-temurin:21-jre
+
+# curl is used by the docker-compose healthcheck (the base image's /bin/sh is
+# dash, no /dev/tcp). Cheaper than wget here.
+# git is a runtime dep: the Pulsar SCM scanner (PulsarScanScheduler →
+# PulsarEventSource) shells out to `git` to clone a change revision before
+# discovering its .titan/pipelines (mirrors the worker image, which also needs
+# git for SCM checkouts). Without it the scan no-ops with "Cannot run program git".
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl git \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Quarkus fast-jar layout: copy all four trees verbatim so the loader resolves
+# them at the relative paths quarkus-run.jar's MANIFEST expects.
+COPY titan-server/build/quarkus-app/lib/      /app/lib/
+COPY titan-server/build/quarkus-app/app/      /app/app/
+COPY titan-server/build/quarkus-app/quarkus/  /app/quarkus/
+COPY titan-server/build/quarkus-app/quarkus-run.jar /app/quarkus-run.jar
+
+EXPOSE 8080
+
+ENV JAVA_OPTS=""
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/quarkus-run.jar"]

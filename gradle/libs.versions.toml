@@ -1,0 +1,193 @@
+# Titan — central version catalog (Pivot Phase 1).
+# Every dependency version is pinned ONCE here.
+
+[versions]
+# Build tooling
+gradle                      = "8.14"
+
+# Java toolchain
+java                        = "21"
+
+# Spotless + formatter
+spotless                    = "7.0.3"
+google-java-format          = "1.22.0"
+
+# JaCoCo
+jacoco                      = "0.8.14"
+
+# SpotBugs
+spotbugs-plugin             = "6.1.12"
+spotbugs-annotations        = "4.8.6"
+
+# Testing
+junit-jupiter               = "5.11.4"
+testcontainers              = "1.20.6"
+networknt-schema            = "1.5.6"
+jqwik                       = "1.9.1"
+
+# HTTP / serialization
+jackson                     = "2.21.3"
+slf4j                       = "2.0.17"
+github-api                  = "1.327"
+
+# Quarkus (titan-server HTTP layer)
+quarkus                     = "3.20.3"
+
+# Database
+jdbi                        = "3.53.0"
+hikaricp-server             = "6.0.0"
+hikaricp-worker             = "5.1.0"
+flyway                      = "12.6.1"
+postgresql                  = "42.7.11"
+postgresql-worker           = "42.7.5"
+h2                          = "2.3.232"
+
+# AWS SDK v2 (titan-artifact-s3)
+aws-sdk                     = "2.31.78"
+
+# Groovy (titan-pipeline-model, titan-worker)
+groovy                      = "4.0.24"
+
+# Ant (titan-worker glob scanner)
+ant                         = "1.10.15"
+
+# Docker Java client (titan-worker)
+docker-java                 = "3.4.1"
+
+# Jakarta Servlet API — declared as a runtime-only dep where a transitive consumer needs it.
+jakarta-servlet             = "5.0.0"
+
+# ANTLR4 runtime (titan-server) — needed by the vendored cron grammar
+# under io.adaptiq.titan.trigger.cron.internal.* (see attribution headers there).
+antlr-runtime               = "4.13.2"
+
+# jjwt — JSON Web Token signer used internally by kohsuke's JWTTokenProvider
+# (titan-server GitHub App auth, #874). Loaded reflectively; if absent, kohsuke
+# falls through to a runtime NoClassDefFoundError. Pinned to v0.12.x per the
+# kohsuke deprecation warning emitted by older releases.
+jjwt                        = "0.12.6"
+
+# WireMock — HTTP stubbing for the GitHub API in GithubAppService tests (#832).
+# JUnit 5 standalone module; uses the bundled Jetty embedded server.
+wiremock                    = "3.9.1"
+
+# Logback + Logstash JSON encoder (titan-worker JSON logs — issue #315).
+logback                     = "1.5.12"
+logstash-logback-encoder    = "8.0"
+
+# OpenTelemetry SDK (titan-worker manual autoconfigure boot — issue #315).
+# Server uses the Quarkus OTel extension instead; worker has no Quarkus runtime
+# so it embeds the SDK directly. Pinned together — all opentelemetry-* artifacts
+# must move in lockstep.
+opentelemetry               = "1.45.0"
+
+[libraries]
+# Spotless annotations
+spotbugs-annotations        = { group = "com.github.spotbugs", name = "spotbugs-annotations", version.ref = "spotbugs-annotations" }
+
+# Jackson
+jackson-databind            = { group = "com.fasterxml.jackson.core", name = "jackson-databind", version.ref = "jackson" }
+jackson-dataformat-yaml     = { group = "com.fasterxml.jackson.dataformat", name = "jackson-dataformat-yaml", version.ref = "jackson" }
+jackson-datatype-jsr310     = { group = "com.fasterxml.jackson.datatype", name = "jackson-datatype-jsr310", version.ref = "jackson" }
+
+# SLF4J API (used by non-server modules; Quarkus provides its own logger for titan-server)
+slf4j-api                   = { group = "org.slf4j", name = "slf4j-api", version.ref = "slf4j" }
+slf4j-simple                = { group = "org.slf4j", name = "slf4j-simple", version.ref = "slf4j" }
+
+# Logback + Logstash JSON encoder (titan-worker)
+logback-classic             = { group = "ch.qos.logback", name = "logback-classic", version.ref = "logback" }
+logstash-logback-encoder    = { group = "net.logstash.logback", name = "logstash-logback-encoder", version.ref = "logstash-logback-encoder" }
+
+# OpenTelemetry SDK (titan-worker — manual autoconfigure boot)
+opentelemetry-api                       = { group = "io.opentelemetry", name = "opentelemetry-api", version.ref = "opentelemetry" }
+opentelemetry-sdk                       = { group = "io.opentelemetry", name = "opentelemetry-sdk", version.ref = "opentelemetry" }
+opentelemetry-sdk-extension-autoconfigure = { group = "io.opentelemetry", name = "opentelemetry-sdk-extension-autoconfigure", version.ref = "opentelemetry" }
+opentelemetry-exporter-otlp             = { group = "io.opentelemetry", name = "opentelemetry-exporter-otlp", version.ref = "opentelemetry" }
+
+# GitHub API client (used by titan-server discovery's GitHubRepoSource)
+github-api                  = { group = "org.kohsuke", name = "github-api", version.ref = "github-api" }
+
+# jjwt — required runtime classpath dep for kohsuke's JWTTokenProvider (loaded
+# reflectively from org.kohsuke.github.extras.authorization.JwtBuilderUtil).
+# Three artifacts: API + impl + JSON binding. Without all three, the runtime
+# blows up with java.lang.NoClassDefFoundError: io/jsonwebtoken/Jwts.
+jjwt-api                    = { group = "io.jsonwebtoken", name = "jjwt-api", version.ref = "jjwt" }
+jjwt-impl                   = { group = "io.jsonwebtoken", name = "jjwt-impl", version.ref = "jjwt" }
+jjwt-jackson                = { group = "io.jsonwebtoken", name = "jjwt-jackson", version.ref = "jjwt" }
+
+# Quarkus BOM + extensions (titan-server)
+quarkus-bom                 = { group = "io.quarkus.platform", name = "quarkus-bom", version.ref = "quarkus" }
+quarkus-rest                = { group = "io.quarkus", name = "quarkus-rest" }
+quarkus-rest-jackson        = { group = "io.quarkus", name = "quarkus-rest-jackson" }
+quarkus-smallrye-openapi    = { group = "io.quarkus", name = "quarkus-smallrye-openapi" }
+quarkus-smallrye-health     = { group = "io.quarkus", name = "quarkus-smallrye-health" }
+quarkus-hibernate-validator = { group = "io.quarkus", name = "quarkus-hibernate-validator" }
+quarkus-agroal              = { group = "io.quarkus", name = "quarkus-agroal" }
+quarkus-jdbc-postgresql     = { group = "io.quarkus", name = "quarkus-jdbc-postgresql" }
+quarkus-flyway              = { group = "io.quarkus", name = "quarkus-flyway" }
+quarkus-arc                 = { group = "io.quarkus", name = "quarkus-arc" }
+quarkus-jdbc-h2             = { group = "io.quarkus", name = "quarkus-jdbc-h2" }
+quarkus-oidc                = { group = "io.quarkus", name = "quarkus-oidc" }
+quarkus-scheduler           = { group = "io.quarkus", name = "quarkus-scheduler" }
+quarkus-logging-json        = { group = "io.quarkus", name = "quarkus-logging-json" }
+quarkus-opentelemetry       = { group = "io.quarkus", name = "quarkus-opentelemetry" }
+quarkus-cache               = { group = "io.quarkus", name = "quarkus-cache" }
+quarkus-elytron-security-common = { group = "io.quarkus", name = "quarkus-elytron-security-common" }
+quarkus-micrometer-registry-prometheus = { group = "io.quarkus", name = "quarkus-micrometer-registry-prometheus" }
+quarkus-junit5              = { group = "io.quarkus", name = "quarkus-junit5" }
+quarkus-test-security       = { group = "io.quarkus", name = "quarkus-test-security" }
+quarkus-test-security-oidc  = { group = "io.quarkus", name = "quarkus-test-security-oidc" }
+quarkus-test-keycloak-server = { group = "io.quarkus", name = "quarkus-test-keycloak-server" }
+rest-assured                = { group = "io.rest-assured", name = "rest-assured" }
+
+# JDBI (titan-server)
+jdbi3-core                  = { group = "org.jdbi", name = "jdbi3-core", version.ref = "jdbi" }
+jdbi3-sqlobject             = { group = "org.jdbi", name = "jdbi3-sqlobject", version.ref = "jdbi" }
+
+# Database
+hikaricp-server             = { group = "com.zaxxer", name = "HikariCP", version.ref = "hikaricp-server" }
+hikaricp-worker             = { group = "com.zaxxer", name = "HikariCP", version.ref = "hikaricp-worker" }
+flyway-core                 = { group = "org.flywaydb", name = "flyway-core", version.ref = "flyway" }
+flyway-postgresql           = { group = "org.flywaydb", name = "flyway-database-postgresql", version.ref = "flyway" }
+postgresql                  = { group = "org.postgresql", name = "postgresql", version.ref = "postgresql" }
+postgresql-worker           = { group = "org.postgresql", name = "postgresql", version.ref = "postgresql-worker" }
+h2                          = { group = "com.h2database", name = "h2", version.ref = "h2" }
+
+# AWS SDK v2
+aws-bom                     = { group = "software.amazon.awssdk", name = "bom", version.ref = "aws-sdk" }
+aws-s3                      = { group = "software.amazon.awssdk", name = "s3" }
+awsUrlConnectionClient      = { group = "software.amazon.awssdk", name = "url-connection-client" }
+
+# Groovy
+groovy                      = { group = "org.apache.groovy", name = "groovy", version.ref = "groovy" }
+
+# Ant
+ant                         = { group = "org.apache.ant", name = "ant", version.ref = "ant" }
+
+# Docker Java
+docker-java-core            = { group = "com.github.docker-java", name = "docker-java-core", version.ref = "docker-java" }
+docker-java-transport       = { group = "com.github.docker-java", name = "docker-java-transport-httpclient5", version.ref = "docker-java" }
+
+# Testing
+junit-jupiter               = { group = "org.junit.jupiter", name = "junit-jupiter", version.ref = "junit-jupiter" }
+testcontainers-core         = { group = "org.testcontainers", name = "testcontainers", version.ref = "testcontainers" }
+testcontainers-junit        = { group = "org.testcontainers", name = "junit-jupiter", version.ref = "testcontainers" }
+testcontainers-postgresql   = { group = "org.testcontainers", name = "postgresql", version.ref = "testcontainers" }
+testcontainers-minio        = { group = "org.testcontainers", name = "minio", version.ref = "testcontainers" }
+testcontainers-toxiproxy    = { group = "org.testcontainers", name = "toxiproxy", version.ref = "testcontainers" }
+networknt-schema            = { group = "com.networknt", name = "json-schema-validator", version.ref = "networknt-schema" }
+jqwik                       = { group = "net.jqwik", name = "jqwik", version.ref = "jqwik" }
+
+# Jakarta Servlet API
+jakarta-servlet-api         = { group = "jakarta.servlet", name = "jakarta.servlet-api", version.ref = "jakarta-servlet" }
+
+# ANTLR4 runtime — used by the vendored cron grammar in titan-server
+antlr-runtime               = { group = "org.antlr", name = "antlr4-runtime", version.ref = "antlr-runtime" }
+
+# WireMock — GitHub API stubbing (titan-server tests, #832).
+wiremock                    = { group = "org.wiremock", name = "wiremock", version.ref = "wiremock" }
+
+[plugins]
+spotless                    = { id = "com.diffplug.spotless", version.ref = "spotless" }
+spotbugs                    = { id = "com.github.spotbugs", version.ref = "spotbugs-plugin" }
+quarkus                     = { id = "io.quarkus", version.ref = "quarkus" }

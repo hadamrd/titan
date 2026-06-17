@@ -1,0 +1,31 @@
+# GOLDEN — a realistic parameterised release pipeline a user would hand-write.
+# Every parameter type, a precondition guard, a stage-scoped container image.
+parameters:
+  - name: ENVIRONMENT
+    type: choice
+    description: target environment
+    required: true
+    choices: [dev, staging, prod]
+  - name: DRY_RUN
+    type: boolean
+    default: false
+  - name: VERSION
+    type: string
+    description: release version tag
+libraries:
+  release: "https://example.com/release-utils.git@v1"
+  notify:  "https://example.com/notify-lib.git@v1"
+stages:
+  - precondition: environment-allowed
+    expression: "params.ENVIRONMENT != 'prod' || params.VERSION != ''"
+  - stage: Package
+    image: maven:3.9-eclipse-temurin-21
+    dependsOn: [environment-allowed]
+    steps:
+      - sh: mvn -B package
+      - checkout:
+  - stage: Publish
+    dependsOn: [package]
+    steps:
+      - sh: ./publish.sh
+        retry: 2

@@ -1,0 +1,39 @@
+# sshAgent — an ssh-agent-wrapped step (design/41 §4).
+#
+# RETIRED to `pending` (#1175).
+#
+# This fixture was from the legacy plugin-host era: its `setup:` was a Groovy
+# preamble that seeded an SSH-key credential into the legacy plugin-host
+# credential store via the script console. Phase 3 deleted the legacy plugin
+# host (docs/design/58-phase3-deletion-completed.md), so that preamble is dead —
+# it would NPE on the standalone rig. It has been removed.
+#
+# This scenario stays `pending` for TWO reasons:
+#   1. The generic scenario runner (scenarios.spec.ts) cannot SEED an SSH-key
+#      credential on the standalone rig — the standalone credential surface is
+#      `POST /api/v1/credentials` (Keycloak-authed), which the YAML-only runner
+#      has no hook for.
+#   2. The worker image must ship openssh-client (ssh-agent / ssh-add) — a rig
+#      fixture, not something the harness can self-provision.
+#
+# Kept (not deleted) as a discoverable, standalone-era tombstone: the generic
+# runner registers it as a visible skipped test with the gap spelled out.
+name: sshAgent — ssh-agent-wrapped step
+pending: |
+  The generic runner has no standalone credential-seed hook
+  (POST /api/v1/credentials) to provision the SSH key, and the SSH-key + worker
+  openssh-client fixtures are rig-provisioned, not harness-provisioned. Legacy
+  plugin-host Groovy setup removed per Phase 3.
+pipeline: |
+  agent: titan-worker-1
+  stages:
+    - stage: deploy
+      steps:
+        - sh: ssh-add -l && echo "agent has the key loaded"
+          sshAgent: [e2e-ssh-key]
+expect:
+  build: SUCCESS
+  nodes:
+    deploy: { status: SUCCESS }
+  logContains:
+    - agent has the key loaded

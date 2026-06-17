@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Titan pre-commit quality gate.
+# Install: task install-hooks (copies this into .git/hooks/pre-commit).
+#
+# Gates (fast — under 10s on a normal change):
+#   0. (legacy) No untracked .java under src/main/java/ — the Daos-drift
+#      post-mortem guard (2026-05-10).
+#   1. Spotless formatting on staged Java files (per affected Gradle module).
+#   2. File-size cap: no staged Java file > 1000 lines (god-class guard;
+#      see docs/design/59-orchestrator-decomposition.md for the canonical
+#      decomposition recipe).
+#   4. No staged `pom.xml` / `mvnw` / `.mvn/` (Maven is dead per PR #340).
+#   5. titan-ui vite build + `tsc --noEmit` on staged .ts/.tsx under titan-ui/.
+#      vite build catches the "vitest resolver lenient, rollup strict" orphan/
+#      missing-import drift class (PRs #415, #422, #426, #428). `tsc --noEmit`
+#      catches genuine TS *type* errors that vite build TRANSPILES past
+#      (esbuild strips types without checking them) — the class that reached
+#      trunk green and broke the deploy in #1194 (#1199). Delegated to
+#      dev/git-hooks/ui-precommit-gate.sh. ~15–30s end-to-end: vite build is
+#      ~7s with its incremental cache, and `tsc --noEmit` adds ~5–20s more
+#      depending on a cold vs warm TS cache.
+#   6. (soft) Complexity-based signals on staged Java — cyclomatic complexity,
+#      collaborator count, test:source ratio, fan-in. Informational only:
+#      prints yellow warnings, never blocks. See docs/design/71-complexity-metrics.md
+#      and issue #909.
+#
+# Bypass only with --no-verify, and justify in the PR body.
+
+set -euo pipefail
+RED=$'\e[31m'; GRN=$'\e[32m'; RST=$'\e[0m'
+fail() { echo "${RED}pre-commit: $1${RST}" >&2; exit 1; }
+
+# Gate 0 — untracked .java under src/main/java/ (legacy Daos-drift guard)
+untracked=$(git ls-files --others --exclude-standard -- 'src/main/java/**/*.java' 'src/main/java/*.java' 2>/dev/null || true)
+if [ -n "$untracked" ]; then
+  printf 'ERROR: untracked .java files under src/main/java/\n\n' >&2
+  printf '%s\n' "$untracked" | sed 's/^/    /' >&2
+  printf '\nFix: git add <file>, or rm if scratch. See docs/ops/post-mortems/2026-05-10-daos-facade-drift.md\n' >&2
+  exit 1
+fi
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACM)
+[[ -z "$STAGED" ]] && exit 0
+
+# Gate 4 — forbidden Maven artifacts (Maven is dead per PR #340)
+if echo "$STAGED" | grep -E '(^|/)(pom\.xml|mvnw|\.mvn/)$' >/dev/null; then
+  fail "Gate 4: pom.xml / mvnw / .mvn is forbidden (PR #340). Use Gradle + task verify."
+fi
+
+JAVA_STAGED=$(echo "$STAGED" | grep -E '\.java$' || true)
+
+# Gate 2 — file-size cap (god-class guard)
+# Hard cap: 1000 lines (blocks commit). Soft cap: 700 lines (yellow warning).
+# Without the soft warning, files dance right at the hard cap and growth is
+# only caught at the very last commit before catastrophe. Catching at 700
+# forces a conversation while the class is still maintainable. See
+# docs/design/67-god-object-decomposition.md.
+if [[ -n "$JAVA_STAGED" ]]; then
+  while IFS= read -r f; do
+    LINES=$(git show ":$f" 2>/dev/null | wc -l)
+    if (( LINES > 1000 )); then
+      fail "Gate 2: $f is $LINES lines (cap = 1000). Split it; see docs/design/67-god-object-decomposition.md."
+    elif (( LINES > 700 )); then
+      printf '\033[33mGate 2 soft warning: %s is %s lines (soft cap = 700, hard cap = 1000). Consider extracting a collaborator now.\033[0m\n' "$f" "$LINES" >&2
+    fi
+  done <<< "$JAVA_STAGED"
+fi
+
+# Gate 1 — Spotless on affected modules
+MODULES=$(echo "$STAGED" | awk -F/ '{print $1}' | sort -u)
+GRADLE_MODULES=()
+for m in $MODULES; do
+  [[ -f "$m/build.gradle.kts" || -f "$m/build.gradle" ]] && GRADLE_MODULES+=(":$m")
+done
+EXTENSIONS=$(echo "$STAGED" | awk -F/ '$1=="titan-extensions"{print $2}' | sort -u)
+for e in $EXTENSIONS; do
+  [[ -f "titan-extensions/$e/build.gradle.kts" || -f "titan-extensions/$e/build.gradle" ]] && GRADLE_MODULES+=(":titan-extensions:$e")
+done
+
+if [[ ${#GRADLE_MODULES[@]} -gt 0 ]]; then
+  TASKS=()
+  for gm in "${GRADLE_MODULES[@]}"; do TASKS+=("${gm}:spotlessCheck"); done
+  echo "${GRN}pre-commit: spotlessCheck on ${GRADLE_MODULES[*]}${RST}"
+  if ! ./gradlew --quiet "${TASKS[@]}" >/tmp/titan-precommit-spotless.log 2>&1; then
+    tail -40 /tmp/titan-precommit-spotless.log >&2
+    fail "Gate 1: spotlessCheck failed. Run ./gradlew spotlessApply and re-stage."
+  fi
+fi
+
+# Gate 5 — titan-ui vite build + tsc --noEmit on UI .ts/.tsx changes.
+# vite build alone only TRANSPILES (esbuild strips types) so TS type errors
+# sailed through to the deploy's tsc (#1194); the gate now also type-checks
+# (#1199). Logic lives in dev/git-hooks/ui-precommit-gate.sh so it's unit-
+# testable (see dev/sprint-loop/tests/test_ui_precommit_gate.sh).
+UI_STAGED=$(echo "$STAGED" | grep -E '^titan-ui/.*\.(ts|tsx)$' || true)
+if [[ -n "$UI_STAGED" ]]; then
+  # Split on NEWLINES only (not $IFS space+tab+newline) so a staged path
+  # containing a space stays one positional arg instead of two.
+  readarray -t UI_STAGED_ARR <<< "$UI_STAGED"
+  if ! bash "$(git rev-parse --show-toplevel)/dev/git-hooks/ui-precommit-gate.sh" "${UI_STAGED_ARR[@]}"; then
+    fail "Gate 5: titan-ui build/type-check failed (see message above)."
+  fi
+fi
+
+# Gate 6 — complexity-based soft warnings (issue #909, design 71)
+# Informational only: never fails the commit. Surfaces high CC / too many
+# injected collaborators / under-tested files / high fan-in BEFORE they grow
+# into the 1000-line cap.
+if [[ -n "$JAVA_STAGED" ]]; then
+  PROD_STAGED=()
+  while IFS= read -r f; do
+    [[ "$f" == */src/test/* || "$f" == */src/integrationTest/* ]] && continue
+    PROD_STAGED+=("$f")
+  done <<< "$JAVA_STAGED"
+  if [[ ${#PROD_STAGED[@]} -gt 0 ]]; then
+    bash "$(git rev-parse --show-toplevel)/dev/git-hooks/quality-metrics.sh" check "${PROD_STAGED[@]}" || true
+  fi
+fi
+
+echo "${GRN}pre-commit: gates 0-6 passed${RST}"

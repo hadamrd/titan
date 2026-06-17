@@ -1,0 +1,6 @@
+# GOLDEN INVALID — a `script:` step body missing its required `body` key.
+stages:
+  - stage: Deploy
+    steps:
+      - script:
+          runtime: groovy

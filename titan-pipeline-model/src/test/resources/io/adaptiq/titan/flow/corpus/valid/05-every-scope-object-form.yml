@@ -1,0 +1,30 @@
+# Valid: every scope in its object/list form — credentials list, sshAgent list,
+# dependsOn list, retry object with nested backoff and retryableExitCodes.
+credentials:
+  - id: global-token
+    type: string
+    variable: GLOBAL_TOKEN
+stages:
+  - stage: Deploy
+    image: deployer:1.0
+    credentials:
+      - id: stage-cred
+        type: usernamePassword
+        usernameVariable: STAGE_USER
+        passwordVariable: STAGE_PASS
+    sshAgent: [key-a, key-b]
+    dependsOn: []
+    steps:
+      - sh: ./deploy
+        sshAgent: [step-key]
+        credentials:
+          - id: step-cred
+            type: file
+            variable: STEP_FILE
+        retry:
+          maxAttempts: 5
+          backoff:
+            initial: 10s
+            multiplier: 2.0
+            max: 5m
+          retryableExitCodes: [1, 42]

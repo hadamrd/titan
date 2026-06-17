@@ -1,0 +1,22 @@
+# Failure + failurePolicy: blockOnFailure (the default) — a failed step skips
+# every outstanding downstream node (design/43 §4; TitanOrchestrator §3).
+# `build` fails (exit 1); `deploy` depends on it and must be SKIPPED, not run.
+name: failure — blockOnFailure skips downstream
+pipeline: |
+  agent: titan-worker-1
+  failurePolicy: blockOnFailure
+  stages:
+    - stage: build
+      steps:
+        - sh: echo about to fail; exit 1
+    - stage: deploy
+      dependsOn: [build]
+      steps:
+        - sh: echo should not run
+expect:
+  build: FAILURE
+  nodes:
+    build: { status: FAILED }
+    deploy: { status: SKIPPED }
+  logExcludes:
+    - should not run

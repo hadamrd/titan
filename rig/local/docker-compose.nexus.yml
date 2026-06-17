@@ -1,0 +1,61 @@
+# Opt-in Nexus artifact backend for the local rig (#1229).
+#
+# The base stack boots the `fs` artifact backend. Stack THIS file on top to run
+# a real Sonatype Nexus 3 and route `archiveArtifacts` through the Nexus backend
+# (NexusArtifactStore) — the same code path production uses:
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.override.yml \
+#     -f docker-compose.nexus.yml up -d
+#
+# Credentials/endpoint are env-sourced (mirroring how R2 creds are handled — no
+# plaintext baked into images); the values below are dev-only defaults. Nexus is
+# booted with NEXUS_SECURITY_RANDOMPASSWORD=false so the admin password is the
+# well-known dev value `admin123` instead of a random first-boot secret.
+#
+# ONE-TIME repo bootstrap (Nexus has no declarative repo seeding): after Nexus is
+# healthy, create the raw hosted repo the worker writes to —
+#
+#   curl -u admin:admin123 -X POST \
+#     -H 'Content-Type: application/json' \
+#     http://localhost:8085/service/rest/v1/repositories/raw/hosted \
+#     -d '{"name":"titan-artifacts","online":true,
+#          "storage":{"blobStoreName":"default",
+#                     "strictContentTypeValidation":false,"writePolicy":"ALLOW"}}'
+#
+# Then run the e2e (spec 49) with:
+#   NEXUS_URL=http://localhost:8085 NEXUS_REPOSITORY=titan-artifacts \
+#   NEXUS_USERNAME=admin NEXUS_PASSWORD=admin123 \
+#   LAYER2_RIG_AVAILABLE=1 task e2e -- 49-nexus-publish
+services:
+  nexus:
+    image: sonatype/nexus3:3.70.1
+    environment:
+      # Deterministic dev admin password (admin / admin123) — NOT for production.
+      NEXUS_SECURITY_RANDOMPASSWORD: "false"
+    ports:
+      - "8085:8081"
+    volumes:
+      - nexus-data:/nexus-data
+    restart: unless-stopped
+    networks: [titan]
+
+  titan-server:
+    environment:
+      TITAN_ARTIFACT_STORE: "nexus"
+      TITAN_ARTIFACT_URL: "${TITAN_ARTIFACT_URL:-http://nexus:8081}"
+      TITAN_ARTIFACT_REPOSITORY: "${TITAN_ARTIFACT_REPOSITORY:-titan-artifacts}"
+      TITAN_ARTIFACT_USERNAME: "${TITAN_ARTIFACT_USERNAME:-admin}"
+      TITAN_ARTIFACT_PASSWORD: "${TITAN_ARTIFACT_PASSWORD:-admin123}"
+
+  titan-worker:
+    environment:
+      TITAN_ARTIFACT_STORE: "nexus"
+      TITAN_ARTIFACT_URL: "${TITAN_ARTIFACT_URL:-http://nexus:8081}"
+      TITAN_ARTIFACT_REPOSITORY: "${TITAN_ARTIFACT_REPOSITORY:-titan-artifacts}"
+      TITAN_ARTIFACT_USERNAME: "${TITAN_ARTIFACT_USERNAME:-admin}"
+      TITAN_ARTIFACT_PASSWORD: "${TITAN_ARTIFACT_PASSWORD:-admin123}"
+
+volumes:
+  nexus-data:

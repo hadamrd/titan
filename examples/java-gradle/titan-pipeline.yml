@@ -1,0 +1,36 @@
+# Java service (Gradle) — build, test across a JDK matrix, publish JUnit.
+#
+# Adapted from e2e/pipelines/java-matrix. The `test` stage fans out over a
+# JDK matrix; each cell exposes `MATRIX_JDK`. The `junit` step parses the
+# Surefire/Gradle XML so results show up in the build detail.
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+
+stages:
+  - stage: build
+    steps:
+      # Compile without running tests; the matrix stage owns testing.
+      - sh: ./gradlew build -x test
+
+  - stage: test
+    dependsOn: [build]
+    matrix:
+      axes:
+        # Validate the build on the JDKs you support.
+        jdk: ["17", "21"]
+      fail_fast: false
+    steps:
+      - sh: |
+          echo "Running tests on JDK $MATRIX_JDK"
+          ./gradlew test
+      # Gradle writes JUnit XML under build/test-results/test/.
+      - junit: "build/test-results/test/*.xml"
+
+  - stage: package
+    dependsOn: [test]
+    steps:
+      - sh: ./gradlew assemble
+      - archiveArtifacts:
+          artifacts: "build/libs/*.jar"
+          fingerprint: true

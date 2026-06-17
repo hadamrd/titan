@@ -1,0 +1,56 @@
+# Complex multi-scope fixture — a fan-out / fan-in DAG with guards.
+#
+# Shape (diamond with a precondition guard arm):
+#
+#         Checkout
+#         /      \
+#      Unit      Integration
+#        \        /
+#       Quality Gate (precondition: both suites green)
+#            |
+#         Package
+#            |
+#    Deploy Staging  (when: params.deploy == true)
+#
+# Combines: dependsOn diamond + precondition (runtime expression on outputs)
+# + when (parameter-gated stage) + parameters.
+titan:
+  agent: linux
+  failurePolicy: blockOnFailure
+
+  parameters:
+    - name: deploy
+      type: boolean
+      default: true
+
+  stages:
+    - stage: Checkout
+      steps:
+        - sh: git fetch --all
+
+    - stage: Unit
+      dependsOn: [Checkout]
+      steps:
+        - sh: make unit
+        - setOutput: { name: passed, value: "true" }
+
+    - stage: Integration
+      dependsOn: [Checkout]
+      steps:
+        - sh: make integration
+        - setOutput: { name: passed, value: "true" }
+
+    - precondition: Quality Gate
+      expression: "steps['Unit'].outputs.passed == true && steps['Integration'].outputs.passed == true"
+      dependsOn: [Unit, Integration]
+
+    - stage: Package
+      dependsOn: [Quality Gate]
+      steps:
+        - sh: make package
+
+    - stage: Deploy Staging
+      when: "params.deploy == true"
+      dependsOn: [Package]
+      steps:
+        - sh: ./deploy.sh staging

@@ -1,0 +1,18 @@
+# Titan pipeline test fixture — design/68 / #947 onFailure handler scope.
+# Build runs, Test runs after Build. NotifyOps is a failure-handler — it
+# advances iff at least one of [Build, Test] reaches a terminal FAILED state.
+titan:
+  stages:
+    - stage: Build
+      steps:
+        - sh: ./build.sh
+
+    - stage: Test
+      dependsOn: [Build]
+      steps:
+        - sh: ./test.sh
+
+    - stage: NotifyOps
+      onFailure: [Build, Test]
+      steps:
+        - sh: ./escalating-to-pagerduty.sh

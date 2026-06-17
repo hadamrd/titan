@@ -1,0 +1,4 @@
+# Titan built-in ArtifactStore backends (design/41 §8.6).
+# A new backend (S3, Postgres-LO, Nexus-raw, …) adds its provider here — or in
+# its own module's services file — with no core change.
+io.adaptiq.titan.flow.artifact.FilesystemArtifactStoreProvider

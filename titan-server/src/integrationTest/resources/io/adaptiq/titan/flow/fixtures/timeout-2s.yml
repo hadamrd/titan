@@ -1,0 +1,6 @@
+titan:
+  stages:
+    - stage: Slow
+      steps:
+        - sh: ./slow.sh
+          timeout: 2s

@@ -1,0 +1,7 @@
+# GOLDEN INVALID — a precondition without its required `expression` key.
+stages:
+  - precondition: must-be-main
+  - stage: Build
+    dependsOn: [must-be-main]
+    steps:
+      - sh: make

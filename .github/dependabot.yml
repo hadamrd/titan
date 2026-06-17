@@ -1,0 +1,39 @@
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuring-dependabot-version-updates
+#
+# Weekly cadence keeps the dependency churn manageable while still
+# catching CVEs within a sprint. Each PR is auto-labelled `theme:devops`
+# so the release-drafter changelog groups them under "🔧 DevOps".
+
+version: 2
+updates:
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - theme:devops
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - theme:devops
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - theme:devops
+    open-pull-requests-limit: 5
+    # Bundle the htmx + tailwind + zustand updates the frontend depends
+    # on; security-flagged PRs land independently per dependabot's
+    # default policy.
+    groups:
+      frontend-runtime:
+        dependency-type: production
+      frontend-build:
+        dependency-type: development

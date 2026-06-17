@@ -1,0 +1,42 @@
+# Golden-path PR roundtrip (happy) — issue #1133.
+#
+# Three-stage linear pipeline used by 55-golden-path-pr-roundtrip.spec.ts to
+# drive a green PR check back to GitHub. The middle stage emits a long-ish
+# multi-line log so the spec can prove the SSE log panel sees a *delta* (line
+# count growing inside a 2s window) rather than a one-shot static render.
+#
+# The spec owns the assertion that:
+#   - the build reaches SUCCESS
+#   - a status check with state=success is posted against the PR head SHA
+#     (NOT the base SHA — regression guard against the BuildDispatcher
+#      refactor case called out in the ticket body).
+name: pr-roundtrip-pass — happy path with streaming logs
+pipeline: |
+  agent: titan-worker-1
+  stages:
+    - stage: build
+      steps:
+        - sh: echo building
+    - stage: test
+      dependsOn: [build]
+      steps:
+        - sh: |
+            for i in 1 2 3 4 5; do
+              echo "spec-55 test line $i"
+              sleep 0.2
+            done
+    - stage: deploy
+      dependsOn: [test]
+      steps:
+        - sh: echo deploying
+expect:
+  build: SUCCESS
+  nodes:
+    build: { status: SUCCESS }
+    test: { status: SUCCESS }
+    deploy: { status: SUCCESS }
+  logContains:
+    - building
+    - spec-55 test line 1
+    - spec-55 test line 5
+    - deploying

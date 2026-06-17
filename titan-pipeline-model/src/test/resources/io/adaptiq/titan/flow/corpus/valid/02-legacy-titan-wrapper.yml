@@ -1,0 +1,7 @@
+# Valid: the legacy `titan:` wrapper form (design/29 §3) — same body, nested.
+titan:
+  agent: linux
+  stages:
+    - stage: Build
+      steps:
+        - sh: make

@@ -1,0 +1,9 @@
+# Valid: stage-level `timeout:` scope — a bare integer (seconds) flattened onto every step.
+# Originally filed as invalid/02-unknown-stage-key.yml under the assumption that `timeout`
+# was an unrecognised key; in fact TimeoutScope registers "timeout" in STAGE_KEYS, so this
+# is a legal construct and the parser correctly accepts it.
+stages:
+  - stage: Build
+    timeout: "30s"
+    steps:
+      - sh: make

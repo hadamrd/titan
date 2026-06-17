@@ -1,0 +1,186 @@
+# ── Gradle ────────────────────────────────────────────────────────────────────
+.gradle/
+build/
+**/build/
+
+# H2 database files dropped by tests/dev runs in unexpected locations.
+# Real H2 files live under target/test-* or build/test-* (gitignored by build/).
+# A bare *.mv.db at module root means some test hardcoded a relative jdbc URL.
+*.mv.db
+*.trace.db
+*.lock.db
+# Keep the wrapper jar — it's a committed bootstrap artifact
+!gradle/wrapper/gradle-wrapper.jar
+# Keep the io.adaptiq.titan.build source package — the **/build/ pattern above
+# is unanchored and would otherwise hide titan-server's domain build/ folder.
+!titan-server/src/main/java/io/adaptiq/titan/build/
+!titan-server/src/test/java/io/adaptiq/titan/build/
+!titan-server/src/integrationTest/java/io/adaptiq/titan/build/
+
+# Keep the titan-ui src/lib directory — contributors with a global ~/.gitignore
+# that excludes `lib/` would otherwise silently drop these files at commit
+# (PR #415 and PR #422 both shipped orphan imports because of this).
+# A repo-level un-ignore overrides the global rule.
+!titan-ui/src/lib/
+!titan-ui/src/lib/**
+# Same reason for the e2e harness's shared lib/ (parkour suite, #1061).
+!e2e/lib/
+!e2e/lib/**
+
+# Ad-hoc Playwright screenshots dropped at repo root by Playwright MCP
+# probes during development. Real test screenshots live under
+# rig/e2e/ui/test-results/ (gitignored there).
+rig-*.png
+.playwright-mcp/
+
+# Forge-loop sprint telemetry — investigation/loop state written at repo root by
+# the autonomous sprint loop. Never belongs in a feature PR or the product tree.
+sprint-events.jsonl
+
+# Playwright outputs (e2e/)
+e2e/playwright-report/
+e2e/test-results/
+e2e/pnpm-lock.yaml
+e2e/node_modules/
+
+# IntelliJ IDEA project files
+*.iml
+*.iws
+*.ipr
+.idea
+
+# Eclipse project files
+.settings
+.classpath
+.project
+
+# VS Code (per-developer)
+.vscode/settings.json
+
+# Local dev secrets — never commit
+.env
+.secrets
+dev/.env
+dev/.secrets
+# Filled Layer-2 / independent-verify env (#1241). The committed template is
+# e2e/.env.layer2.example; a real .env.layer2 holds R2/Nexus creds — never commit.
+e2e/.env.layer2
+# Filled golden-path round-trip demo-gate env (#1239). Template is
+# e2e/.env.golden-roundtrip.example; a real one holds the App webhook secret.
+e2e/.env.golden-roundtrip
+agent
+dev/agent
+
+# smee.io channel URL provisioned by `task dev:tunnel` — public webhook
+# ingress for the developer's laptop, never commit (see
+# docs/ops/runbooks/github-app-dev.md).
+dev/.smee-channel
+dev/.smee-channel-raw
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code per-developer state (history, locks, settings) is ignored,
+# but the project-level agent + skill library lives here intentionally
+# (committed so contributors all use the same prompts).
+.claude/*
+!.claude/agents/
+!.claude/skills/
+
+# Frontend build (titan-ui)
+node_modules/
+node/
+.vite/
+
+# Dev-iteration logs (ad-hoc names, not stable artifacts).
+verify.log
+*-test.log
+target-compile.log
+test-output.log
+retest*.log
+.playwright-mcp/console-*.log
+.playwright-mcp/page-*.yml
+.gitignore
+app-detail-*.png
+
+# Dev-iteration screenshots dropped at repo root by ad-hoc smoke runs.
+01-*.png
+02-*.png
+03-*.png
+04-*.png
+moabs-page.html
+
+# Dev-iteration scripts created by boot-verifier-agent runs.
+run-hpi.bat
+
+# Test-iteration logs created by test-agent runs.
+test-run-*.log
+
+# Local debug scratchpads (from PO orchestrator probes during 2026-05-10).
+.tmp/
+.tmp_*.sh
+
+# Parallel-agent git worktrees (one per dispatched agent — see PIVOT.md
+# discipline rule on isolation). Worktrees commit to their own branches;
+# the directories themselves are never tracked.
+.worktrees/
+
+# jqwik property-based testing runtime state (written to module root at test time)
+.jqwik-database
+
+# Maven Shade plugin byproduct (titan-worker)
+dependency-reduced-pom.xml
+
+# Titan E2E rig (rig/local/) — generated build artifacts + local secrets.
+# The rig sources (Dockerfiles, compose, jcasc, scripts) ARE tracked; these
+# are staged copies / credentials and must not be.
+rig/local/release-flow.hpi
+rig/local/titan-worker.jar
+rig/local/pg-driver.jar
+rig/local/ssh_key
+rig/local/.env
+rig/local/hpi-stage/
+rig/local/.dev/
+rig/local/infisical-token
+
+# Titan k3s rig (rig/k3s/) — the operator's filled-in site values.
+# rig-values.example.yaml IS tracked; rig-values.yaml never is.
+rig/k3s/rig-values.yaml
+
+*.log
+*.png
+.task/
+.claude/settings.local.json
+
+# forge-loop runtime state — committed `forge-loop.yaml` is the project's
+# loop config; everything below is operator-local and must stay out of git.
+docs/ops/loop-runner.json
+docs/ops/loop-runner-events.jsonl
+docs/ops/loop-runner-summaries.jsonl
+docs/ops/loop-runner.pid
+docs/ops/loop-runner.pause
+docs/ops/loop-runner.stop
+docs/ops/loop-runner.HALT
+docs/ops/loop-runner-logs/
+docs/ops/all-nighter.log
+docs/ops/rig-smoke.jsonl
+# Per-operator overrides to forge-loop.yaml
+forge-loop.local.yaml
+# Multi-repo config dir (lives under ~/.forge/repos/ when used)
+.forge/
+# Loop drops its own permissive .claude/settings.json into the repo root
+# during worker dispatch; never let that leak into a commit.
+.claude/settings.json
+
+# ── titan-mcp (Python — #1062) ───────────────────────────────────────────────
+titan-mcp/.venv/
+titan-mcp/.pytest_cache/
+titan-mcp/**/__pycache__/
+titan-mcp/*.egg-info/
+titan-mcp/src/*.egg-info/
+titan-mcp/dist/
+rig/k3s/deploy.env
+docs/ops/loop.jsonl
+docs/ops/loop-runner-tmux.log
+docs/ops/loop-runner-spend.jsonl

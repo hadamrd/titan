@@ -1,0 +1,14 @@
+# Valid: step-level when: — per-step conditional execution (GH #240).
+# A step's `when:` is independent of the stage-level `when:`; both coexist.
+stages:
+  - stage: Build
+    when: "${params.RUN_BUILD}"
+    steps:
+      - sh: mvn package
+        when: "${params.SKIP_COMPILE == false}"
+      - sh: mvn verify
+  - stage: Deploy
+    steps:
+      - sh: ./deploy.sh
+        when: "${params.BRANCH == 'main'}"
+      - sh: ./notify.sh

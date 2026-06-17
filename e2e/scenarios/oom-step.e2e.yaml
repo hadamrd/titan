@@ -1,0 +1,56 @@
+# Adversarial golden-path: a step that exceeds the worker's memory limit
+# terminates with a clear, human-readable reason — issue #1116 / EPIC #831.
+#
+# Customer story: "If the worker kills my build, I need to see WHY in the UI.
+# 'exit 137' is not an answer — that's a SRE-1 paging trigger every time."
+#
+# Expected behaviour (NOT YET IMPLEMENTED — see PENDING below):
+#   - the worker's process supervisor inspects the OS-level termination cause
+#     of any step process that exits non-zero with signal SIGKILL while
+#     resident-set-size was at the cgroup limit, and emits a typed
+#     `StepTerminationReason.OOM` event (cross-module enum per the manifesto,
+#     §"No stringly-typed cross-module discriminators")
+#   - the orchestrator maps that event onto the node's `failureReason` field
+#   - the streamed log line + the build-detail UI surface a single
+#     `killed: OOM` line at the top of the failed step, alongside the raw
+#     `exit 137` (the latter for forensics, the former for humans)
+#
+# Until the worker side ships, this scenario is registered as PENDING so it
+# shows up in `--list` and the HTML report as a documented gap, but does not
+# fail the suite. See design/<TODO> — worker OOM detection.
+#
+# UI-LAYER SIBLING (#1175): this scenario asserts the LOG surfaces. The
+# build-detail-UI-DOM assertion the generic runner cannot make lives at
+# e2e/specs/golden-path-oom.spec.ts (data-status FAILED + OOM-classified reason
+# chip), driven by e2e/pipelines/oom-step/titan-pipeline.yml — the same
+# 512MiB-in-64MiB shape as the `pipeline:` below. Both gate on #1116.
+name: "oom-step — exceeds memory limit, surfaces 'killed: OOM' not 'exit 137'"
+pending: |
+  Requires titan-worker OOM detection (StepTerminationReason.OOM enum +
+  cgroup RSS inspection + UI reason rendering). Tracks issue #1116
+  acceptance criterion 3.
+pipeline: |
+  agent: titan-worker-1
+  resources:
+    memoryLimitMb: 64
+  stages:
+    - stage: hog
+      steps:
+        # Allocate ~512 MiB inside a 64 MiB cgroup — must be reaped by the OOM
+        # killer, surfacing signal SIGKILL with no clean exit. The worker
+        # supervisor inspects cgroup.events / memory.events and tags the
+        # termination as OOM.
+        - sh: |
+            python3 -c 'a = bytearray(512 * 1024 * 1024); print(len(a))'
+expect:
+  build: FAILURE
+  nodes:
+    hog: { status: FAILED }
+  logContains:
+    # The human-readable reason MUST appear; the raw signal is acceptable
+    # alongside but never alone.
+    - 'killed: OOM'
+  logExcludes:
+    # A bare `exit 137` with no OOM annotation is the regression class this
+    # fixture guards against.
+    - 'exit 137 (no reason)'

@@ -1,0 +1,12 @@
+# Main pipeline that pulls in the shared lint+test prelude (issue #1120 fixture).
+#
+# The customer ask, verbatim: "Every repo has the same lint+test prelude. In GitLab I use
+# include, in GHA I use reusable workflows. If I have to copy-paste 40 lines into every
+# titan-pipeline.yml I will not migrate."
+include:
+  - shared/lint-test.yml
+stages:
+  - stage: deploy
+    dependsOn: test
+    steps:
+      - sh: ./scripts/deploy.sh

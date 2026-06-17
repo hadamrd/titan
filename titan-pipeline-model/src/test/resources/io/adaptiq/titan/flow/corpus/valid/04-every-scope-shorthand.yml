@@ -1,0 +1,15 @@
+# Valid: every grammar scope in shorthand form — sshAgent/dependsOn/retry as scalars,
+# image as a string. sshAgent is on a `sh` step (design/41 §2.1 restriction).
+stages:
+  - stage: First
+    image: busybox
+    when: "true"
+    retry: 3
+    steps:
+      - sh: deploy.sh
+        sshAgent: prod-key
+        retry: 2
+  - stage: Second
+    dependsOn: First
+    steps:
+      - sh: echo done

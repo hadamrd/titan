@@ -1,0 +1,28 @@
+# A Tier-1 container step — a *.titanstep.yaml manifest step (design/42, §4).
+#
+# Rig fixture (provisioned): rig/local/worker-steps/e2e-container-scan.titanstep.yaml
+# is a Tier-1 manifest, bind-mounted into the worker at /opt/titan/steps
+# (TITAN_STEPS_DIR — see rig/local/docker-compose.yml). The worker
+# discovers it at startup and logs:
+#   step discovery: loaded Tier-1 container step manifest ... step=e2eContainerScan
+# The worker also has the host Docker socket mounted so the manifest's
+# container image (alpine:3.20) can run.
+#
+# The step's `message` argument substitutes into the manifest command's
+# `${{ args.message }}` placeholder — the worker resolves placeholders from the
+# step's argument map by key (ContainerManifestStepHandler.substitute), so
+# `message` is passed as a plain top-level step argument.
+name: container step — Tier-1 manifest step
+pipeline: |
+  agent: titan-worker-1
+  stages:
+    - stage: scan
+      steps:
+        - e2eContainerScan:
+            message: "container step ran"
+expect:
+  build: SUCCESS
+  nodes:
+    scan: { status: SUCCESS }
+  logContains:
+    - container step ran

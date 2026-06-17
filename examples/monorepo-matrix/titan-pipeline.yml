@@ -1,0 +1,44 @@
+# Monorepo — fan out per package, fan back in.
+#
+# Demonstrates two fan-out scopes and DAG fan-in:
+#   * `each:` fans the `test` stage over a list of packages (one cell per
+#     package, `${each.package}` substitution).
+#   * `matrix:` fans the `build` stage over packages — equivalent fan-out
+#     with per-cell `MATRIX_PACKAGE` env injection.
+#   * `release` depends on both prototypes; a `dependsOn` that names a
+#     fanned-out stage resolves to ALL its cells (fan-in), so release waits
+#     for every package's build and test to finish.
+
+env:
+  CI: "true"
+
+stages:
+  # Fan out testing over each package with `each:` (no env injected; uses
+  # the ${each.package} substitution token).
+  - stage: test
+    each:
+      var: package
+      in: [api, web, worker]
+    steps:
+      - sh: "make -C packages/${each.package} test"
+
+  # Fan out building over the same packages with `matrix:` — here each cell
+  # also gets a MATRIX_PACKAGE environment variable.
+  - stage: build
+    matrix:
+      axes:
+        package: [api, web, worker]
+      maxParallel: 2
+    steps:
+      - sh: |
+          echo "Building package $MATRIX_PACKAGE"
+          make -C "packages/$MATRIX_PACKAGE" build
+      - archiveArtifacts:
+          artifacts: "packages/${matrix.package}/dist/**"
+          allowEmptyArchive: true
+
+  # Fan-in: depends on every cell of both fanned-out stages above.
+  - stage: release
+    dependsOn: [test, build]
+    steps:
+      - sh: ./scripts/release.sh

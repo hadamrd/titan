@@ -1,0 +1,2 @@
+# Titan socle steps — discovered by ServiceLoader (design/42 §4.2, §4.3).
+io.adaptiq.titan.worker.step.SocleStepHandlerProvider

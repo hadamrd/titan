@@ -1,0 +1,69 @@
+# Build-failure root-cause signatures (issue #1105).
+#
+# Consumed by BuildFailureClassifier: each entry maps a FailureCause to an
+# ordered list of Java regexes (java.util.regex.Pattern, matched case-insensitive
+# with find() against each log line) and an OPTIONAL `exit_codes:` list. The FIRST
+# signature whose ANY pattern hits a log line wins — so order entries
+# most-specific-first. The matched log line is stored verbatim as the "why this was
+# classified" tooltip snippet. If NO pattern matches, the failing step's exit code
+# is tried as a fallback: the first signature listing it under `exit_codes:` wins
+# (e.g. a container OOMKilled with exit 137 but no OutOfMemoryError log line).
+#
+# This file is the externally-configurable knob the spec calls for: add a cause
+# signature here, no code change. A `cause:` key MUST be a FailureCause.wire()
+# name (test_failure | compile_error | oom | timeout | network | rate_limit) —
+# a typo fails loud at classifier load time. `unknown` is the fallthrough and is
+# intentionally NOT listed here.
+signatures:
+  # OOM is catastrophic and can masquerade as a test/compile failure downstream,
+  # so it is diagnosed first.
+  - cause: oom
+    # 137 = 128 + SIGKILL(9): the cgroup OOM-killer reaping the container. The kill
+    # often leaves no JVM OutOfMemoryError line, so the exit code is the only signal.
+    exit_codes: [137]
+    patterns:
+      - "java\\.lang\\.OutOfMemoryError"
+      - "GC overhead limit exceeded"
+      - "Container .* was OOMKilled"
+      - "Killed process \\d+"
+      - "out of memory"
+
+  # GitHub / registry throttling — more specific than a generic network error,
+  # so it is matched before `network`.
+  - cause: rate_limit
+    patterns:
+      - "API rate limit exceeded"
+      - "secondary rate limit"
+      - "rate limit"
+      - "429 Too Many Requests"
+
+  - cause: timeout
+    patterns:
+      - "timed out"
+      - "timeout exceeded"
+      - "deadline exceeded"
+      - "operation timed out after"
+
+  - cause: network
+    patterns:
+      - "Connection refused"
+      - "Could not resolve host"
+      - "Network is unreachable"
+      - "Temporary failure in name resolution"
+      - "Connection reset by peer"
+
+  - cause: compile_error
+    patterns:
+      - "COMPILATION ERROR"
+      - "error: cannot find symbol"
+      - "error: incompatible types"
+      - "cannot find symbol"
+      - "compilation failure"
+
+  - cause: test_failure
+    patterns:
+      - "There were failing tests"
+      - "Tests run: \\d+, Failures: [1-9]"
+      - "FAILED.*\\bTest\\b"
+      - "AssertionError"
+      - "tests? failed"

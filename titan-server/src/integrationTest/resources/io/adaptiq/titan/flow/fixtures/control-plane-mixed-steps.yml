@@ -1,0 +1,10 @@
+# GH #805 IT fixture: a stage with all three control-plane step kinds
+# (setBuildName, approval, sleep) plus a normal worker step (sh). Used by
+# ControlPlaneStepDispatchIT to assert that exactly ONE task_queue row is
+# created — for `sh` — and that the controller-native steps never leak
+# onto the worker queue.
+titan:
+  stages:
+    - stage: Worker
+      steps:
+        - sh: echo worker-only

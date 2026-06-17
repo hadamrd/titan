@@ -1,0 +1,15 @@
+# Titan pipeline test fixture — a single-step pipeline whose step carries a
+# retry: policy (design/44). Used by TitanOrchestratorRetryIT to drive the
+# orchestrator's step-failure / re-dispatch path.
+#
+# maxAttempts 3 with a tiny backoff (initial 1s, max 2s) — short enough that an
+# integration test can drive the delayed retry to completion without waiting
+# minutes, while still proving the future available_at is applied.
+titan:
+  stages:
+    - stage: Flaky
+      steps:
+        - sh: ./flaky.sh
+          retry:
+            maxAttempts: 3
+            backoff: { initial: 1s, multiplier: 2.0, max: 2s }

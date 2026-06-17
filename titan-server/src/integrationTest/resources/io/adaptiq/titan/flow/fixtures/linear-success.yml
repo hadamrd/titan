@@ -1,0 +1,12 @@
+# Linear-success fixture for OrchestratorIdempotenceProperty.
+# Two single-step stages, no gates / approvals. Closes SUCCESS once both steps
+# are folded by the synthetic worker the property test drives.
+titan:
+  stages:
+    - stage: Build
+      steps:
+        - sh: echo built
+    - stage: Test
+      dependsOn: [Build]
+      steps:
+        - sh: echo tested

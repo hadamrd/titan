@@ -1,0 +1,9 @@
+# SetBuildName IT fixture (#762). Two setBuildName steps — last write wins on the
+# display_name column; both emit a BUILD_RENAMED audit row.
+titan:
+  stages:
+    - stage: Rename
+      steps:
+        - setBuildName: "first-name"
+        - setBuildName: "second-name"
+        - sh: echo done

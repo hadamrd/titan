@@ -1,0 +1,3 @@
+# Invalid: a precondition node missing its required `expression` key.
+stages:
+  - precondition: on-main

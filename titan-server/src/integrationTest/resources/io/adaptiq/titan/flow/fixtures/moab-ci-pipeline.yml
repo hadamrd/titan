@@ -1,0 +1,34 @@
+# Titan pipeline test fixture — a multi-stage migration-shaped pipeline with a
+# gate. Stages, dependsOn, a gate node, an approval list — the bits TitanGateIT
+# exercises. Steps are inline `sh` / `script` bodies; the legacy `libraries:`
+# list-form has been removed (Groovy-DSL synthesis was retired — design/53).
+titan:
+  agent: linux
+
+  stages:
+    - stage: Init
+      steps:
+        - script:
+            runtime: groovy
+            body: |
+              setOutput('component', 'moab-core')
+
+    - stage: Build
+      dependsOn: [Init]
+      steps:
+        - sh: "echo building ${{ steps.Init.outputs.component }}"
+
+    - stage: Test
+      dependsOn: [Build]
+      steps:
+        - sh: make test
+
+    - gate: Release Approval
+      requiresApproval: true
+      approvers: [moab-leads]
+      dependsOn: [Test]
+
+    - stage: Deploy
+      dependsOn: [Release Approval]
+      steps:
+        - sh: "echo deploying ${{ steps.Init.outputs.component }} to prod"

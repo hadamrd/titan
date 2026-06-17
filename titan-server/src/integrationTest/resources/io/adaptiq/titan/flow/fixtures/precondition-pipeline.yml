@@ -1,0 +1,16 @@
+# Titan pipeline test fixture — an automated precondition node (design/29 §4):
+# the CEL-subset expression is evaluated at run time against published outputs.
+titan:
+  stages:
+    - stage: Build
+      steps:
+        - sh: make
+
+    - precondition: Tests Passed
+      expression: "steps['Build'].outputs.passed == true"
+      dependsOn: [Build]
+
+    - stage: Deploy
+      dependsOn: [Tests Passed]
+      steps:
+        - sh: ./deploy.sh

@@ -1,0 +1,2 @@
+# Invalid: `stages` must be an array, here it is a scalar — a wrong-node-kind error.
+stages: not-a-list

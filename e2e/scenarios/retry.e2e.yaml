@@ -1,0 +1,52 @@
+# retry: — a flaky step the orchestrator re-dispatches eventually succeeds
+# (design/44 — the real retry: scope; design/43 §4).
+#
+# This is the design/44 retry: feature exercised end-to-end. The step carries a
+# `retry: 3` scope with a short backoff. Its `sh` script is a counter-file
+# trick on the shared `/titan` volume (the worker mounts titan_ws:/titan, same
+# path as the controller — docker-compose.yml): each run increments a counter
+# file and fails (exit 1) until the third run, which succeeds (exit 0). So the
+# orchestrator must re-dispatch the FAILED EXECUTE_COMMAND task twice before the
+# step's node reaches SUCCESS — attempt 3 of 3.
+#
+# Rig fixtures (provisioned):
+#   - the shared /titan volume is created by the docker-compose stack; the
+#     `setup:` Groovy below clears any stale counter file from a previous run
+#     so the scenario is idempotent across re-runs.
+#
+# The `expect` block asserts: the build is SUCCESS, the flaky stage and its
+# step node are SUCCESS, and — via the graph API's per-step `attempt` field
+# (design/44 §5, surfaced by TitanGraphApiAction) — the step reached attempt 3.
+name: retry — flaky step the orchestrator re-dispatches eventually succeeds
+setup: |
+  // Clear the retry counter file on the controller's view of the shared
+  // /titan volume so each run of this scenario starts from a clean count.
+  def counter = new File('/titan/e2e-retry-counter')
+  if (counter.exists()) { counter.delete() }
+  return 'cleared e2e-retry-counter'
+pipeline: |
+  agent: titan-worker-1
+  stages:
+    - stage: flaky
+      steps:
+        - sh: |
+            COUNTER=/titan/e2e-retry-counter
+            N=$(cat "$COUNTER" 2>/dev/null || echo 0)
+            N=$((N + 1))
+            echo "$N" > "$COUNTER"
+            echo "retry attempt number $N"
+            if [ "$N" -lt 3 ]; then
+              echo "attempt $N failing on purpose"
+              exit 1
+            fi
+            echo "attempt $N succeeded"
+          retry:
+            maxAttempts: 3
+            backoff: { initial: 2s, multiplier: 2.0, max: 8s }
+expect:
+  build: SUCCESS
+  nodes:
+    flaky: { status: SUCCESS }
+    flaky-s0: { status: SUCCESS, attempt: 3 }
+  logContains:
+    - attempt 3 succeeded

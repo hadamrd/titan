@@ -1,0 +1,136 @@
+# titan-registry — DEFAULT values.
+#
+# This chart deploys an in-cluster OCI registry (CNCF distribution) — the
+# replacement for the GHCR dependency that `dev/release/publish-trunk.sh` used
+# to require. The registry is fronted by nginx-ingress + cert-manager and
+# guarded by htpasswd basic-auth synced from Infisical.
+#
+# Override anything below in a site-specific values file (e.g.
+# `rig/k3s/registry-values.yaml`) and deploy with:
+#
+#   helm upgrade --install titan-registry rig/k3s/helm/titan-registry \
+#     --namespace titan-registry --create-namespace \
+#     -f rig/k3s/registry-values.yaml
+#
+# This chart writes NO real secrets — the htpasswd file is pulled at runtime
+# from Infisical via ExternalSecret. Set externalSecret.enabled=false if you
+# want to provision the auth Secret yourself.
+
+# --- Deploy-time settings — read by deploy-registry.sh, NOT by templates. ----
+deploy:
+  namespace: titan-registry
+  kubeContext: titan-k3s
+
+# --- The registry image -------------------------------------------------------
+image:
+  repository: registry
+  tag: "2.8.3"
+  pullPolicy: IfNotPresent
+
+# Single replica — the storage is RWO local-path, so HA would need a shared
+# backend (RBD/S3) anyway. Scale up only after migrating storage.
+replicas: 1
+
+# --- Storage ------------------------------------------------------------------
+# The registry's blob store. local-path is the cluster default; bump size
+# before the PVC fills (default registry image emits 503s when out of space).
+# Migration to RBD/S3 is documented in docs/ops/runbooks/in-cluster-registry.md.
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClassName: local-path
+  accessMode: ReadWriteOnce
+  mountPath: /var/lib/registry
+
+# --- Service ------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 5000
+
+# --- Ingress (cert-manager + ingress-nginx) -----------------------------------
+# A single ingress at one public host. The hostname must already resolve to the
+# cluster ingress IP (the `registry` DNS record under
+# rig-values.yaml :: cloudflare.dnsRecords is provisioned by Crossplane).
+ingress:
+  enabled: true
+  className: nginx
+  clusterIssuer: letsencrypt-prod
+  host: registry.test.example.com
+  tls:
+    enabled: true
+    secretName: titan-registry-tls
+  # Registries push large layers; raise the default 1m body-size cap so big
+  # images don't 413 at the ingress. 5g matches industry-default registry
+  # deployments (Harbor, GitLab) for "any sane image up to a few GB".
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "5g"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "900"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "900"
+
+# --- Registry config (env passed to the container) ----------------------------
+registryConfig:
+  # Enable manifest deletion — required for any future GC workflow. Without
+  # this the `registry garbage-collect` command can prune blobs but never
+  # manifest references, so disk usage only grows. Safe to leave on.
+  storageDeleteEnabled: true
+  # Health endpoint path that the container exposes by default.
+  healthPath: /
+
+# --- Auth: htpasswd basic-auth ------------------------------------------------
+# The registry runs with htpasswd auth — the upstream `releaseflow` user
+# matches what dev/release/publish-trunk.sh expects. The htpasswd file body
+# is synced from Infisical via ExternalSecret (see externalSecret below).
+auth:
+  enabled: true
+  # The realm string clients see in WWW-Authenticate. Cosmetic but appears in
+  # `docker login` error messages.
+  realm: "Titan Registry"
+  # Name of the in-cluster Secret holding the htpasswd file. Created by the
+  # ExternalSecret (when enabled) OR by you out-of-band.
+  secretName: titan-registry-auth
+  # The KEY inside that Secret whose value is the htpasswd file body
+  # (a single line of the form `releaseflow:$2y$05$...`).
+  secretKey: htpasswd
+
+# --- ExternalSecret (Infisical → k8s Secret) ----------------------------------
+# Sync the htpasswd from Infisical at runtime. Mirrors the pattern used by the
+# adaptiq namespace's adaptiq-secrets ExternalSecret. The remote key is
+# REGISTRY_HTPASSWD in the Infisical env that matches your deploy target
+# (staging/dev/prod). If you don't use Infisical, set enabled=false and
+# create the Secret yourself (kubectl create secret generic <auth.secretName>
+# --from-literal=htpasswd='releaseflow:$2y$05$...').
+externalSecret:
+  enabled: true
+  refreshInterval: "1h"
+  # Must point at a SecretStore/ClusterSecretStore that already exists on the
+  # cluster. The Adaptiq cluster runs `infisical` (ClusterSecretStore).
+  secretStore:
+    kind: ClusterSecretStore
+    name: infisical
+  # The Infisical key holding the htpasswd file body for THIS environment.
+  remoteKey: REGISTRY_HTPASSWD
+
+# --- Resources ----------------------------------------------------------------
+# The registry is mostly I/O-bound; modest CPU + memory is plenty for a
+# dogfood rig. Bump only after metrics say so.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# --- Pod security -------------------------------------------------------------
+# The upstream registry image runs as UID 1000 by default and only needs to
+# write under /var/lib/registry. Lock everything else down.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false   # registry writes temp blobs under /var/lib/registry
+  capabilities:
+    drop: ["ALL"]

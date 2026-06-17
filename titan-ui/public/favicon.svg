@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Titan monogram. Geometric "T" on the dark chrome tone, accent mint glyph.
+       Two colors only (matches the in-app brand: --fg backdrop, --accent ink).
+       Hand-written, ~700 bytes — no raster, no gradient. -->
+  <rect width="32" height="32" rx="6" fill="#0a0a0a"/>
+  <rect x="7"  y="9"  width="18" height="3.5" fill="#7ad9a8"/>
+  <rect x="14.25" y="9" width="3.5" height="15" fill="#7ad9a8"/>
+</svg>

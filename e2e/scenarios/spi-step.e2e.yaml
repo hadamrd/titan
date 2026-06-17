@@ -1,0 +1,36 @@
+# A discovered SPI step — a Tier-2 jar step is discovered and runs (design/42).
+#
+# The Tier-2 fixture jar is built from e2e/fixtures/spi-step/ — a minimal,
+# self-contained Maven module: a StepHandler (`e2eSpiGreeting`) + a
+# StepHandlerProvider + a META-INF/services entry, compiled against
+# titan-step-api (provided scope). It is dropped into the worker's
+# TITAN_STEPS_DIR (rig/local/worker-steps/) and discovered via the JDK
+# ServiceLoader SPI at worker startup (design/42 §4.3).
+#
+# The jar is a build artifact and is git-ignored; to (re)produce it run
+# `npm run build:fixtures` in e2e/ — see e2e/fixtures/spi-step/
+# and rig/local/worker-steps/README.md.
+#
+# The previous worker-side discovery bug (a per-jar child classloader that
+# re-enumerated the socle provider via the parent's META-INF/services, crashing
+# the worker with 'duplicate step descriptor sh' on any Tier-2 jar) is fixed in
+# titan-worker (StepHandlerDiscovery — skips providers inherited from the parent
+# loader).
+#
+# GreetingStepHandler contributes step id `e2eSpiGreeting`, one optional `who`
+# param, and logs `Hello, <who> — from the Titan E2E SPI step.` to stdout.
+name: SPI step — Tier-2 discovered jar step
+pipeline: |
+  agent: titan-worker-1
+  stages:
+    - stage: custom
+      steps:
+        - e2eSpiGreeting:
+            who: "Titan E2E"
+expect:
+  build: SUCCESS
+  nodes:
+    custom: { status: SUCCESS }
+    custom-s0: { status: SUCCESS }
+  logContains:
+    - 'Hello, Titan E2E — from the Titan E2E SPI step.'

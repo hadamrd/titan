@@ -1,0 +1,16 @@
+# Cross-repo include fixture (issue #1120).
+#
+# A platform team factors their lint+test prelude into a separate `ci-shared` repo and pins it
+# at a tagged release. Every product repo `include:`s it. The object form { repo, ref, path }
+# triggers the controller's library-fetcher-backed IncludeResolver. `credential:` names a
+# secret in the secret manager (design/40) — NEVER a plaintext token.
+include:
+  - repo: https://example.com/platform/ci-shared.git
+    ref: v1.0.0
+    path: lint-test.yml
+    credential: github-readonly-pat
+stages:
+  - stage: deploy
+    dependsOn: test
+    steps:
+      - sh: ./scripts/deploy.sh

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <!--
+    titan-e2e-spi-step — a minimal Tier-2 StepHandler fixture jar (design/42 §4.2/§4.3).
+
+    This is NOT a product module. It exists solely so the Titan E2E harness can
+    prove Tier-2 step discovery end to end: a StepHandler + a StepHandlerProvider
+    + a META-INF/services line, packaged as a jar, dropped into the worker's
+    TITAN_STEPS_DIR, discovered via the Java ServiceLoader SPI, and run by a
+    scenario pipeline (e2e/scenarios/spi-step.e2e.yaml).
+
+    Deliberately has NO <parent>: like titan-step-api itself, a step-handler jar
+    compiles against the SPI alone. Its ONE Titan dependency is titan-step-api,
+    `provided` scope — the worker supplies that on the parent classloader at
+    runtime (design/42 §5.3), so it must not be baked into this jar.
+
+    Build:  mvn -f e2e/fixtures/spi-step/pom.xml package
+    Output: target/titan-e2e-spi-step.jar — copy into rig/local/worker-steps/.
+    (dev.ps1 is NOT wired to build this; it is a stable fixture built on demand.)
+  -->
+  <groupId>io.adaptiq.titan.e2e</groupId>
+  <artifactId>titan-e2e-spi-step</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <name>Titan E2E — SPI step fixture</name>
+  <description>A minimal Tier-2 StepHandler jar fixture for the Titan E2E harness.</description>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <!--
+      titan-step-api — the only Titan dependency, `provided`: the worker has it
+      on the parent classloader (design/42 §5.3); baking it in would risk a
+      split-package collision when ServiceLoader walks the child classloader.
+    -->
+    <dependency>
+      <groupId>io.adaptiq.titan</groupId>
+      <artifactId>titan-step-api</artifactId>
+      <version>0.1.0-SNAPSHOT</version>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <!-- A fixed, version-less jar name so the rig mount / dev docs are stable. -->
+    <finalName>titan-e2e-spi-step</finalName>
+  </build>
+</project>

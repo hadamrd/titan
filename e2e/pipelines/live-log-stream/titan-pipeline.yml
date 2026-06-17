@@ -1,0 +1,29 @@
+# Fixture pipeline for issue #1264 — live build-log streaming.
+#
+# Shape:
+#   stream -> emit 6 lines, one per second, then exit 0 (SUCCESS).
+#
+# Invariants the e2e spec (`e2e/specs/live-log-stream.spec.ts`) asserts:
+#   * Opening /builds/$id WHILE the build is RUNNING shows the rendered
+#     `.log-line` count GROW across successive observations — proving the SSE
+#     path appends incrementally, not only on completion.
+#   * When the build reaches SUCCESS the stream closes (no reconnect loop) and
+#     the verdict badge renders SUCCESS.
+#   * Zero console errors / no `pageerror` for the whole run, and the live
+#     indicator never stays stuck in `connecting` after completion.
+#
+# We deliberately pace the emission (`sleep 1`) so the spec has a real RUNNING
+# window to observe incremental growth — a burst-then-exit step would race the
+# poller and could land terminal before the page mounts.
+
+agent: titan-worker-1
+
+stages:
+  - stage: stream
+    steps:
+      - sh: |
+          for i in 1 2 3 4 5 6; do
+            echo "live-log-stream line $i of 6 :: $(date -u +%H:%M:%S)"
+            sleep 1
+          done
+          echo "live-log-stream complete"

@@ -1,0 +1,44 @@
+# Complex multi-scope fixture — a release pipeline with a human gate + tag.
+#
+# Combines:
+#   * env:    three-tier precedence (pipeline < stage < step) — asserted in the
+#             dispatched payload of the Tag step.
+#   * gate:   requiresApproval + approvers — a human must release before the tag.
+#   * gitTag: a release tag step downstream of the gate.
+#   * notify: a stage-level success/failure hook on the Release stage.
+#   * setOutput / ${{ steps... }}: the version computed in Build flows to gitTag.
+titan:
+  agent: linux
+  failurePolicy: blockOnFailure
+
+  env:
+    CHANNEL: stable          # pipeline layer — overridden by stage on Release
+    RELEASE_BOT: titan-ci
+
+  stages:
+    - stage: Build
+      steps:
+        - sh: make build
+        - setOutput: { name: version, value: "2.7.0" }
+
+    - gate: Release Approval
+      requiresApproval: true
+      approvers: [release-managers]
+      dependsOn: [Build]
+
+    - stage: Release
+      dependsOn: [Release Approval]
+      env:
+        CHANNEL: ga          # stage layer overrides pipeline CHANNEL=stable
+      notify:
+        - type: webhook
+          on: [success, failure]
+          url: "https://hooks.example.com/releases"
+      steps:
+        # tag resolves via the ${{ steps... }} output context (works); the CHANNEL value is
+        # asserted via the merged payload.env, where step CHANNEL=hotfix wins.
+        - gitTag:
+            tag: "v${{ steps['Build'].outputs.version }}"
+            message: "release on the configured channel"
+          env:
+            CHANNEL: hotfix   # step layer overrides stage CHANNEL=ga

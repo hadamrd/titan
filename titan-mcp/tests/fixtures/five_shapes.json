@@ -1,0 +1,52 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "fixture", "version": "0"},
+  "paths": {
+    "/things": {
+      "get": {
+        "operationId": "things_list",
+        "summary": "List things",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      },
+      "post": {
+        "operationId": "things_create",
+        "summary": "Create a thing",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"type": "object"}}}
+        },
+        "responses": {"201": {"description": "ok"}}
+      }
+    },
+    "/things/{id}": {
+      "get": {
+        "operationId": "things_get",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      },
+      "patch": {
+        "operationId": "things_update",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"type": "object"}}}
+        },
+        "responses": {"200": {"description": "ok"}}
+      },
+      "delete": {
+        "operationId": "things_delete",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"204": {"description": "ok"}}
+      }
+    }
+  }
+}

@@ -1,0 +1,60 @@
+# forge-loop config for the Titan engine (this repo).
+# Run with:  forge-loop run
+# The harness itself is the `forge-loop` package — install once with:
+#   uv tool install --from git+https://github.com/hadamrd/forge-loop forge-loop
+# All keys are optional; LOOP_* env vars override yaml values.
+
+repo:
+  github: hadamrd/dashboard-plugin
+  worktree_root: /tmp
+
+deploy:
+  # Run `task deploy:k3s:trunk` after every merge (Titan deploys to its k3s
+  # rig). Set LOOP_DEPLOY_TASK="" to disable redeploy during ops work.
+  task: "deploy:k3s:trunk"
+
+scheduling:
+  parallel: 3
+  tick_interval_s: 60
+  worker_timeout_s: 3600
+  max_ticks: 0
+  # Every Nth tick the loop grooms the backlog instead of dispatching.
+  maintenance_every_n_ticks: 5
+
+labels:
+  ready: "loop:ready"
+  triage: "loop:triage"
+  blocked: "loop:blocked"
+  risk_gate: "risk:high"
+
+critic:
+  enabled: true
+  # The critic gates Opus-4.8 worker output — it must not be the weakest link in
+  # the chain. Pin it to the same tier as the worker/PO (was defaulting to
+  # sonnet-4-6 / thinking off, i.e. a weaker model judging stronger output).
+  provider: claude
+  model: claude-opus-4-8
+  thinking: high
+  # Unattended-safe gate: sev1/sev2 block auto-merge (only genuinely risky PRs
+  # park for review); sev3-only/clean auto-merge. min_findings>0 prevents a
+  # lazy "approve with no findings".
+  block_on_sev2: true
+  min_findings_for_approve: 1
+
+attempts:
+  enabled: true
+
+# Project-specific brief overrides — teach the loop about Titan's
+# CONSTITUTION, PDL grammar, Gradle build, WSL-OOM guard, Lumen
+# semantic search, and the v3 UI floor. These ship under .forge-loop/
+# and are loaded via the LOOP_*_BRIEF env vars (loader prefers env
+# over yaml; we set the env in the operator's tmux start command).
+# The bundled generic templates apply if these files are missing.
+worker:
+  provider: claude
+  model: claude-opus-4-8
+  brief_template: .forge-loop/briefs/worker.md.tmpl
+po:
+  provider: claude
+  model: claude-opus-4-8
+  brief_template: .forge-loop/briefs/po.md.tmpl

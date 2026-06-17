@@ -1,0 +1,8 @@
+# SetBuildName IT fixture (#762). One-stage pipeline with the setBuildName step at
+# the very start, so the build's display_name is stamped on the first orchestrator pass.
+titan:
+  stages:
+    - stage: Rename
+      steps:
+        - setBuildName: "renamed-build"
+        - sh: echo done

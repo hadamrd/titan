@@ -1,0 +1,42 @@
+# Fixture pipeline for issue #1127 — matrix step expansion.
+#
+# Shape:
+#   build (matrix on {jdk: [17, 21], profile: [unit, it]}) -> 4 parallel cells
+#
+# Invariants the e2e spec asserts:
+#   * 4 cell stages render in the UI, one per cartesian point of jdk × profile.
+#   * Each cell's log contains the MATRIX_JDK / MATRIX_PROFILE env values for
+#     that cell — proving env injection threads through to the worker.
+#   * fail_fast: false is honoured — sibling cells run to completion even if
+#     one cell deliberately fails (the (jdk=21, profile=it) cell is rigged
+#     to exit non-zero), and the parent verdict rolls up as FAILED with the
+#     other 3 cells still reporting SUCCESS.
+#
+# We use plain `sh` rather than a real JDK probe so the rig (which may not
+# have multiple JDKs installed) can still run this fixture green. The matrix
+# semantics — fan-out, env injection, verdict roll-up — are what's being
+# validated, not the JDK toolchain itself.
+
+agent: titan-worker-1
+
+env:
+  CI: "true"
+
+stages:
+  - stage: build
+    matrix:
+      fail_fast: false
+      axes:
+        jdk: [17, 21]
+        profile: [unit, it]
+    steps:
+      # Print the matrix bindings so the spec can grep the per-cell log.
+      # The (jdk=21, profile=it) cell fails on purpose to exercise the
+      # fail_fast=false branch of the verdict roll-up.
+      - sh: |
+          echo "matrix cell: jdk=$MATRIX_JDK profile=$MATRIX_PROFILE"
+          if [ "$MATRIX_JDK" = "21" ] && [ "$MATRIX_PROFILE" = "it" ]; then
+            echo "FAIL: rigged failure for fail_fast=false verification"
+            exit 1
+          fi
+          echo "OK: cell jdk=$MATRIX_JDK profile=$MATRIX_PROFILE passed"

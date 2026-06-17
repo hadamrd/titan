@@ -1,0 +1,8 @@
+# SetBuildName IT fixture (#762). A 201-char name — over the 200-char cap. The step
+# MUST fail (no silent truncation, per brief) and the build MUST fail.
+titan:
+  stages:
+    - stage: Rename
+      steps:
+        - setBuildName: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
+        - sh: echo unreachable

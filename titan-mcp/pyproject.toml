@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "titan-mcp"
+version = "0.1.0"
+description = "MCP server that mirrors the Titan REST API as tools, generated from titan-server's OpenAPI schema."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Adaptiq Titan" }]
+dependencies = [
+    "httpx>=0.27",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+]
+
+[project.scripts]
+titan-mcp = "titan_mcp.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/titan_mcp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/titan_mcp/schema/openapi.json" = "titan_mcp/schema/openapi.json"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

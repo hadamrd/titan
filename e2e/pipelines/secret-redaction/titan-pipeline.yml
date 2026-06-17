@@ -1,0 +1,51 @@
+# Secret-redaction fixture — issue #1135.
+#
+# Proves the PDL secret-reference contract end-to-end on the rig:
+#
+#   1. A pipeline can name a credential by id via `${{ secrets.<id> }}` and
+#      have its value injected at runtime as a per-step env var (builds on
+#      issue #1094 — env grammar).
+#   2. The injected value never appears in the streamed log, the build-detail
+#      UI log panel, or the persisted log artifact — even if the step
+#      explicitly tries to echo it. Mask token is `****`.
+#
+# Customer story (verbatim from #1135):
+#   "Platform team migrating a legacy pipeline that uses scoped credential
+#   bindings: 'I need to know that when I reference a secret in PDL it gets
+#   injected at runtime AND that an accidental echo $TOKEN in my script will be
+#   masked in the log — same guarantee my old CI gave me.'"
+#
+# The fixture deliberately attacks redaction from FOUR angles in one step so a
+# single SUCCESS run proves the contract holds in every channel:
+#
+#   * direct echo of the env var,
+#   * the value embedded in a multi-arg shell line,
+#   * `printenv` / `env` style dump (the env-export leak class from PR
+#     #-redact-env-export that masked the use-site but leaked the export-site),
+#   * a second use of the value to force a second redaction pass — proving the
+#     masker is idempotent and not a one-shot.
+#
+# Out of scope: rotation, audit-log of the secret read, secret-store auth
+# failure modes — those land in dedicated fixtures.
+
+agent: titan-worker-1
+
+env:
+  # Top-level non-secret env to prove secrets and plain env coexist without
+  # the masker chewing on innocent strings.
+  REGION: eu-central-1
+
+stages:
+  - stage: use-secret
+    steps:
+      - sh: |
+          echo "deploy-region=$REGION"
+          echo "direct: token=[$API_TOKEN]"
+          echo "embedded: curl -H 'X-Auth: $API_TOKEN' https://api.example.test/ping"
+          echo "second-use: still [$API_TOKEN] — must also be masked"
+          # printenv would dump the whole environment — including the export
+          # line. The redactor MUST scrub the value from every line it sees,
+          # not just the ones with the variable's name.
+          printenv | grep -E '^(API_TOKEN|REGION)=' || true
+        env:
+          API_TOKEN: ${{ secrets.E2E_REDACTION_TOKEN }}

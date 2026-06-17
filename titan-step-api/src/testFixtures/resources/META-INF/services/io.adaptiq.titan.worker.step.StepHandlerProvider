@@ -1,0 +1,4 @@
+# Test fixtures for StepRegistry. NOT shipped in the production jar — these
+# only sit on the test classpath.
+io.adaptiq.titan.worker.step.FixtureProvider
+io.adaptiq.titan.worker.step.BrokenProvider

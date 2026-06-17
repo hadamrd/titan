@@ -1,0 +1,31 @@
+{
+  "name": "Titan CI",
+  "url": "{{TITAN_HOST}}",
+  "description": "Titan CI/CD — discovers .titan/pipelines/*.yml, runs builds, posts commit statuses.",
+  "public": false,
+  "redirect_url": "{{TITAN_HOST}}/onboarding",
+  "callback_urls": [
+    "{{TITAN_HOST}}/onboarding"
+  ],
+  "request_oauth_on_install": false,
+  "setup_url": "{{TITAN_HOST}}/integrations/github",
+  "setup_on_update": true,
+  "hook_attributes": {
+    "url": "{{WEBHOOK_TARGET}}",
+    "active": true
+  },
+  "default_events": [
+    "push",
+    "pull_request",
+    "installation",
+    "installation_repositories",
+    "repository"
+  ],
+  "default_permissions": {
+    "contents": "read",
+    "metadata": "read",
+    "pull_requests": "read",
+    "statuses": "write",
+    "checks": "write"
+  }
+}

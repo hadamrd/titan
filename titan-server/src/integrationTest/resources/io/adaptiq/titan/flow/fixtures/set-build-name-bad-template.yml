@@ -1,0 +1,11 @@
+# SetBuildName IT fixture (#762). The template chains a field access onto a missing
+# top-level reference — `${{ params.MISSING.nested }}` — which the ExpressionEvaluator
+# explicitly rejects ("cannot access '.nested' on null"). The step MUST fail at
+# template-resolve time with a helpful error pointing at the broken reference rather
+# than silently substituting blank.
+titan:
+  stages:
+    - stage: Rename
+      steps:
+        - setBuildName: "deploy-${{ params.MISSING.nested }}"
+        - sh: echo unreachable

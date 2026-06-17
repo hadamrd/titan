@@ -1,0 +1,5 @@
+# tour:analyze output + capture rig (#1132) artifacts — never commit
+*.png
+*.json
+*.md
+!.gitignore

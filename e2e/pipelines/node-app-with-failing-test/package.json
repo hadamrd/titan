@@ -1,0 +1,14 @@
+{
+  "name": "titan-fixture-node-app-with-failing-test",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Node fixture for #1130: vitest suite where exactly one test fails on purpose. Drives the SRE golden-path failure-triage e2e flow.",
+  "scripts": {
+    "test": "vitest run --reporter=default",
+    "test:passing": "vitest run --reporter=default src/sum.passing.test.js",
+    "build": "node -e \"require('fs').mkdirSync('dist',{recursive:true});require('fs').copyFileSync('src/sum.js','dist/sum.js');console.log('built dist/sum.js')\""
+  },
+  "devDependencies": {
+    "vitest": "^2.1.5"
+  }
+}

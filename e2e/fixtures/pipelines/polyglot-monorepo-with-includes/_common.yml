@@ -1,0 +1,17 @@
+# Shared prologue (#1128) — the prelude every team in the org pulls in via `include:`.
+# This is the canonical "checkout → cache → install → test → publish-junit" shape that
+# used to be copy-pasted across 12+ repos. One change here ships to every consumer.
+#
+# Stage IDs declared here can be REPLACED whole-stage by a local pipeline — see
+# README.md in this directory for the precedence rules.
+env:
+  NODE_ENV: production
+  CACHE_BUST: "1"
+stages:
+  - stage: prologue-install
+    steps:
+      - sh: echo "[shared] installing deps"
+  - stage: prologue-test
+    dependsOn: [prologue-install]
+    steps:
+      - sh: echo "[shared] running shared test prelude"

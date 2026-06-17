@@ -1,0 +1,8 @@
+{
+  "action": "opened",
+  "pull_request": {
+    "head": { "ref": "feat/x", "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" },
+    "base": { "ref": "main" }
+  },
+  "repository": { "full_name": "adaptiq/titan" }
+}

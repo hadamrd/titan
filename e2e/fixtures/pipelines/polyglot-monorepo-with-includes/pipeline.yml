@@ -1,0 +1,21 @@
+# Consumer pipeline (#1128) that pulls in the shared prologue from `_common.yml`.
+#
+# The local file declares its own `build` stage on top of the shared `prologue-install`
+# and `prologue-test`, AND it overrides the included `prologue-test` stage with its
+# own — demonstrating the locked precedence (local file wins by stage id).
+include: ./_common.yml
+env:
+  # Local key wins on collision with the included shared env (precedence rule).
+  NODE_ENV: staging
+  # Local-only key — survives unchanged.
+  DEBUG: "true"
+stages:
+  # Whole-stage override: replaces the shared prologue-test with a stricter local one.
+  - stage: prologue-test
+    dependsOn: [prologue-install]
+    steps:
+      - sh: echo "[local] running stricter prologue-test override"
+  - stage: build
+    dependsOn: [prologue-test]
+    steps:
+      - sh: echo "[local] building"

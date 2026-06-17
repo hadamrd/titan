@@ -1,0 +1,8 @@
+# Invalid: unknown key inside a `script:` step body — the scriptStep $def is closed.
+stages:
+  - stage: Gen
+    steps:
+      - script:
+          runtime: bash
+          body: "echo hi"
+          shell: zsh

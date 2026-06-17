@@ -1,0 +1,57 @@
+# values-infisical-e2e.yaml — OPT-IN overlay that flips the rig's SecretsBackend
+# to Infisical so e2e spec 46 (46-infisical-secret.spec.ts) goes skip→green.
+#
+# WHY a separate overlay (not rig-values.yaml):
+#   The default rig runs `db-envelope` and #1160 deliberately kept the rig
+#   scoped to that. This overlay is the ONLY thing that opts a rig into
+#   Infisical-resolved pipeline credentials, and ONLY for the e2e. Without it,
+#   spec 46 `test.skip()`s cleanly and the db-envelope rig stays green.
+#
+# HOW to deploy with it (layer it AFTER rig-values.yaml so it wins):
+#
+#   helm --kube-context titan-k3s upgrade --install titan rig/k3s/helm/titan \
+#     -n titan --create-namespace \
+#     -f rig/k3s/rig-values.yaml \
+#     -f rig/k3s/values-infisical-e2e.yaml \
+#     --set titanServer.infisical.projectId="$INFISICAL_PROJECT_ID" \
+#     --set titanWorker.infisical.projectId="$INFISICAL_PROJECT_ID" \
+#     --set secrets.infisicalToken="$INFISICAL_TOKEN"
+#
+#   - $INFISICAL_PROJECT_ID — the Infisical workspace id (same project the rig's
+#     other staging secrets live in; see rig-values.yaml.example).
+#   - $INFISICAL_TOKEN — the `staging`-scoped Infisical service/machine token.
+#     NEVER commit it. Export it from your secret store at deploy time. It is
+#     rendered into titan-secrets/INFISICAL_TOKEN and mounted on BOTH the server
+#     and the worker (the worker is what resolves the bound secret into the
+#     build env, so it needs the token too).
+#
+# THE SECRET CONTRACT (must match the e2e env in Taskfile `e2e:infisical`):
+#   The pipeline binds credential id `titan-e2e/E2E_INFISICAL_SECRET`. The `key`
+#   part — `E2E_INFISICAL_SECRET` — MUST equal the NAME of a secret pre-seeded in
+#   the Infisical `staging` env (see rig/k3s/seed-infisical-e2e-secret.sh). The
+#   `scope` part (`titan-e2e`) is Titan-internal addressing only.
+
+# Server resolves credential metadata; worker resolves the value into the build
+# env. Both must run the Infisical backend — keep them in lock-step.
+titanServer:
+  secretsBackend: infisical
+  infisical:
+    # projectId supplied at deploy time via --set (never committed).
+    projectId: ""
+    env: staging
+    secretPath: "/"
+    apiUrl: "https://app.infisical.com"
+
+titanWorker:
+  secretsBackend: infisical
+  infisical:
+    projectId: ""
+    env: staging
+    secretPath: "/"
+    apiUrl: "https://app.infisical.com"
+
+# INFISICAL_TOKEN is rendered into titan-secrets because the backend is now
+# `infisical`. Left EMPTY here on purpose — supply it via --set at deploy time so
+# the token is never in git.
+secrets:
+  infisicalToken: ""

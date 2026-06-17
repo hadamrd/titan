@@ -1,0 +1,54 @@
+# OOM-step fixture — issue #1175 (extends the #1173 adversarial golden-path suite).
+#
+# Shape (mirrors e2e/scenarios/oom-step.e2e.yaml, the generic-runner sibling):
+#
+#   hog: allocate ~512 MiB of RSS inside a 64 MiB cgroup → the kernel OOM-killer
+#        reaps the process → it dies on signal SIGKILL with no clean exit
+#        (the shell reports `exit 137`).
+#
+# Customer story (verbatim from scenarios/oom-step.e2e.yaml):
+#   "If the worker kills my build, I need to see WHY in the UI. 'exit 137' is
+#    not an answer — that's a SRE-1 paging trigger every time."
+#
+# What golden-path-oom.spec.ts asserts AT THE BUILD-DETAIL UI LAYER (the thing
+# the generic scenario runner cannot reach):
+#   * the build terminates FAILED/FAILURE,
+#   * the `hog` step renders with a FAILED-class data-status (role/data-status,
+#     NOT pixel colour),
+#   * the failed step surfaces an OOM-CLASSIFIED reason (`killed: OOM` /
+#     typed `failureReason`) — NOT a bare generic "error",
+#   * adversarial: the UI must NOT show only a bare `exit 137 (no reason)` for a
+#     SIGKILL-at-RSS-limit kill (the regression class this fixture guards).
+#
+# DEPENDENCY (why the spec is `pending` until it ships): the worker must
+#   (a) enforce `resources.memoryLimitMb` as a real cgroup RSS cap, and
+#   (b) inspect cgroup memory.events / the SIGKILL termination cause and emit a
+#       typed `StepTerminationReason.OOM` that the orchestrator maps onto the
+#       node's `failureReason`.
+# That engine/worker work is issue #1116 — this fixture *asserts* it; it does
+# not implement it. Without (a) the 512 MiB allocation simply succeeds on a
+# multi-GB host and the build goes green, so the spec stays gated until #1116.
+
+agent: titan-worker-1
+
+# The cgroup memory cap the worker must enforce (#1116). 512 MiB inside 64 MiB
+# is a ~8x over-commit — large enough that the OOM killer fires deterministically
+# the moment the bytearray is touched, not merely reserved.
+resources:
+  memoryLimitMb: 64
+
+env:
+  # A plain env var alongside the limit — proves the worker still wires normal
+  # env even on a step it is about to reap.
+  ALLOC_MIB: "512"
+
+stages:
+  - stage: hog
+    steps:
+      # Touch (not just reserve) 512 MiB so the pages are resident — `bytearray`
+      # is zero-filled eagerly, forcing real RSS growth past the 64 MiB cap. The
+      # kernel reaps the process with SIGKILL; the shell surfaces `exit 137`.
+      # The worker supervisor (#1116) must classify this as OOM rather than
+      # letting a bare `exit 137` reach the UI.
+      - sh: |
+          python3 -c 'a = bytearray(512 * 1024 * 1024); print("allocated", len(a))'

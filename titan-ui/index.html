@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- CSP is set at the HTTP layer by nginx (see rig/local/nginx.conf) so the OIDC
+         issuer + API origins are configurable per-environment without rebuilding the
+         bundle. Dev mode (vite) is unprotected by design. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="description" content="Modern cloud-native CI/CD control plane: YAML pipelines, SRE-grade UI." />
+    <title>Titan</title>
+    <!-- No-FOUC theme bootstrap (#669) — must run before the React bundle
+         so the first paint matches the persisted theme. Served from /public
+         (CSP-safe: script-src 'self'). -->
+    <script src="/theme-bootstrap.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

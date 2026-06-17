@@ -1,0 +1,22 @@
+# Titan pipeline test fixture — a diamond DAG: one root fans out to two
+# parallel stages that fan back in to a single deploy stage.
+titan:
+  stages:
+    - stage: Build
+      steps:
+        - sh: make
+
+    - stage: Lint
+      dependsOn: [Build]
+      steps:
+        - sh: make lint
+
+    - stage: Test
+      dependsOn: [Build]
+      steps:
+        - sh: make test
+
+    - stage: Deploy
+      dependsOn: [Lint, Test]
+      steps:
+        - sh: ./deploy.sh

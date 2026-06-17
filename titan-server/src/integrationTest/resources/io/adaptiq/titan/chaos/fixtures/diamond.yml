@@ -1,0 +1,19 @@
+# Chaos rig fixture — a diamond DAG; every step is a real, fast, zero-exit command.
+titan:
+  agent: chaos
+  stages:
+    - stage: Build
+      steps:
+        - sh: "true"
+    - stage: Lint
+      dependsOn: [Build]
+      steps:
+        - sh: "echo lint-ok"
+    - stage: Test
+      dependsOn: [Build]
+      steps:
+        - sh: "echo test-ok"
+    - stage: Deploy
+      dependsOn: [Lint, Test]
+      steps:
+        - sh: "true"

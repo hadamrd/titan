@@ -1,0 +1,29 @@
+# junit step — happy path (design/32 §12; JUnitStepHandler).
+# A prior `sh` step writes a green surefire report into the build workspace;
+# the `junit` step (same build, shared workspace — design/43 W1) parses it,
+# tallies 2 passed + 1 skipped, and the build stays green.
+name: junit — a green surefire report parses and the build stays green
+pipeline: |
+  agent: titan-worker-1
+  stages:
+    - stage: report
+      steps:
+        - sh: |
+            mkdir -p target/surefire-reports
+            cat > target/surefire-reports/TEST-app.SmokeTest.xml <<'XML'
+            <?xml version="1.0" encoding="UTF-8"?>
+            <testsuite name="app.SmokeTest" tests="3">
+            <testcase name="boots" classname="app.SmokeTest"/>
+            <testcase name="answers" classname="app.SmokeTest"/>
+            <testcase name="wip" classname="app.SmokeTest"><skipped/></testcase>
+            </testsuite>
+            XML
+        - junit: "**/surefire-reports/TEST-*.xml"
+expect:
+  build: SUCCESS
+  nodes:
+    report: { status: SUCCESS }
+    report-s0: { status: SUCCESS }
+    report-s1: { status: SUCCESS }
+  logContains:
+    - "2 passed, 0 failed, 1 skipped"

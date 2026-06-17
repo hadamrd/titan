@@ -1,0 +1,12 @@
+# GOLDEN — design/44 §1's retry example, verbatim. Scalar shorthand on one step,
+# the full object form (maxAttempts + backoff + retryableExitCodes) on another.
+stages:
+  - stage: test
+    steps:
+      - sh: ./flaky-integration-test.sh
+        retry: 3
+      - sh: ./deploy.sh
+        retry:
+          maxAttempts: 4
+          backoff: { initial: 15s, multiplier: 2.0, max: 5m }
+          retryableExitCodes: [2, 75]

@@ -1,0 +1,17 @@
+# Chaos rig fixture — exercises durable sleep + hard-kill timeout. The timeout
+# step sleeps far past its 2s deadline, so the orchestrator must FAIL it.
+titan:
+  agent: chaos
+  stages:
+    - stage: Wait
+      steps:
+        - sleep: 2s
+    - stage: SlowStep
+      dependsOn: [Wait]
+      steps:
+        - sh: "sleep 60"
+          timeout: 2s
+    - stage: After  # intentionally unreachable — proves downstream SKIPPED propagation
+      dependsOn: [SlowStep]
+      steps:
+        - sh: "echo unreachable"

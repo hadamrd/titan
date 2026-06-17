@@ -1,0 +1,57 @@
+# Real-shaped Node.js service pipeline (issue #1119).
+#
+# Exercises the PDL features being landed in #1094 (top-level `env:` + per-step
+# overrides + secret refs) and #1093 (`when:` evaluation). Mirrors a typical
+# Node service migration off GitHub Actions:
+#   install -> lint -> unit-test -> build -> deploy-staging -> smoke-test
+#
+# Invariants the e2e specs assert:
+#   * Top-level env reaches every step unless overridden per-step.
+#   * deploy-staging runs ONLY on branch == 'main'; otherwise SKIPPED.
+#   * smoke-test runs ONLY if deploy-staging succeeded; otherwise SKIPPED.
+#   * The literal value of NPM_TOKEN never appears in any captured log line.
+#
+# Out of scope: no real `npm publish` — the deploy step shims to echo.
+
+agent: titan-worker-1
+
+env:
+  NODE_ENV: production
+  REGISTRY_URL: https://registry.npmjs.org
+
+stages:
+  - stage: install
+    steps:
+      - sh: cd e2e/pipelines/node-app && npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+  - stage: lint
+    dependsOn: [install]
+    steps:
+      # Per-step env override — proves step-wins merge order.
+      - sh: cd e2e/pipelines/node-app && node -e "console.log('lint NODE_ENV=' + process.env.NODE_ENV)"
+        env:
+          NODE_ENV: development
+
+  - stage: unit-test
+    dependsOn: [lint]
+    steps:
+      - sh: cd e2e/pipelines/node-app && npm test --silent
+
+  - stage: build
+    dependsOn: [unit-test]
+    steps:
+      - sh: cd e2e/pipelines/node-app && npm run build
+
+  - stage: deploy-staging
+    dependsOn: [build]
+    when: "branch == 'main'"
+    steps:
+      - sh: cd e2e/pipelines/node-app && echo "would publish to $REGISTRY_URL"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  - stage: smoke-test
+    dependsOn: [deploy-staging]
+    when: "steps.deploy-staging.result == 'success'"
+    steps:
+      - sh: cd e2e/pipelines/node-app && node -e "console.log('smoke OK')"

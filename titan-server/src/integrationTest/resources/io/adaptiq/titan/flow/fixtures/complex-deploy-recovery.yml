@@ -1,0 +1,44 @@
+# Complex multi-scope fixture — a deploy pipeline with health-gate + recovery.
+#
+# Combines:
+#   * k8sApply + httpRequest: a deploy step then a health check.
+#   * precondition: a runtime gate on the deploy's published `healthy` output —
+#       false  -> downstream Promote is SKIPPED.
+#   * onFailure: a Rollback handler stage that fires iff Deploy or Promote FAILED.
+#   * env: pipeline < stage < step precedence asserted in the Deploy payload.
+titan:
+  agent: linux
+  failurePolicy: blockOnFailure
+
+  env:
+    ENVIRONMENT: pipeline-default
+    NAMESPACE: prod
+
+  stages:
+    - stage: Deploy
+      env:
+        ENVIRONMENT: staging       # stage overrides pipeline ENVIRONMENT
+      steps:
+        - k8sApply: { manifest: "k8s/deploy.yaml" }
+        # NAMESPACE travels in payload.env (asserted there); ${{ env.X }} templating is
+        # broken at dispatch — see issue #1212 — so the URL uses a literal host here.
+        - httpRequest:
+            url: "https://prod.example.com/healthz"
+            method: GET
+          env:
+            ENVIRONMENT: deploy-step  # step overrides stage ENVIRONMENT
+        - setOutput: { name: healthy, value: "true" }
+
+    - precondition: Deploy Healthy
+      expression: "steps['Deploy'].outputs.healthy == true"
+      dependsOn: [Deploy]
+
+    - stage: Promote
+      dependsOn: [Deploy Healthy]
+      steps:
+        - sh: "promote --ns $NAMESPACE"   # NAMESPACE from payload.env
+
+    - stage: Rollback
+      onFailure: [Deploy, Promote]
+      steps:
+        - k8sApply: { manifest: "k8s/rollback.yaml" }

@@ -1,0 +1,140 @@
+# Showcase — the annotated tour of the Titan PDL.
+#
+# This pipeline is intentionally broad: it exercises most of the grammar in
+# one place so you can see how the pieces fit. It is valid against the
+# published schema (titan-pipeline-model/.../titan-pipeline.schema.json) but
+# the shell commands are illustrative shims — adapt them to your project.
+#
+# Tour map:
+#   parameters  → declared build inputs, referenced as ${{ params.* }}
+#   env         → pipeline-wide environment
+#   triggers    → cron + github webhook
+#   notify      → terminal webhook on success/failure
+#   matrix      → fan-out grid with maxParallel + fail_fast
+#   when        → stage-level CEL + step-level branch guard
+#   retry       → per-step retry with backoff
+#   credentials → typed bindings (usernamePassword, string)
+#   gate        → manual approval node
+#   onFailure   → cleanup handler that runs only when an upstream fails
+#   archiveArtifacts / junit → artifact + test-report publishing
+
+# ── Default agent label for every stage (override per-stage with `agent:`).
+agent: linux
+
+# ── Pipeline policy ─────────────────────────────────────────────────────
+failurePolicy: blockOnFailure
+timeout: 45m
+priority: normal
+
+# ── Build inputs. Supplied by a trigger or the API; resolved at bake time.
+parameters:
+  - name: deployEnv
+    type: choice
+    choices: [dev, staging, prod]
+    default: dev
+    description: Target environment for the deploy stage.
+  - name: runSmoke
+    type: boolean
+    default: true
+    description: Whether to run the post-deploy smoke check.
+
+# ── Environment merged into every step (stage/step env wins on conflict).
+env:
+  CI: "true"
+  APP_ENV: "${{ params.deployEnv }}"
+
+# ── How builds start automatically.
+triggers:
+  - cron: "H/30 * * * *"          # safety-net poll every ~30 min
+  - github:
+      branches: [main, "release/*"]
+      events: [push, pull_request]
+      credentialsId: github-webhook-secret
+
+stages:
+  # ── Lint: fast static gate that everything else depends on. ────────────
+  - stage: lint
+    timeout: 10m
+    steps:
+      - sh: ./scripts/lint.sh
+
+  # ── Test: matrix fan-out, JUnit publishing, a flaky-step retry. ────────
+  - stage: test
+    dependsOn: [lint]
+    matrix:
+      axes:
+        os: [linux]
+        suite: [unit, integration]
+      maxParallel: 2
+      fail_fast: false
+    steps:
+      # ${matrix.<axis>} substitution + per-cell MATRIX_<AXIS> env var.
+      - sh: "./scripts/test.sh --suite ${matrix.suite}"
+        # Integration suites can flake on cold caches — retry with backoff.
+        retry:
+          maxAttempts: 3
+          backoff: { initial: 5s, multiplier: 2.0, max: 1m }
+      - junit: "reports/${matrix.suite}-junit.xml"
+
+  # ── Build: archive the artifact with a fingerprint. ────────────────────
+  - stage: build
+    dependsOn: [test]
+    timeout: 15m
+    steps:
+      - sh: ./scripts/build.sh
+      - archiveArtifacts:
+          artifacts: "dist/**"
+          fingerprint: true
+
+  # ── Approval gate: a human checkpoint before deploying. ────────────────
+  - gate: deploy-approval
+    requiresApproval: true
+    approvers: [release-managers]
+    dependsOn: [build]
+
+  # ── Deploy: gated, conditional, with typed credential bindings. ────────
+  - stage: deploy
+    dependsOn: [deploy-approval]
+    # Stage-level `when:` is a CEL expression over params + build context.
+    when: "params.deployEnv == 'prod'"
+    credentials:
+      # usernamePassword → two masked env vars.
+      - id: registry-creds
+        type: usernamePassword
+        usernameVariable: REGISTRY_USER
+        passwordVariable: REGISTRY_PASS
+      # string → a single masked env var.
+      - id: deploy-token
+        type: string
+        variable: DEPLOY_TOKEN
+    steps:
+      - sh: ./scripts/deploy.sh --env "$APP_ENV"
+        # Step-level `when:` structured guard — only on the main branch.
+        when:
+          branch: main
+
+  # ── Smoke: conditional on a boolean parameter. ─────────────────────────
+  - stage: smoke
+    dependsOn: [deploy]
+    when: "params.runSmoke == true"
+    steps:
+      - httpRequest:
+          url: https://app.example.com/healthz
+          method: GET
+          validResponseCodes: "200"
+          timeoutSeconds: 15
+
+  # ── Cleanup: runs ONLY when an upstream stage fails. ───────────────────
+  # `onFailure` is mutually exclusive with `dependsOn`.
+  - stage: cleanup-on-failure
+    onFailure: [deploy, smoke]
+    steps:
+      - sh: ./scripts/rollback.sh
+
+# ── Terminal notifications (pipeline-level). ────────────────────────────
+notify:
+  # `on` is quoted so YAML 1.1 parsers don't fold the bare word into a boolean.
+  - type: webhook
+    "on": [success, failure]
+    url: https://hooks.example.com/showcase
+    credentialsId: showcase-notify

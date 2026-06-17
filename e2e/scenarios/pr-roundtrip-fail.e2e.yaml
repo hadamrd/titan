@@ -1,0 +1,41 @@
+# Golden-path PR roundtrip (adversarial / sad path) — issue #1133.
+#
+# A two-stage pipeline where the second stage intentionally fails (`exit 1`).
+# Drives the spec's adversarial assertion that:
+#   - the build verdict is FAILURE (the PR check goes red)
+#   - the GitHub status check's description / output.summary NAMES the failed
+#     stage ("test") so the PR author can land directly on the right step
+#     without scrolling the log
+#   - the build-detail UI surfaces the same failure reason in an
+#     operator-visible location (data-testid="build-failure-reason" or the
+#     failing stage row's status badge).
+name: pr-roundtrip-fail — middle stage fails, red check, named step
+pipeline: |
+  agent: titan-worker-1
+  failurePolicy: blockOnFailure
+  stages:
+    - stage: build
+      steps:
+        - sh: echo building
+    - stage: test
+      dependsOn: [build]
+      steps:
+        - sh: |
+            echo "spec-55 attempt"
+            echo "ERROR: intentional failure for adversarial PR check" >&2
+            exit 1
+    - stage: deploy
+      dependsOn: [test]
+      steps:
+        - sh: echo should-never-run
+expect:
+  build: FAILURE
+  nodes:
+    build: { status: SUCCESS }
+    test: { status: FAILED }
+    deploy: { status: SKIPPED }
+  logContains:
+    - building
+    - 'ERROR: intentional failure for adversarial PR check'
+  logExcludes:
+    - should-never-run

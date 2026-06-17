@@ -1,0 +1,43 @@
+{{- /*
+Public ingress for the registry. cert-manager issues the TLS cert via the
+configured ClusterIssuer (letsencrypt-prod on the Adaptiq rig). The DNS
+record (registry.test.example.com → 203.0.113.10) is provisioned by
+the Crossplane block in rig-values.yaml (cloudflare.dnsRecords[name=registry]).
+
+Body-size cap is bumped to 5g — docker layers routinely exceed the
+ingress-nginx default of 1m and would 413 mid-push otherwise.
+*/ -}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: titan-registry
+  labels:
+    {{- include "titan-registry.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.ingress.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className | quote }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName | quote }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: titan-registry
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}

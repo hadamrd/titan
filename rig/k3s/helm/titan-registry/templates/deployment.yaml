@@ -1,0 +1,106 @@
+{{- /*
+Deployment: a single registry:2.x replica. Storage is RWO local-path, so HA
+would require a shared backend (RBD/S3) anyway — keep replicas=1 until that
+migration. See docs/ops/runbooks/in-cluster-registry.md.
+
+The htpasswd file is mounted from a k8s Secret (synced from Infisical via
+ExternalSecret — see externalsecret.yaml). The registry reads it via
+REGISTRY_AUTH_HTPASSWD_PATH.
+
+Health probes hit `/` — the registry's TCP health endpoint. The upstream
+image only exposes `/v2/` behind auth, so an unauthenticated GET to `/`
+returning 200 is the canonical k8s liveness check.
+*/ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: titan-registry
+  labels:
+    {{- include "titan-registry.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  strategy:
+    type: Recreate   # RWO PVC — can't run two pods mounting the same volume
+  selector:
+    matchLabels:
+      {{- include "titan-registry.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "titan-registry.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: registry
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+          env:
+            - name: REGISTRY_HTTP_ADDR
+              value: ":5000"
+            - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+              value: {{ .Values.persistence.mountPath | quote }}
+            {{- if .Values.registryConfig.storageDeleteEnabled }}
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+            {{- end }}
+            {{- if .Values.auth.enabled }}
+            - name: REGISTRY_AUTH
+              value: "htpasswd"
+            - name: REGISTRY_AUTH_HTPASSWD_REALM
+              value: {{ .Values.auth.realm | quote }}
+            - name: REGISTRY_AUTH_HTPASSWD_PATH
+              value: "/auth/htpasswd"
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- if .Values.auth.enabled }}
+            - name: auth
+              mountPath: /auth
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.registryConfig.healthPath }}
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.registryConfig.healthPath }}
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: titan-registry-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.auth.enabled }}
+        - name: auth
+          secret:
+            secretName: {{ include "titan-registry.authSecretName" . }}
+            items:
+              - key: {{ .Values.auth.secretKey }}
+                path: htpasswd
+        {{- end }}

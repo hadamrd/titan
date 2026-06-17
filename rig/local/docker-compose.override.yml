@@ -1,0 +1,12 @@
+services:
+  titan-server:
+    environment:
+      QUARKUS_HTTP_CORS: "true"
+      QUARKUS_HTTP_CORS_ORIGINS: "http://localhost:5180"
+      QUARKUS_HTTP_CORS_METHODS: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+      QUARKUS_HTTP_CORS_HEADERS: "accept,authorization,content-type,x-requested-with"
+      QUARKUS_HTTP_CORS_EXPOSED_HEADERS: "content-disposition,content-length"
+      TITAN_ARTIFACT_STORE: "fs"
+      TITAN_ARTIFACT_ROOT: "/titan/artifacts"
+    volumes:
+      - titan-ws:/titan

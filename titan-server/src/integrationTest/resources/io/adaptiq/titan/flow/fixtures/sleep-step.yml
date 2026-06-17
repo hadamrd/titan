@@ -1,0 +1,9 @@
+titan:
+  stages:
+    - stage: Wait
+      steps:
+        - sleep: 1h
+    - stage: After
+      dependsOn: [Wait]
+      steps:
+        - sh: echo done

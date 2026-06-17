@@ -1,0 +1,15 @@
+# Titan pipeline test fixture — synthesizes cleanly (valid YAML, valid DAG) but
+# CANNOT bake: it declares a required parameter with no default, and the build
+# supplies no value. TitanFlowExecution.bake() -> ParameterResolver.resolve()
+# throws PipelineParseException. QueueProcessor.handleBake catches it and routes
+# the reason to builds.failure_summary (design/45 §1/§4) — the wiring gap B tests.
+titan:
+  parameters:
+    - name: releaseTag
+      type: string
+      required: true
+
+  stages:
+    - stage: Build
+      steps:
+        - sh: make

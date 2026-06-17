@@ -1,0 +1,24 @@
+# Titan pipeline test fixture — exercises the step-level `when:` runtime evaluator
+# (design/29 §3, PR #260). Three stages, each with one step:
+#   1. always-runs   — no when:           → SUCCESS
+#   2. skipped       — when: "false"      → SKIPPED at dispatch (no task_queue row)
+#   3. conditional   — when: "true"       → SUCCESS
+# Stage-level `when:` is evaluated at bake time; step-level `when:` (this fixture)
+# is evaluated by the orchestrator at run time — that is what this IT proves.
+titan:
+  stages:
+    - stage: always-runs
+      steps:
+        - sh: make build
+
+    - stage: skipped
+      dependsOn: [always-runs]
+      steps:
+        - sh: make never
+          when: "false"
+
+    - stage: conditional
+      dependsOn: [skipped]
+      steps:
+        - sh: make deploy
+          when: "true"

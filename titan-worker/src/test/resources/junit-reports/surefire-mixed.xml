@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- REAL Maven Surefire 3.0.2 output, captured from an actual `mvn test` run of a
+     pass/failure/error/skipped mix. The machine-specific <properties> block (absolute
+     paths, full classpath, env) was the only thing removed; every <testcase>,
+     <failure>, <error> and <skipped> below is verbatim tool output. tests=5 -> 2
+     passed, 1 failure + 1 error = 2 failed, 1 skipped. -->
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" version="3.0.2" name="io.adaptiq.titan.worker.step.builtin.JunitFixtureGenMixed" time="0.037" tests="5" errors="1" skipped="1" failures="1">
+  <testcase name="passesOne" classname="io.adaptiq.titan.worker.step.builtin.JunitFixtureGenMixed" time="0.002"/>
+  <testcase name="passesTwo" classname="io.adaptiq.titan.worker.step.builtin.JunitFixtureGenMixed" time="0.002"/>
+  <testcase name="failsAnAssertion" classname="io.adaptiq.titan.worker.step.builtin.JunitFixtureGenMixed" time="0.013">
+    <failure message="expected: &lt;expected&gt; but was: &lt;actual&gt;" type="org.opentest4j.AssertionFailedError"><![CDATA[org.opentest4j.AssertionFailedError: expected: <expected> but was: <actual>
+	at org.junit.jupiter.api.AssertionFailureBuilder.build(AssertionFailureBuilder.java:151)
+	at org.junit.jupiter.api.AssertionFailureBuilder.buildAndThrow(AssertionFailureBuilder.java:132)
+	at org.junit.jupiter.api.AssertEquals.failNotEqual(AssertEquals.java:197)
+	at org.junit.jupiter.api.AssertEquals.assertEquals(AssertEquals.java:182)
+	at org.junit.jupiter.api.AssertEquals.assertEquals(AssertEquals.java:177)
+	at org.junit.jupiter.api.Assertions.assertEquals(Assertions.java:1145)
+	at io.adaptiq.titan.worker.step.builtin.JunitFixtureGenMixed.failsAnAssertion(JunitFixtureGenMixed.java:26)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+]]></failure>
+  </testcase>
+  <testcase name="throwsAnError" classname="io.adaptiq.titan.worker.step.builtin.JunitFixtureGenMixed" time="0.003">
+    <error message="boom — a non-assertion throwable" type="java.lang.IllegalStateException"><![CDATA[java.lang.IllegalStateException: boom — a non-assertion throwable
+	at io.adaptiq.titan.worker.step.builtin.JunitFixtureGenMixed.throwsAnError(JunitFixtureGenMixed.java:31)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+]]></error>
+  </testcase>
+  <testcase name="isSkipped" classname="io.adaptiq.titan.worker.step.builtin.JunitFixtureGenMixed" time="0.0">
+    <skipped message="fixture: a skipped test"/>
+  </testcase>
+</testsuite>

@@ -1,0 +1,453 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Titan REST API",
+    "version": "0.1.0-snapshot",
+    "description": "Snapshot of titan-server's /api/v1 surface. Regenerate via `task titan-mcp:gen` against a live controller."
+  },
+  "paths": {
+    "/api/v1/info": {
+      "get": {
+        "operationId": "info_get",
+        "summary": "Get controller info",
+        "description": "Returns version, build metadata, and OIDC discovery hints.",
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/system/info": {
+      "get": {
+        "operationId": "system_info_get",
+        "summary": "Get system info",
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/system/ui-config": {
+      "get": {
+        "operationId": "system_ui_config_get",
+        "summary": "Get UI runtime config",
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/jobs": {
+      "get": {
+        "operationId": "jobs_list",
+        "summary": "List jobs (paginated)",
+        "parameters": [
+          {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0}},
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50}},
+          {"name": "search", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      },
+      "post": {
+        "operationId": "jobs_create",
+        "summary": "Create a job",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/CreateJobRequest"}
+            }
+          }
+        },
+        "responses": {"201": {"description": "created"}}
+      }
+    },
+    "/api/v1/jobs/{jobId}": {
+      "get": {
+        "operationId": "jobs_get",
+        "summary": "Fetch a single job",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}, "404": {"description": "not found"}}
+      },
+      "patch": {
+        "operationId": "jobs_update",
+        "summary": "Update a job",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JobUpdate"}}}
+        },
+        "responses": {"200": {"description": "ok"}}
+      },
+      "delete": {
+        "operationId": "jobs_delete",
+        "summary": "Delete a job",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"204": {"description": "deleted"}}
+      }
+    },
+    "/api/v1/jobs/{jobId}/builds": {
+      "get": {
+        "operationId": "jobs_builds_list",
+        "summary": "List builds for a job",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      },
+      "post": {
+        "operationId": "jobs_build_trigger",
+        "summary": "Trigger a build",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "requestBody": {
+          "content": {"application/json": {"schema": {"type": "object"}}}
+        },
+        "responses": {"202": {"description": "queued"}}
+      }
+    },
+    "/api/v1/jobs/{jobId}/stats": {
+      "get": {
+        "operationId": "jobs_stats_get",
+        "summary": "Get aggregate stats for a job",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/jobs/{jobId}/triggers": {
+      "get": {
+        "operationId": "jobs_triggers_list",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      },
+      "put": {
+        "operationId": "jobs_triggers_set",
+        "summary": "Replace the trigger set for a job",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"type": "object"}}}
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/jobs/{jobId}/parameters": {
+      "get": {
+        "operationId": "jobs_parameters_get",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/jobs/{jobId}/recent-builds": {
+      "get": {
+        "operationId": "jobs_recent_builds",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/builds": {
+      "get": {
+        "operationId": "builds_list",
+        "summary": "List builds (paginated)",
+        "parameters": [
+          {"name": "status", "in": "query", "schema": {"type": "array", "items": {"type": "string"}}},
+          {"name": "branch", "in": "query", "schema": {"type": "string"}},
+          {"name": "search", "in": "query", "schema": {"type": "string"}},
+          {"name": "since", "in": "query", "schema": {"type": "string"}},
+          {"name": "triggeredBy", "in": "query", "schema": {"type": "string"}},
+          {"name": "headSha", "in": "query", "schema": {"type": "string"}},
+          {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0}},
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/builds/{buildId}": {
+      "get": {
+        "operationId": "builds_get",
+        "parameters": [
+          {"name": "buildId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}, "404": {"description": "not found"}}
+      }
+    },
+    "/api/v1/builds/{buildId}/replay": {
+      "post": {
+        "operationId": "builds_replay",
+        "summary": "Replay a build",
+        "parameters": [
+          {"name": "buildId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"202": {"description": "queued"}}
+      }
+    },
+    "/api/v1/builds/{buildId}/stages/{stageId}/retry": {
+      "post": {
+        "operationId": "builds_stage_retry",
+        "parameters": [
+          {"name": "buildId", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "stageId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"202": {"description": "queued"}}
+      }
+    },
+    "/api/v1/builds/{buildId}/test-results": {
+      "get": {
+        "operationId": "builds_test_results",
+        "parameters": [
+          {"name": "buildId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/builds/{buildId}/artifacts": {
+      "get": {
+        "operationId": "builds_artifacts_list",
+        "parameters": [
+          {"name": "buildId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/builds/{buildId}/artifacts/{artifactId}": {
+      "get": {
+        "operationId": "builds_artifact_get",
+        "parameters": [
+          {"name": "buildId", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "artifactId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/queue": {
+      "get": {
+        "operationId": "queue_list",
+        "summary": "List queued/running tasks",
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/admin/queue/{taskId}": {
+      "delete": {
+        "operationId": "admin_queue_cancel",
+        "summary": "Cancel a queued task",
+        "parameters": [
+          {"name": "taskId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"204": {"description": "cancelled"}}
+      }
+    },
+    "/api/v1/admin/users": {
+      "get": {
+        "operationId": "admin_users_list",
+        "summary": "List users",
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/admin/users/{userId}": {
+      "delete": {
+        "operationId": "admin_users_delete",
+        "parameters": [
+          {"name": "userId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"204": {"description": "deleted"}}
+      }
+    },
+    "/api/v1/credentials": {
+      "get": {
+        "operationId": "credentials_list",
+        "responses": {"200": {"description": "ok"}}
+      },
+      "post": {
+        "operationId": "credentials_create",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"type": "object"}}}
+        },
+        "responses": {"201": {"description": "created"}}
+      }
+    },
+    "/api/v1/credentials/{credentialId}": {
+      "delete": {
+        "operationId": "credentials_delete",
+        "parameters": [
+          {"name": "credentialId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"204": {"description": "deleted"}}
+      }
+    },
+    "/api/v1/workers": {
+      "get": {
+        "operationId": "workers_list",
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/workers/{workerId}/drain": {
+      "post": {
+        "operationId": "workers_drain",
+        "parameters": [
+          {"name": "workerId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"202": {"description": "draining"}}
+      }
+    },
+    "/api/v1/activity": {
+      "get": {
+        "operationId": "activity_feed",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/audit": {
+      "get": {
+        "operationId": "audit_search",
+        "parameters": [
+          {"name": "actor", "in": "query", "schema": {"type": "string"}},
+          {"name": "since", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/gates": {
+      "get": {
+        "operationId": "gates_list",
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/gates/{gateId}/approve": {
+      "post": {
+        "operationId": "gates_approve",
+        "parameters": [
+          {"name": "gateId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "requestBody": {
+          "content": {"application/json": {"schema": {"type": "object"}}}
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/gates/{gateId}/reject": {
+      "post": {
+        "operationId": "gates_reject",
+        "parameters": [
+          {"name": "gateId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "requestBody": {
+          "content": {"application/json": {"schema": {"type": "object"}}}
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/stats/top-failing-jobs": {
+      "get": {
+        "operationId": "stats_top_failing_jobs",
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/stats/overview": {
+      "get": {
+        "operationId": "stats_overview",
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/starred-jobs": {
+      "get": {
+        "operationId": "starred_jobs_list",
+        "responses": {"200": {"description": "ok"}}
+      },
+      "post": {
+        "operationId": "starred_jobs_add",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"type": "object"}}}
+        },
+        "responses": {"201": {"description": "starred"}}
+      }
+    },
+    "/api/v1/starred-jobs/{jobId}": {
+      "delete": {
+        "operationId": "starred_jobs_remove",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"204": {"description": "unstarred"}}
+      }
+    },
+    "/api/v1/pat": {
+      "get": {
+        "operationId": "pat_list",
+        "responses": {"200": {"description": "ok"}}
+      },
+      "post": {
+        "operationId": "pat_create",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"type": "object"}}}
+        },
+        "responses": {"201": {"description": "created"}}
+      }
+    },
+    "/api/v1/pat/{tokenId}": {
+      "delete": {
+        "operationId": "pat_revoke",
+        "parameters": [
+          {"name": "tokenId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"204": {"description": "revoked"}}
+      }
+    },
+    "/api/v1/pipeline/validate": {
+      "post": {
+        "operationId": "pipeline_validate",
+        "summary": "Validate a titan-pipeline.yml document",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"type": "object"}}}
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/api/v1/jobs/{jobId}/discovery": {
+      "post": {
+        "operationId": "jobs_discovery_run",
+        "parameters": [
+          {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"202": {"description": "queued"}}
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CreateJobRequest": {
+        "type": "object",
+        "required": ["fullName", "scmUrl"],
+        "properties": {
+          "fullName": {"type": "string"},
+          "displayName": {"type": "string"},
+          "scmUrl": {"type": "string"},
+          "branch": {"type": "string"},
+          "pipelinePath": {"type": "string"}
+        }
+      },
+      "JobUpdate": {
+        "type": "object",
+        "properties": {
+          "displayName": {"type": "string"},
+          "branch": {"type": "string"},
+          "pipelinePath": {"type": "string"}
+        }
+      }
+    }
+  }
+}

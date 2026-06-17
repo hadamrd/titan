@@ -1,0 +1,78 @@
+# Tour rubric — declarative per-page checks.
+#
+# Each entry under `rubric_items` declares one check the vision model
+# evaluates per page. Pages opt-in to items via `pages[].items`.
+#
+# Schema version is sticky; bump in lockstep with findings.json schema_version.
+schema_version: 1
+
+rubric_items:
+  empty_state_present:
+    prompt: |
+      Does this page render a clearly-labelled empty state when there's no
+      data (e.g. "No jobs yet" + a primary CTA), or does it show a blank
+      table / blank canvas? Pass = clear empty state. Warn = ambiguous /
+      no CTA. Fail = blank page or unstyled "0 results".
+  loading_state_present:
+    prompt: |
+      Is there a visible loading affordance (spinner, skeleton, progress
+      bar) while data is in flight? Pass = clear skeleton or spinner.
+      Warn = subtle / late. Fail = blank screen during load.
+  error_state_present:
+    prompt: |
+      If the page errors (API 500, network failure), does it show a
+      typed error banner with a retry affordance? Pass = banner+retry.
+      Warn = banner only. Fail = blank or generic "something went wrong".
+  primary_affordance_above_fold:
+    prompt: |
+      Is the primary action (Run, Create, Approve, etc.) visible above
+      the fold at the documented viewport? Pass = visible. Warn = partially
+      cropped. Fail = below the fold.
+  text_legibility:
+    prompt: |
+      Is body text legible — adequate contrast vs background, no
+      overlap, no truncation that hides meaning? Pass = legible.
+      Warn = low contrast. Fail = unreadable.
+  layout_balance:
+    prompt: |
+      Is the layout balanced — no large empty areas next to crammed
+      ones, alignment grid respected, no orphan widgets? Pass = balanced.
+      Warn = minor imbalance. Fail = broken layout.
+  mobile_viewport_degradation:
+    prompt: |
+      At 375px width, does the page degrade gracefully — no horizontal
+      scroll, primary action still reachable, no overlapping controls?
+      Pass = graceful. Warn = minor overflow. Fail = unusable on mobile.
+  failure_state_distinguishable:
+    prompt: |
+      In tables that mix queued / running / failed rows, is the failed
+      state visually distinct (color, icon, badge)? Pass = clear.
+      Warn = subtle. Fail = visually identical to queued/running.
+
+pages:
+  - path: /jobs
+    viewport: desktop
+    items:
+      - empty_state_present
+      - loading_state_present
+      - failure_state_distinguishable
+      - primary_affordance_above_fold
+      - layout_balance
+      - text_legibility
+  - path: /jobs
+    viewport: mobile
+    items:
+      - mobile_viewport_degradation
+      - primary_affordance_above_fold
+  - path: /builds
+    viewport: desktop
+    items:
+      - empty_state_present
+      - loading_state_present
+      - failure_state_distinguishable
+      - text_legibility
+  - path: /404
+    viewport: desktop
+    items:
+      - text_legibility
+      - layout_balance

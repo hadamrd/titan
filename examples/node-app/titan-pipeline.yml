@@ -1,0 +1,41 @@
+# Node.js service — install, lint, test, build, archive.
+#
+# A copy-paste-ready pipeline for a typical Node/pnpm/npm service. Adapt the
+# shell commands to your package manager and you have a working CI pipeline.
+#
+# The DAG is linear: each stage `dependsOn` the previous one, so a failure
+# anywhere short-circuits everything downstream (failurePolicy defaults to
+# blockOnFailure).
+
+# Pipeline-wide environment, merged into every step (step/stage env wins).
+env:
+  CI: "true"
+  NODE_ENV: production
+
+stages:
+  - stage: install
+    steps:
+      # `npm ci` is reproducible from the lockfile; fall back to `install`
+      # for first-time checkouts that don't have a lockfile yet.
+      - sh: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+  - stage: lint
+    dependsOn: [install]
+    steps:
+      - sh: npm run lint
+
+  - stage: test
+    dependsOn: [install]
+    steps:
+      # Emit JUnit XML (e.g. jest-junit) so Titan can publish a test report.
+      - sh: npm test
+      - junit: "reports/junit/*.xml"
+
+  - stage: build
+    dependsOn: [lint, test]
+    steps:
+      - sh: npm run build
+      # Archive the production bundle through the configured artifact store.
+      - archiveArtifacts:
+          artifacts: "dist/**"
+          fingerprint: true

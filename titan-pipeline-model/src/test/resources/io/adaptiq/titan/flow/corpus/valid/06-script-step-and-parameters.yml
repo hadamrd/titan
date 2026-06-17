@@ -1,0 +1,15 @@
+# Valid: the `script:` step body (runtime + body) and a parameters block.
+parameters:
+  - name: VERSION
+    type: string
+    default: "1.0"
+  - name: PUBLISH
+    type: boolean
+    required: false
+stages:
+  - stage: Generate
+    steps:
+      - script:
+          runtime: groovy
+          body: "println 'hello'"
+      - echo: done

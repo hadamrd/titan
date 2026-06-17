@@ -1,0 +1,37 @@
+# Complex multi-scope fixture — `each:` 1D fan-out across deploy regions.
+#
+# Combines:
+#   * each:  a stage fanned out into one cell per region in `in:`. Each cell
+#            exposes ${each.region} substitution + an EACH_REGION env binding.
+#   * env:   a pipeline-level env every cell inherits.
+#   * dependsOn: a Build upstream + a Verify fan-in downstream that depends on
+#            the `each` prototype (rewritten to all region cells).
+#
+# Stage "Deploy" (id `deploy`) with var=region, in=[us-east, eu-west, ap-south]
+# expands into 3 cells:  deploy-region-us-east, deploy-region-eu-west,
+# deploy-region-ap-south.
+titan:
+  agent: linux
+  failurePolicy: blockOnFailure
+
+  env:
+    APP: checkout-service
+
+  stages:
+    - stage: Build
+      steps:
+        - sh: "make build APP=$APP"   # APP from payload.env
+
+    - stage: Deploy
+      dependsOn: [Build]
+      each:
+        var: region
+        in: [us-east, eu-west, ap-south]
+      steps:
+        # ${each.region} is matrix/each parse-time substitution (works); $APP from payload.env.
+        - sh: "deploy --region ${each.region} --app $APP"
+
+    - stage: Verify
+      dependsOn: [Deploy]
+      steps:
+        - sh: "verify --all-regions"

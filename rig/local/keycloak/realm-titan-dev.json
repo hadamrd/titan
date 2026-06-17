@@ -1,0 +1,229 @@
+{
+  "realm": "titan-dev",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "accessTokenLifespan": 1800,
+  "accessTokenLifespanForImplicitFlow": 1800,
+  "ssoSessionIdleTimeout": 3600,
+  "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "realm": [
+      {
+        "name": "READ_JOB",
+        "description": "View jobs, builds, logs"
+      },
+      {
+        "name": "TRIGGER_BUILD",
+        "description": "Start a build"
+      },
+      {
+        "name": "EDIT_PIPELINE",
+        "description": "Edit job pipeline DSL"
+      },
+      {
+        "name": "READ_AUDIT",
+        "description": "View audit log without ADMIN"
+      },
+      {
+        "name": "ABORT_BUILD",
+        "description": "Cancel a running build without TRIGGER_BUILD"
+      },
+      {
+        "name": "OPERATE_WORKER",
+        "description": "Drain/undrain workers without ADMIN"
+      },
+      {
+        "name": "REPLAY_BUILD",
+        "description": "Replay an existing build without TRIGGER_BUILD"
+      },
+      {
+        "name": "MANAGE_CREDENTIALS",
+        "description": "Manage encrypted credentials store (create/rotate/delete + KEK re-wrap)"
+      },
+      {
+        "name": "ADMIN",
+        "description": "Full admin access"
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "dev",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Dev",
+      "lastName": "User",
+      "email": "dev@titan.local",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "READ_JOB",
+        "TRIGGER_BUILD",
+        "EDIT_PIPELINE",
+        "READ_AUDIT",
+        "ABORT_BUILD",
+        "OPERATE_WORKER",
+        "REPLAY_BUILD",
+        "MANAGE_CREDENTIALS",
+        "ADMIN"
+      ]
+    },
+    {
+      "username": "service-account-titan-admin-cli",
+      "enabled": true,
+      "serviceAccountClientId": "titan-admin-cli",
+      "clientRoles": {
+        "realm-management": [
+          "view-users",
+          "view-realm",
+          "query-users"
+        ]
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "titan-ui",
+      "name": "Titan UI (SPA)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:5180/*"
+      ],
+      "webOrigins": [
+        "http://localhost:5180"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5180/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "titan-server-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "titan-server",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "realm-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "groups",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "sso-groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "sso_groups"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "titan-server",
+      "name": "Titan Server (bearer-only)",
+      "enabled": true,
+      "publicClient": false,
+      "bearerOnly": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false
+    },
+    {
+      "clientId": "titan-admin-cli",
+      "name": "Titan Admin CLI (service account)",
+      "description": "Service account for GET /api/v1/admin/users (#608). DEV fixture; prod injects TITAN_KC_ADMIN_CLIENT_SECRET via k8s Secret + Infisical (CONSTITUTION \u00a76).",
+      "enabled": true,
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "secret": "titan-admin-dev-secret-CHANGE-IN-PROD"
+    },
+    {
+      "clientId": "titan-e2e",
+      "name": "Titan E2E (Direct Access Grants \u2014 DEV/E2E ONLY)",
+      "description": "Playwright harness ROPC client. DEV/E2E ONLY: direct-grants bypasses PKCE; safe only because realm + dev/dev user are dev-rig fixtures. MUST NOT ship to prod.",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "titan-server-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "titan-server",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "realm-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "groups",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "sso-groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "sso_groups"
+          }
+        }
+      ]
+    }
+  ]
+}

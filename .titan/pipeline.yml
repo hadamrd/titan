@@ -1,0 +1,225 @@
+# Titan self-build — the dogfood pipeline.
+#
+# This is the canonical "Titan compiles, tests, and deploys Titan" pipeline,
+# anchoring docs/design/58-alignment-grooming.md §4 Sprint #1's "real workloads
+# day 1" mandate. Every keyword shipped in the Titan PDL is exercised here so
+# the grammar stays load-bearing — if a future grammar change breaks the
+# self-build, the parser-validation test (TitanSelfBuildPipelineTest) breaks
+# first, in CI, before the change merges.
+#
+# Build commands are wrapped Taskfile.yml targets — same entry point as a
+# developer's machine, no parallel CI script.
+
+agent: linux
+failurePolicy: blockOnFailure
+timeout: 45m
+
+# Trigger fan-in (closes #950):
+#   1) GitHub push-to-trunk webhook — the primary signal. Every merge to trunk
+#      fires the build+push+rollout flow so head-of-trunk is on the rig within
+#      minutes of merge, with zero manual `task deploy:k3s:trunk` (the friction
+#      [[feedback_always_redeploy_after_merge]] flagged).
+#   2) Hourly cron — safety net. Keeps the pipeline exercised even if the
+#      webhook gets dropped / GitHub is degraded / the trigger SPI regresses.
+#      Idempotent: re-runs at the same SHA are no-ops (docker layer cache +
+#      `kubectl rollout restart` is always safe).
+#
+# CredentialsId is the HMAC secret for verifying the inbound webhook; resolved
+# from CredentialsService at receive time (CONSTITUTION §6 — no plaintext).
+# The credential is provisioned on the rig via External Secrets; the loader
+# in titan-server/.../api/triggers/github reads it by id at dispatch time.
+triggers:
+  - github:
+      branches: [trunk]
+      events: [push]
+      credentialsId: github-webhook-secret
+  - cron: "H * * * *"
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+
+stages:
+  # ── Lint: format + static analysis, gates everything else ───────────────
+  - stage: Lint
+    timeout: 10m
+    steps:
+      - sh: ./gradlew spotlessCheck
+      - sh: ./gradlew spotbugsMain
+
+  # ── Build (Java + UI in parallel — same dependsOn, sibling stages) ──────
+  - stage: Build Java
+    dependsOn: [Lint]
+    timeout: 20m
+    steps:
+      - sh: ./gradlew build -x test -x integrationTest
+
+  - stage: Build UI
+    dependsOn: [Lint]
+    timeout: 15m
+    steps:
+      - sh: task ui:build
+
+  # ── Test: matrix over the core modules ──────────────────────────────────
+  - stage: Unit Tests
+    dependsOn: [Build Java]
+    timeout: 25m
+    matrix:
+      axes:
+        module: [titan-server, titan-worker, titan-pipeline-model, titan-db-core]
+      maxParallel: 2
+    steps:
+      - sh: "./gradlew :${matrix.module}:test"
+
+  # ── Integration tests — only the modules that have an integrationTest src ─
+  - stage: Integration Tests
+    dependsOn: [Build Java]
+    timeout: 30m
+    each:
+      var: module
+      in: [titan-server, titan-worker]
+    steps:
+      - sh: "./gradlew :${each.module}:integrationTest"
+
+  # ── Gate: require human approval before the E2E suite (it's slow + flaky).
+  # Per #398: a `dependsOn:` entry that names a matrix/each prototype resolves
+  # to ALL cells of that prototype at bake time (fan-in semantics — Buildkite,
+  # GHA matrix, Bazel). So this gate naturally waits for every Unit Tests and
+  # Integration Tests cell, with no cell-id leakage into the pipeline file.
+  - gate: E2E Approval
+    requiresApproval: true
+    approvers: [titan-maintainers]
+    dependsOn: [Build UI, Unit Tests, Integration Tests]
+
+  # ── E2E: only on trunk, behind the gate ─────────────────────────────────
+  - stage: E2E
+    dependsOn: [E2E Approval]
+    when: "params.branch == 'trunk'"
+    timeout: 20m
+    steps:
+      - sh: task e2e
+
+  # ── Publish container images to GHCR (closes #402, #950) ────────────────
+  # Builds + pushes ghcr.io/hadamrd/titan-{server,ui,worker} so the k3s Helm
+  # chart (rig/k3s/helm/titan) can actually pull real images instead of
+  # ImagePullBackOff'ing on its `0.1.0` defaults.
+  #
+  # Reuses the SAME Dockerfiles the local rig uses — rig/local/Dockerfile.
+  # titan-{server,ui,worker} — so there is one image build path, not two.
+  # If the local rig builds, the k3s rig pulls the same shape.
+  #
+  # VERSION POLICY (#950)
+  #   SHA_TAG = "trunk-$(git rev-parse --short=7 HEAD)" — immutable, what the
+  #   chart pins to for reproducible deploys. Each successful trunk build
+  #   pushes THREE tags per component:
+  #     - ghcr.io/hadamrd/titan-<comp>:trunk-<sha7>  (immutable, helm pin)
+  #     - ghcr.io/hadamrd/titan-<comp>:latest-trunk  (floating, head-of-trunk)
+  #     - ghcr.io/hadamrd/titan-<comp>:demo-latest   (the demo rig's pin —
+  #                                                   imagePullPolicy: Always)
+  #   The chart's default tag (rig/k3s/helm/titan/values.yaml :: tag) is
+  #   bumped manually when promoting a release; CI never rewrites the chart.
+  #   These tags match dev/release/publish-trunk.sh's scheme so the manual
+  #   publish path and the pipeline path produce byte-identical artefacts.
+  #
+  # CREDENTIALS
+  #   GHCR_USER + GHCR_PAT are bound from a `usernamePassword` credential
+  #   stored in CredentialsService under id `ghcr-publisher` (PR #387 pattern:
+  #   typed credentialsId, not URL/string sniffing, no plaintext in YAML).
+  #   On the k3s rig the credential is synced from the External Secrets store
+  #   into CredentialsService — the YAML never names a Kubernetes Secret or
+  #   an env var directly (CONSTITUTION §6).
+  #   If the credential is absent on a rig, the stage fails fast at dispatch
+  #   resolution — that is the desired behaviour: no silent skip on prod.
+  #
+  # GATING
+  #   Only runs on trunk and only after the E2E gate + E2E stage are green
+  #   (dependsOn: E2E). PR builds never push to GHCR.
+  - stage: Publish Images
+    dependsOn: [E2E]
+    when: "params.branch == 'trunk'"
+    timeout: 20m
+    credentials:
+      - id: ghcr-publisher
+        type: usernamePassword
+        usernameVariable: GHCR_USER
+        passwordVariable: GHCR_PAT
+    matrix:
+      axes:
+        component: [server, ui, worker]
+      maxParallel: 2
+    steps:
+      - sh: |
+          set -euo pipefail
+          SHA_TAG="trunk-$(git rev-parse --short=7 HEAD)"
+          IMAGE="ghcr.io/hadamrd/titan-${matrix.component}"
+          echo "Building ${IMAGE}:${SHA_TAG} (+ :latest-trunk, :demo-latest)"
+          docker build \
+            -t "${IMAGE}:${SHA_TAG}" \
+            -t "${IMAGE}:latest-trunk" \
+            -t "${IMAGE}:demo-latest" \
+            -f "rig/local/Dockerfile.titan-${matrix.component}" \
+            .
+          echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          docker push "${IMAGE}:${SHA_TAG}"
+          docker push "${IMAGE}:latest-trunk"
+          docker push "${IMAGE}:demo-latest"
+          docker logout ghcr.io
+
+  # ── Rollout Restart on the k3s rig (closes #950) ────────────────────────
+  # After every successful trunk publish, kick the rig's titan deployments so
+  # they pull the freshly-pushed `:demo-latest` image (imagePullPolicy: Always
+  # on the demo rig — see rig/k3s/helm/titan/values.yaml). This is the auto-
+  # rebuild+push+rollout loop the CTO asked for — removes the manual
+  # `task deploy:k3s:trunk` step after every merge.
+  #
+  # SCOPE
+  #   `kubectl -n titan rollout restart deploy` restarts EVERY deployment in
+  #   the titan namespace in one shot — titan-server, titan-ui, titan-worker.
+  #   We don't enumerate component names: the namespace is the boundary, so
+  #   adding a new deployment to the chart auto-picks-up here without a YAML
+  #   edit. The restart is idempotent and a no-op (Recreate strategy) if no
+  #   change is rolled out — safe to fire on the hourly cron-fallback too.
+  #
+  # CREDENTIAL
+  #   `rig-kubeconfig` is a `file`-typed credential in CredentialsService —
+  #   synced from the External Secrets store on the rig. The binding mounts
+  #   it into a temp file and exports the path as KUBECONFIG, so kubectl
+  #   picks it up with zero further config. No kubeconfig content lives in
+  #   this YAML or in the worker image — CONSTITUTION §6.
+  #
+  # GATING
+  #   Only fires on trunk + only after Publish Images. A failed publish
+  #   never reaches rollout — no risk of restarting onto a broken image.
+  #   `--timeout=5m` bounds the wait so the pipeline doesn't hang forever
+  #   on a stuck rollout; the rig's existing readiness probes carry the
+  #   actual health check.
+  - stage: Rollout Restart
+    dependsOn: [Publish Images]
+    when: "params.branch == 'trunk'"
+    timeout: 10m
+    credentials:
+      - id: rig-kubeconfig
+        type: file
+        variable: KUBECONFIG
+    steps:
+      - sh: |
+          set -euo pipefail
+          echo "==> Restarting titan deployments on the rig"
+          kubectl -n titan rollout restart deploy
+          kubectl -n titan rollout status deploy/titan-server --timeout=5m
+          kubectl -n titan rollout status deploy/titan-ui     --timeout=5m
+          kubectl -n titan rollout status deploy/titan-worker --timeout=5m
+          echo "==> All titan deployments rolled out cleanly"
+
+# ── Pipeline-level lifecycle hooks ──────────────────────────────────────
+# credentialsId points at a CredentialsService entry (CONSTITUTION §6: no
+# plaintext secret in config). The id is provisioned on the rig; absent on a
+# fresh checkout, the orchestrator logs and skips the hook rather than failing.
+#
+# Per #950, the dogfood pipeline pulses on BOTH terminal states — success +
+# failure — so a missed-merge → missed-rollout gap surfaces in the team
+# channel, not in a "wait, why is the rig still on yesterday's SHA?" stand-up.
+notify:
+  - type: webhook
+    on: [success, failure]
+    url: https://hooks.example.com/titan-self-build
+    credentialsId: titan-self-build-notify

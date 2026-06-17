@@ -1,0 +1,41 @@
+# Complex multi-scope fixture — polyglot CI with a build matrix.
+#
+# Combines FOUR scopes on one pipeline:
+#   * matrix:  os × jdk Cartesian fan-out with an `exclude` cell + fail_fast.
+#   * env:     pipeline-level env inherited by every cell.
+#   * junit + archiveArtifacts: post-build reporting steps inside each cell.
+#   * dependsOn: a fan-in `Publish` stage that runs after the whole matrix.
+#
+# Matrix axes: os∈{linux,windows}, jdk∈{17,21}  ->  4 base cells, minus the
+# excluded {windows,17} cell  ->  3 surviving cells:
+#   - linux/17, linux/21, windows/21
+# Cell stage ids (MatrixScope.cellId): build-os-<os>-jdk-<jdk>.
+titan:
+  agent: linux
+  failurePolicy: blockOnFailure
+
+  env:
+    CI: "true"
+    REGISTRY: registry.example.com
+
+  stages:
+    - stage: Build
+      matrix:
+        axes:
+          os: [linux, windows]
+          jdk: [17, 21]
+        exclude:
+          - { os: windows, jdk: 17 }
+        fail_fast: true
+      steps:
+        - sh: "build --os ${matrix.os} --jdk ${matrix.jdk}"
+        - junit: { results: "target/surefire-reports/*.xml" }
+        - archiveArtifacts: { artifacts: "target/app-${matrix.os}-${matrix.jdk}.jar" }
+
+    - stage: Publish
+      dependsOn: [Build]
+      steps:
+        # env is delivered to the worker as payload.env; the shell reads $REGISTRY.
+        # (NB: the ${{ env.REGISTRY }} template form is broken at dispatch — see issue #1212.)
+        - sh: "publish --registry $REGISTRY"
+        - setOutput: { name: published, value: "true" }

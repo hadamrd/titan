@@ -1,0 +1,46 @@
+# Pipeline includes (#1128) — the merged pipeline runs green and the build-detail UI
+# shows the FLATTENED step list (no separate "includes" tab; users see what actually ran).
+#
+# The fixture is intentionally inlined under `pipeline:` because the e2e harness loads
+# a single-string pipeline body. The companion repo-fixture under
+# `e2e/fixtures/pipelines/polyglot-monorepo-with-includes/` is the documented,
+# README-illustrated form a customer's `titan-pipeline.yml` looks like; the merged
+# equivalent below is what the engine stores AND the UI renders.
+name: pipeline-includes — merged prologue + local override
+pipeline: |
+  agent: titan-worker-1
+  env:
+    # Local key wins on collision with the (hypothetical) included shared env.
+    NODE_ENV: staging
+    DEBUG: "true"
+    CACHE_BUST: "1"
+  stages:
+    # From included _common.yml — unchanged.
+    - stage: prologue-install
+      steps:
+        - sh: echo "[shared] installing deps"
+    # Local override of the shared `prologue-test` — local stage REPLACES included
+    # whole-stage; no per-step merge.
+    - stage: prologue-test
+      dependsOn: [prologue-install]
+      steps:
+        - sh: echo "[local] running stricter prologue-test override"
+    # Local-only stage on top of the merged prologue.
+    - stage: build
+      dependsOn: [prologue-test]
+      steps:
+        - sh: echo "[local] building"
+expect:
+  build: SUCCESS
+  nodes:
+    prologue-install: { status: SUCCESS }
+    prologue-test: { status: SUCCESS }
+    build: { status: SUCCESS }
+  logContains:
+    - "[shared] installing deps"
+    - "[local] running stricter prologue-test override"
+    - "[local] building"
+  # Adversarial: the included-version step text must NOT appear in the logs —
+  # the local override fully replaced the included `prologue-test`.
+  logNotContains:
+    - "running shared test prelude"

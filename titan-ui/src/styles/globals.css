@@ -1,0 +1,37 @@
+/* Design tokens — v2 system (Claude Design handoff).
+   Sets dark theme by default via :root and provides hsl(var(--…)) shadcn
+   fallbacks so existing tailwind utility usage keeps rendering.
+   @import MUST come before any other rule per CSS spec — putting it after
+   @tailwind made the browser silently drop these imports. */
+@import './tokens.css';
+@import './components.css';
+@import './yaml-highlight.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+  }
+  /* Native form controls don't inherit our CSS-var theme by default — a bare
+     <select> renders the OS widget (white popup on a dark UI). Theme them
+     globally so every select/option/native control respects the active theme.
+     appearance:none lets our background/color fully override the OS chrome. */
+  select,
+  select option {
+    background-color: var(--bg-elevated);
+    color: var(--fg);
+  }
+  select {
+    appearance: none;
+    -webkit-appearance: none;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+  }
+}

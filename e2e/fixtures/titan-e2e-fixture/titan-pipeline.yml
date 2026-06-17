@@ -1,0 +1,112 @@
+# Titan e2e fixture pipeline.
+#
+# A complete CI/CD pipeline for a two-stack monorepo (Java backend + TypeScript
+# frontend), exercised end-to-end on the Titan rig:
+#
+#   Checkout
+#     ├── Backend  Lint → Test → Build      (in a maven: container)
+#     └── Frontend Lint → Test → Build      (in a node: container)
+#                              └── Publish Approval (gate) → Report ─┬─ Notify
+#
+# The two stacks run as parallel chains off Checkout; each chain is sequential
+# so its stages share the workspace cleanly. Polyglot builds run as containerised
+# `image:` stages — the Titan worker is a bare JRE, each stage brings its own
+# toolchain. lint / test / build / artifacts / approval / report — all here.
+#
+# The pipeline body is flat at the document root — the canonical Titan form.
+agent: linux
+failurePolicy: blockOnFailure
+
+parameters:
+  - name: notifyUrl
+    type: string
+    default: ""
+    description: Optional webhook the Notify stage POSTs the build report to.
+
+# Build trigger — the Titan trigger engine fires a build on this cron schedule
+# ('H' hashes the minute so builds spread, not a thundering herd on :00).
+triggers:
+  - cron: "H/15 * * * *"
+
+stages:
+  - stage: Checkout
+    steps:
+      - checkout:
+          url: "https://github.com/hadamrd/titan-e2e-fixture.git"
+          branch: main
+
+  # ── Backend (Java / Maven) ──────────────────────────────────────────────
+  # -Dmaven.repo.local keeps the dependency cache in the shared workspace, so
+  # the sequential backend stages do not each re-download from Maven Central.
+  - stage: Backend Lint
+    dependsOn: [Checkout]
+    image: "maven:3.9-eclipse-temurin-17"
+    steps:
+      - sh: "mvn -B -ntp -Dmaven.repo.local=backend/.m2-repo -f backend/pom.xml checkstyle:check"
+
+  - stage: Backend Test
+    dependsOn: [Backend Lint]
+    image: "maven:3.9-eclipse-temurin-17"
+    steps:
+      - sh: "mvn -B -ntp -Dmaven.repo.local=backend/.m2-repo -f backend/pom.xml test"
+      - junit:
+          testResults: "backend/target/surefire-reports/TEST-*.xml"
+
+  - stage: Backend Build
+    dependsOn: [Backend Test]
+    image: "maven:3.9-eclipse-temurin-17"
+    steps:
+      - sh: "mvn -B -ntp -Dmaven.repo.local=backend/.m2-repo -f backend/pom.xml package -DskipTests"
+      - archiveArtifacts:
+          artifacts: "backend/target/titan-e2e-backend.jar"
+
+  # ── Frontend (TypeScript / Node) ────────────────────────────────────────
+  # `npm install` runs once in Lint; node_modules persists in the shared
+  # workspace into the sequential Test and Build stages.
+  - stage: Frontend Lint
+    dependsOn: [Checkout]
+    image: "node:20-alpine"
+    steps:
+      - sh: "cd frontend && npm install --no-audit --no-fund && npm run lint"
+
+  - stage: Frontend Test
+    dependsOn: [Frontend Lint]
+    image: "node:20-alpine"
+    steps:
+      - sh: "cd frontend && npm test"
+      - junit:
+          testResults: "frontend/test-results/junit.xml"
+
+  - stage: Frontend Build
+    dependsOn: [Frontend Test]
+    image: "node:20-alpine"
+    steps:
+      - sh: "cd frontend && npm run build"
+      - archiveArtifacts:
+          artifacts: "frontend/dist/**"
+
+  # ── Approval + report ───────────────────────────────────────────────────
+  - gate: Publish Approval
+    requiresApproval: true
+    approvers: [admin]
+    dependsOn: [Backend Build, Frontend Build]
+
+  - stage: Report
+    dependsOn: [Publish Approval]
+    steps:
+      - setOutput:
+          values:
+            result: passed
+            backendArtifact: "backend/target/titan-e2e-backend.jar"
+            frontendArtifact: "frontend/dist"
+
+  # Conditional — only when a webhook URL was supplied at build time.
+  - stage: Notify
+    dependsOn: [Report]
+    when: "params.notifyUrl != ''"
+    steps:
+      - httpRequest:
+          url: "${{ params.notifyUrl }}"
+          method: POST
+          contentType: application/json
+          body: '{"text":"titan-e2e-fixture build ${{ steps[''Report''].outputs.result }} ✅"}'

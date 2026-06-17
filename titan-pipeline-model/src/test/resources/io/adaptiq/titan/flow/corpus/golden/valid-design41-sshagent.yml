@@ -1,0 +1,12 @@
+# GOLDEN — design/41 §2's sshAgent example, verbatim. Stage-level sshAgent list
+# flattened onto sh steps; a step adds its own ids; a third step opts out.
+stages:
+  - stage: Deploy
+    sshAgent:
+      - shared-infra-key
+    steps:
+      - sh: git push origin main && rsync -e ssh ./dist remote:/srv
+        sshAgent:
+          - prod-deploy-key
+          - github-bot-key
+      - sh: ./smoke-test.sh

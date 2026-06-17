@@ -1,0 +1,39 @@
+# Python service — pytest across a matrix of Python versions.
+#
+# Demonstrates `matrix:` fan-out: the single `test` stage expands into one
+# parallel cell per Python version. Each cell gets a `MATRIX_PYTHON`
+# environment variable (axis name upper-cased) and a `${matrix.python}`
+# substitution token.
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+stages:
+  - stage: lint
+    steps:
+      - sh: |
+          python -m pip install --upgrade pip
+          pip install ruff
+          ruff check .
+
+  - stage: test
+    dependsOn: [lint]
+    matrix:
+      axes:
+        # One cell per version → tests run in parallel across interpreters.
+        python: ["3.10", "3.11", "3.12"]
+      # fail_fast defaults to true; keep all cells running to see every
+      # version's result in one build.
+      fail_fast: false
+      maxParallel: 3
+    steps:
+      # $MATRIX_PYTHON is injected per cell; pyenv/uv/p, etc. pick the
+      # interpreter. Adapt the install line to your toolchain.
+      - sh: |
+          echo "Testing on Python $MATRIX_PYTHON"
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+          pytest --junitxml=reports/pytest-${MATRIX_PYTHON}.xml
+      # Publish the per-cell JUnit report.
+      - junit: "reports/pytest-${MATRIX_PYTHON}.xml"

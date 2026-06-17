@@ -1,0 +1,7 @@
+{
+  "state": "SUCCESSFUL",
+  "key": "ci/titan",
+  "name": "Titan",
+  "url": "https://titan.example.com/builds/42",
+  "description": "Build succeeded"
+}

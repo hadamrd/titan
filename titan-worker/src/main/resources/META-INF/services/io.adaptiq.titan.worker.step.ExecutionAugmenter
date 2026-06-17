@@ -1,0 +1,4 @@
+# Titan built-in execution augmenters — discovered by ServiceLoader (design/42 §4.9).
+# credentials: (design/39) ordered before sshAgent: (design/41) — see each class's ORDER.
+io.adaptiq.titan.worker.step.augment.CredentialsAugmenter
+io.adaptiq.titan.worker.step.augment.SshAgentAugmenter

@@ -1,0 +1,14 @@
+# Titan pipeline test fixture — a single script step whose body carries a
+# syntactically broken ${{ … }} reference. TemplateResolver.resolve() runs
+# inside TitanOrchestrator.stepPayload() (the EXECUTE_COMMAND payload build);
+# the ExpressionEvaluator parse of the broken expression throws, dispatchStepTask
+# catches it and fails the step at dispatch with failure_category = DISPATCH
+# (design/45 §3). A deterministic, scaffolding-free dispatch failure.
+titan:
+  stages:
+    - stage: Dispatch
+      steps:
+        - script:
+            runtime: groovy
+            body: |
+              echo "${{ this is not a valid expression !! }}"

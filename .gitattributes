@@ -1,0 +1,6 @@
+# Shell scripts run in Linux containers and WSL — they MUST be LF.
+# A CRLF `.sh` breaks bash ("set: pipefail: invalid option name" and worse).
+*.sh text eol=lf
+
+# Dockerfiles and the worker entrypoint likewise.
+Dockerfile* text eol=lf

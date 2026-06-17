@@ -1,0 +1,38 @@
+# Titan pipeline test fixture — the design/29 §3 reference pipeline.
+# A root stage, a conditional stage (when:), a manual gate, and a stage
+# whose only step is an inline Groovy `script` body.
+titan:
+  agent: linux
+  failurePolicy: blockOnFailure
+
+  parameters:
+    - name: runSmokeTests
+      type: boolean
+      default: false
+      description: Whether the Smoke Tests stage runs.
+
+  stages:
+    - stage: Build
+      steps:
+        - sh: mvn clean package
+        - containerBuild: { registry: my-registry, image: my-app }
+
+    - stage: Smoke Tests
+      when: "params.runSmokeTests == true"
+      dependsOn: [Build]
+      steps:
+        - healthCheck: { url: https://staging.example.com }
+
+    - gate: QA Approval
+      requiresApproval: true
+      approvers: [qa-team]
+      dependsOn: [Smoke Tests]
+
+    - stage: Deploy Production
+      dependsOn: [QA Approval]
+      steps:
+        - script:
+            runtime: groovy
+            body: |
+              def v = readVersion()
+              deployHelm(chart: 'my-app', env: 'prod', version: v)

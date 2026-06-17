@@ -1,0 +1,12 @@
+# Valid: every node kind — stage, gate, precondition.
+stages:
+  - precondition: on-main
+    expression: "branch == 'main'"
+  - stage: Build
+    dependsOn: [on-main]
+    steps:
+      - sh: make
+  - gate: Approve
+    requiresApproval: true
+    approvers: [release-team]
+    dependsOn: [build]

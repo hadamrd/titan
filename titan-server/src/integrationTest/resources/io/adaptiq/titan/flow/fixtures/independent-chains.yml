@@ -1,0 +1,28 @@
+# Titan pipeline test fixture — issue #945 regression.
+# One root stage fans out to two INDEPENDENT chains; a failure in chain A must
+# NOT taint chain B under the default blockOnFailure policy.
+titan:
+  stages:
+    - stage: Checkout
+      steps:
+        - sh: ./checkout.sh
+
+    - stage: Frontend Lint
+      dependsOn: [Checkout]
+      steps:
+        - sh: ./fe-lint.sh
+
+    - stage: Frontend Test
+      dependsOn: [Frontend Lint]
+      steps:
+        - sh: ./fe-test.sh
+
+    - stage: Backend Lint
+      dependsOn: [Checkout]
+      steps:
+        - sh: ./be-lint.sh
+
+    - stage: Backend Test
+      dependsOn: [Backend Lint]
+      steps:
+        - sh: ./be-test.sh

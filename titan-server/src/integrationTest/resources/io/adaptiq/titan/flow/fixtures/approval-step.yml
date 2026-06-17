@@ -1,0 +1,17 @@
+# Approval-step IT fixture (#715). Two-stage pipeline: a Build stage that
+# always succeeds, then a Deploy stage whose first step is a parked approval
+# gate. The After stage's sh step proves the orchestrator resumes the DAG
+# downstream once the approval is decided.
+titan:
+  stages:
+    - stage: Build
+      steps:
+        - sh: echo built
+    - stage: Deploy
+      dependsOn: [Build]
+      steps:
+        - approval:
+            prompt: "Promote to prod?"
+            approvers: ["alice"]
+            timeout: 24h
+        - sh: echo deployed

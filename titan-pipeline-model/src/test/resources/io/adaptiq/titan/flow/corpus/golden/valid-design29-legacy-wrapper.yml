@@ -1,0 +1,8 @@
+# GOLDEN — design/29 §3's legacy `titan:` wrapper, verbatim shape. The wrapper
+# has EXACTLY one top-level key (`titan`); no siblings. Both enforcers must accept.
+titan:
+  agent: linux
+  stages:
+    - stage: Build
+      steps:
+        - sh: mvn clean package

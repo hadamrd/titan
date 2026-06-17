@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: titan-registry
+  labels:
+    {{- include "titan-registry.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type | default "ClusterIP" }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "titan-registry.selectorLabels" . | nindent 4 }}

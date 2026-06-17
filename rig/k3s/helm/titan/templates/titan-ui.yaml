@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: titan-ui
+  labels:
+    {{- include "titan.labels" . | nindent 4 }}
+    app: titan-ui
+spec:
+  type: {{ .Values.titanUi.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.titanUi.service.port }}
+      targetPort: 80
+  selector:
+    app: titan-ui
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: titan-ui
+  labels:
+    {{- include "titan.labels" . | nindent 4 }}
+    app: titan-ui
+spec:
+  replicas: {{ .Values.titanUi.replicas }}
+  selector:
+    matchLabels:
+      app: titan-ui
+  template:
+    metadata:
+      labels:
+        {{- include "titan.selectorLabels" . | nindent 8 }}
+        app: titan-ui
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: titan-ui
+          image: "{{ .Values.titanUi.image }}:{{ .Values.titanUi.tag }}"
+          imagePullPolicy: {{ .Values.titanUi.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+          resources:
+            {{- toYaml .Values.titanUi.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 6

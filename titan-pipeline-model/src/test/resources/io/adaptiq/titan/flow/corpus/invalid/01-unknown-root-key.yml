@@ -1,0 +1,6 @@
+# Invalid: unknown key at the root — `titan` def is closed.
+deployTarget: prod
+stages:
+  - stage: Build
+    steps:
+      - sh: make

@@ -1,0 +1,38 @@
+# Fixture pipeline for issue #1130 — the SRE's day-zero failure-triage flow.
+#
+# Shape:
+#   install -> unit-test (FAILS by design) -> build (SKIPPED on failure)
+#
+# Invariants the e2e spec asserts:
+#   * build terminates as FAILURE within 30s (configurable timeout).
+#   * the failing step is `unit-test`.
+#   * its log output contains a line matching /FAIL /.
+#   * after the spec patches the failing test to passing and re-triggers,
+#     the build terminates as SUCCESS.
+
+agent: titan-worker-1
+
+env:
+  NODE_ENV: test
+  CI: "true"
+
+stages:
+  - stage: install
+    steps:
+      - sh: cd e2e/pipelines/node-app-with-failing-test && npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+  - stage: unit-test
+    dependsOn: [install]
+    steps:
+      # vitest exits 1 when any test fails; the engine maps that to FAILURE.
+      # The worker captures stdout/stderr verbatim — vitest's "FAIL " prefix
+      # is what the UI log viewer scrolls to on click.
+      - sh: cd e2e/pipelines/node-app-with-failing-test && npx vitest run --reporter=default
+
+  - stage: build
+    dependsOn: [unit-test]
+    # Only runs if unit-test passed — proves the failure short-circuited
+    # downstream work (the SRE story: "don't deploy a red build").
+    when: "steps.unit-test.result == 'success'"
+    steps:
+      - sh: cd e2e/pipelines/node-app-with-failing-test && npm run build

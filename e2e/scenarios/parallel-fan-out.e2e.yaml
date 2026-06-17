@@ -1,0 +1,28 @@
+# Parallel fan-out — three independent stages run concurrently (design/43 §4).
+# No dependsOn between a/b/c, so all three are DAG roots; the worker (3
+# executors, see jcasc.yaml) runs them at once. `ranInParallel` asserts their
+# execution windows overlap.
+name: parallel fan-out — three independent stages
+pipeline: |
+  agent: titan-worker-1
+  stages:
+    - stage: a
+      steps:
+        - sh: sleep 3; echo a done
+    - stage: b
+      steps:
+        - sh: sleep 3; echo b done
+    - stage: c
+      steps:
+        - sh: sleep 3; echo c done
+expect:
+  build: SUCCESS
+  nodes:
+    a: { status: SUCCESS }
+    b: { status: SUCCESS }
+    c: { status: SUCCESS }
+  ranInParallel: [a, b, c]
+  logContains:
+    - a done
+    - b done
+    - c done

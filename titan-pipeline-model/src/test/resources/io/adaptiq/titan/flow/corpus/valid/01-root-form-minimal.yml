@@ -1,0 +1,5 @@
+# Valid: the canonical document-root form, minimal pipeline.
+stages:
+  - stage: Build
+    steps:
+      - sh: make
