@@ -1,0 +1,25 @@
+# Build-free quickstart overlay — pull published images instead of building
+# from source. Drops each service's `build:` and pulls the latest trunk image
+# from GHCR.
+#
+# Usage (from rig/local/):
+#   docker compose -f docker-compose.yml -f docker-compose.quickstart.yml up -d
+#
+# Or just: `task quickstart` from the repo root.
+#
+# Pin a reproducible tag by replacing `latest-trunk` with a `trunk-<sha>` tag.
+services:
+  titan-server:
+    build: !reset null
+    image: ghcr.io/hadamrd/titan-server:latest-trunk
+    pull_policy: always
+
+  titan-ui:
+    build: !reset null
+    image: ghcr.io/hadamrd/titan-ui:latest-trunk
+    pull_policy: always
+
+  titan-worker:
+    build: !reset null
+    image: ghcr.io/hadamrd/titan-worker:latest-trunk
+    pull_policy: always

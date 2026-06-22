@@ -15,18 +15,28 @@ YAML pipelines compiled to a validated static DAG · a stateless control plane y
 
 ---
 
-## Quickstart — green pipeline in one command
+## Quickstart — green pipeline in minutes
+
+**Fastest — Docker only, no build:** pull the published images and bring up the full rig.
+
+```sh
+git clone https://github.com/hadamrd/titan.git
+cd titan
+task quickstart   # pulls ghcr.io/hadamrd/titan-* → postgres + keycloak + server + ui + worker, seeded
+```
+
+**From source:** build everything locally (needs JDK 21 + Node).
 
 ```sh
 git clone https://github.com/hadamrd/titan.git
 cd titan
 task setup        # one-time: JDK 21 + git hooks
-task dev:titan    # postgres + keycloak + server + ui + worker, seeded with demo builds
+task dev:titan    # builds, then brings up the rig
 ```
 
-Open **http://localhost:5180**, log in as `dev` / `dev`, and you're looking at real builds running against a real worker. Tear down with `task dev:down`.
+Either way, open **http://localhost:5180**, log in as `dev` / `dev`, and you're looking at real builds running against a real worker. Tear down with `task dev:down`.
 
-No `task`? It's a single binary — [taskfile.dev/installation](https://taskfile.dev/installation/). Everything also runs through the Gradle wrapper (`./gradlew`).
+`task` is a single binary — [taskfile.dev/installation](https://taskfile.dev/installation/). The from-source path also runs through the Gradle wrapper (`./gradlew`).
 
 ---
 

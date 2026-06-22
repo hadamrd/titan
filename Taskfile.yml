@@ -227,6 +227,17 @@ tasks:
       - 'echo "Keycloak  : http://localhost:8081  (admin / admin)"'
       - 'echo "Login as  : dev / dev"'
 
+  quickstart:
+    desc: "Build-free quickstart — pull published images from GHCR and bring up the local rig (no source build)."
+    dir: rig/local
+    cmds:
+      - test -f .env || cp .env.example .env
+      - docker compose -f docker-compose.yml -f docker-compose.quickstart.yml pull
+      - docker compose -f docker-compose.yml -f docker-compose.quickstart.yml up -d
+      - bash seed-data.sh
+      - 'echo "Titan UI  : http://localhost:5180  (login dev / dev)"'
+      - 'echo "Tear down : task dev:down"'
+
   dev:down:
     desc: "Tear down the local rig and wipe all volumes (fresh start next boot)"
     dir: rig/local
