@@ -1,6 +1,9 @@
 package io.adaptiq.titan.scm.pulsar;
 
 import edu.umd.cs.findbugs.annotations.NonNull;
+import io.adaptiq.titan.audit.AuditAction;
+import io.adaptiq.titan.audit.AuditService;
+import io.adaptiq.titan.audit.AuditTargetType;
 import io.adaptiq.titan.build.BuildEnqueuer;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PulsarTrigger;
 import io.adaptiq.titan.scm.reconcile.EventDedupeStore;
@@ -63,6 +66,7 @@ public class PulsarScanScheduler {
   private final Function<String, Function<PulsarChangeDiscovery, Optional<PulsarTrigger>>>
       triggerResolverForNode;
   private final BuildDispatch dispatch;
+  private final ReconcileAudit audit;
 
   private final AtomicBoolean running = new AtomicBoolean(false);
 
@@ -71,6 +75,7 @@ public class PulsarScanScheduler {
   public PulsarScanScheduler(
       TitanStores stores,
       EventDedupeStore dedupe,
+      AuditService auditService,
       @ConfigProperty(name = "pulsar.scan.enabled", defaultValue = "false") boolean enabled) {
     this(
         stores,
@@ -78,11 +83,13 @@ public class PulsarScanScheduler {
         enabled,
         new PulsarClientFactory()::forNode,
         nodeUrl -> new PulsarEventSource(nodeUrl)::triggerFor,
-        BuildEnqueuer::enqueue);
+        BuildEnqueuer::enqueue,
+        reconcileAuditSink(auditService));
   }
 
   /**
-   * Test constructor — explicit client factory, trigger resolver and dispatch seam (no network).
+   * Test constructor — explicit client factory, trigger resolver, dispatch and audit seam (no
+   * network).
    */
   PulsarScanScheduler(
       @NonNull TitanStores stores,
@@ -92,7 +99,8 @@ public class PulsarScanScheduler {
       @NonNull
           Function<String, Function<PulsarChangeDiscovery, Optional<PulsarTrigger>>>
               triggerResolverForNode,
-      @NonNull BuildDispatch dispatch) {
+      @NonNull BuildDispatch dispatch,
+      @NonNull ReconcileAudit audit) {
     this.stores = Objects.requireNonNull(stores, "stores");
     this.dedupe = Objects.requireNonNull(dedupe, "dedupe");
     this.enabled = enabled;
@@ -100,6 +108,35 @@ public class PulsarScanScheduler {
     this.triggerResolverForNode =
         Objects.requireNonNull(triggerResolverForNode, "triggerResolverForNode");
     this.dispatch = Objects.requireNonNull(dispatch, "dispatch");
+    this.audit = Objects.requireNonNull(audit, "audit");
+  }
+
+  /**
+   * Adapt the request-scoped {@link AuditService} to the {@link ReconcileAudit} seam. Every build
+   * the poll scanner enqueues is by construction a <em>reconcile-recovered</em> build: it reached
+   * the scanner only because no other path (the webhook) claimed the shared dedupe key first — i.e.
+   * the webhook was dropped or never arrived. So it earns one {@code SCM_WEBHOOK_RECOVERED} audit
+   * row (target=JOB), the operator's signal that the webhook channel is flaky for that repo.
+   */
+  static ReconcileAudit reconcileAuditSink(@NonNull AuditService auditService) {
+    Objects.requireNonNull(auditService, "auditService");
+    return (change, jobId, buildId) ->
+        auditService.recordAs(
+            "pulsar-scan",
+            AuditAction.SCM_WEBHOOK_RECOVERED,
+            AuditTargetType.JOB,
+            String.valueOf(jobId),
+            "{\"provider\":\"pulsar\",\"repo\":\""
+                + change.repo()
+                + "\",\"changeId\":\""
+                + change.changeId()
+                + "\",\"revision\":\""
+                + change.revision()
+                + "\",\"eventId\":\""
+                + change.dispatchEventId()
+                + "\",\"buildId\":"
+                + buildId
+                + "}");
   }
 
   /**
@@ -209,6 +246,9 @@ public class PulsarScanScheduler {
           new Object[] {
             buildId, job.get().fullName, change.changeId(), change.repo(), change.revision()
           });
+      // The poll scanner reached this change only because the webhook never claimed its tip — a
+      // reconcile recovery. Emit the SCM_WEBHOOK_RECOVERED audit row (issue #4).
+      audit.recordRecovered(change, job.get().id, buildId);
     } catch (RuntimeException e) {
       // The dedupe claim was taken in the scanner BEFORE this fallible tail (resolver clones the
       // change tip + discovers its pipeline — throws on a transient transport failure: git missing,
@@ -241,5 +281,15 @@ public class PulsarScanScheduler {
         @NonNull String triggerType,
         String triggerMetaJson,
         String parametersJson);
+  }
+
+  /**
+   * The audit seam — {@code AuditService.recordAs(SCM_WEBHOOK_RECOVERED, …)} in production, a probe
+   * in tests. Invoked exactly once per build the poll scanner recovers (the webhook for this tip
+   * was dropped), so tests can assert recovery is audited without standing up a SecurityIdentity.
+   */
+  @FunctionalInterface
+  interface ReconcileAudit {
+    void recordRecovered(@NonNull PulsarChangeDiscovery change, long jobId, long buildId);
   }
 }
