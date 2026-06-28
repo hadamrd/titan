@@ -2,6 +2,7 @@ package io.adaptiq.titan.scm.pulsar;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -10,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+import com.github.tomakehurst.wiremock.verification.LoggedRequest;
 import io.adaptiq.titan.api.FakeTitanStores;
 import io.adaptiq.titan.build.BuildStateChangedEvent;
 import io.adaptiq.titan.store.TitanStores;
@@ -46,34 +48,17 @@ class PulsarCheckLifecycleIT {
   private PulsarCheckReporter reporter;
   private long jobId;
 
-  /** The stub node's recorded ledger + folded gate verdict. */
-  private final List<JsonNode> ledger = new ArrayList<>();
-
-  private volatile String gateVerdict = "refused_incomplete";
-
   @BeforeEach
   void setUp() {
     node = new WireMockServer(WireMockConfiguration.options().dynamicPort());
     node.start();
-    // Stand in for the node's append_event handler: record the event and fold conclusion into the
-    // gate (only a terminal "success" clears it). Tolerant: an extra "phase" field is kept, not
-    // rejected — the node keys the gate off conclusion alone.
+    // Stand in for the node's append_event handler: accept the event (201). It is recorded in
+    // WireMock's request journal, which is populated synchronously as the request is served — so
+    // the ledger/gate are read from the journal AFTER each blocking report() call rather than from
+    // an addMockServiceRequestListener callback (that notification can fire after the client has
+    // already received its 201, racing a bare volatile read — sev3 review). Tolerant by design: an
+    // extra "phase" sibling field is kept, not rejected; the gate keys off conclusion alone.
     node.stubFor(post(urlEqualTo(EVENTS_URL)).willReturn(aResponse().withStatus(201)));
-    node.addMockServiceRequestListener(
-        (request, response) -> {
-          if (!request.getUrl().equals(EVENTS_URL)) {
-            return;
-          }
-          try {
-            JsonNode event = PulsarJson.MAPPER.readTree(request.getBody());
-            ledger.add(event);
-            if ("success".equals(event.path("conclusion").asText())) {
-              gateVerdict = "allowed";
-            }
-          } catch (Exception e) {
-            throw new IllegalStateException("stub node failed to parse CI event", e);
-          }
-        });
 
     stores = FakeTitanStores.create();
     seedJob(REPO);
@@ -92,16 +77,17 @@ class PulsarCheckLifecycleIT {
   void queuedRunningSuccess_recordsThreeDistinctLifecycleEvents_gateFlipsOnlyOnSuccess() {
     reporter.report(event("QUEUED"));
     // Gate must stay refused while enqueued.
-    assertEquals("refused_incomplete", gateVerdict, "queued must not clear the gate");
+    assertEquals("refused_incomplete", gate(), "queued must not clear the gate");
 
     reporter.report(event("RUNNING"));
     // Gate must stay refused while running.
-    assertEquals("refused_incomplete", gateVerdict, "in_progress must not clear the gate");
+    assertEquals("refused_incomplete", gate(), "in_progress must not clear the gate");
 
     reporter.report(event("SUCCESS"));
-    assertEquals("allowed", gateVerdict, "gate clears ONLY on the terminal success event");
+    assertEquals("allowed", gate(), "gate clears ONLY on the terminal success event");
 
     // Three ordered, DISTINCT events landed on the change ledger.
+    List<JsonNode> ledger = ledger();
     assertEquals(3, ledger.size(), "expected three lifecycle events on the ledger");
 
     JsonNode queued = ledger.get(0);
@@ -122,6 +108,33 @@ class PulsarCheckLifecycleIT {
         queued.path("phase").asText().equals(running.path("phase").asText()),
         "queued and in_progress events must be distinguishable");
     assertTrue(ledger.get(0).has("phase") && ledger.get(1).has("phase"));
+  }
+
+  /**
+   * The change ledger, folded from WireMock's request journal in posted order. The journal is
+   * populated synchronously while each request is served, so it is fully visible the moment the
+   * blocking {@code report()} (and its HTTP send) returns — no async listener race.
+   */
+  private List<JsonNode> ledger() {
+    List<JsonNode> events = new ArrayList<>();
+    for (LoggedRequest req : node.findAll(postRequestedFor(urlEqualTo(EVENTS_URL)))) {
+      try {
+        events.add(PulsarJson.MAPPER.readTree(req.getBody()));
+      } catch (Exception e) {
+        throw new IllegalStateException("stub node failed to parse CI event", e);
+      }
+    }
+    return events;
+  }
+
+  /** The merge-gate verdict the node folds from the ledger: cleared ONLY by a terminal success. */
+  private String gate() {
+    for (JsonNode event : ledger()) {
+      if ("success".equals(event.path("conclusion").asText())) {
+        return "allowed";
+      }
+    }
+    return "refused_incomplete";
   }
 
   private BuildStateChangedEvent event(String status) {

@@ -14,12 +14,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.github.tomakehurst.wiremock.stubbing.Scenario;
+import com.github.tomakehurst.wiremock.verification.LoggedRequest;
 import io.adaptiq.titan.api.FakeTitanStores;
 import io.adaptiq.titan.build.BuildStateChangedEvent;
 import io.adaptiq.titan.scm.pulsar.PulsarClient.CheckConclusion;
 import io.adaptiq.titan.store.TitanStores;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -168,8 +170,7 @@ class PulsarCheckReporterTest {
     reporter.report(event("RUNNING"));
     reporter.report(event("SUCCESS"));
 
-    java.util.List<com.github.tomakehurst.wiremock.verification.LoggedRequest> posts =
-        wiremock.findAll(postRequestedFor(urlEqualTo(EVENTS_URL)));
+    List<LoggedRequest> posts = wiremock.findAll(postRequestedFor(urlEqualTo(EVENTS_URL)));
     assertEquals(3, posts.size(), "expected three ordered lifecycle POSTs");
 
     String first = posts.get(0).getBodyAsString();

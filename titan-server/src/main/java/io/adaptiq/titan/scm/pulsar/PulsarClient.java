@@ -215,13 +215,25 @@ public final class PulsarClient {
    * <pre>{@code {"kind":"ci","check":<name>,"conclusion":"pending","phase":<queued|in_progress>}}
    * </pre>
    *
-   * <p><b>Node acceptance (investigated per issue #5):</b> the node's {@code append_event} handler
-   * deserializes the CI event tolerantly (it keys the merge gate off {@code conclusion} alone and
-   * does not reject sibling fields), so the extra {@code phase} field is accepted and recorded on
-   * the event without affecting the gate. If a node build DID reject the field with a 400, the
-   * caller's per-transition error handling swallows it (a failed phase post never fails the build
-   * and is never mistaken for a cleared gate), and the terminal {@code success} event — posted on a
-   * separate transition with no {@code phase} — still clears the gate independently.
+   * <p><b>Node acceptance — UNVERIFIED ASSUMPTION (issue #5, highest-risk item):</b> issue #5
+   * requires the exact {@code phase} field shape be verified against the LIVE Pulsar node, but the
+   * node is an external service with no source in this repo and no instance reachable from this
+   * environment (the rig's {@code pulsar.node-base-url} is a placeholder {@code
+   * https://pulsar.test.example.com}). The design assumption is that the node's {@code
+   * append_event} handler deserializes the CI event tolerantly — keying the merge gate off {@code
+   * conclusion} alone and ignoring sibling fields — so the extra {@code phase} field is recorded
+   * without affecting the gate. This has NOT been confirmed against a real node; do not read
+   * "(investigated)" into it.
+   *
+   * <p><b>Documented fallback (per issue #5):</b> graceful degradation is the contract that makes
+   * the unverified assumption safe. If the node DOES reject the field with a 400, the caller's
+   * per-transition error handling swallows it (a failed phase post never fails the build and is
+   * never mistaken for a cleared gate), and the terminal {@code success} event — posted on a
+   * separate transition with NO {@code phase} field, i.e. the already-accepted base shape — still
+   * clears the gate independently. So a phase-rejecting node degrades to the pre-#5 behaviour (gate
+   * still flips on success) rather than breaking the build. The assumption MUST be confirmed
+   * against the live rig node (one curl appending a {@code kind:ci} event with a sibling {@code
+   * phase} field and reading it back) before this is treated as verified.
    *
    * @param phase when non-null, the lifecycle marker added as the {@code phase} field (terminal
    *     verdicts pass {@code null} — a finished build has no in-flight phase)
