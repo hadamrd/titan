@@ -195,15 +195,54 @@ public final class PulsarClient {
       @NonNull String name,
       @NonNull CheckConclusion conclusion,
       @Nullable String detailsUrl) {
+    postCheck(repo, changeId, name, conclusion, null, detailsUrl);
+  }
+
+  /**
+   * Lifecycle-aware variant of {@link #postCheck(String, String, String, CheckConclusion, String)}
+   * that additionally carries a {@code phase} discriminator so a {@code QUEUED} update is
+   * distinguishable on the wire from a {@code RUNNING} one even though BOTH keep {@code
+   * conclusion:"pending"} (issue #5 — GitHub-checks parity: GitHub distinguishes {@code queued} from
+   * {@code in_progress} under one pending state; Pulsar had collapsed both to a byte-identical
+   * {@code pending} event so a reviewer could not tell enqueued-but-not-started from actually-running).
+   *
+   * <p>The node contract for {@code conclusion} is unchanged and remains {@code
+   * pending|success|failure} only — the queued/in_progress distinction therefore CANNOT ride on
+   * {@code conclusion} (any other token → 400). It is carried as a SEPARATE optional {@code phase}
+   * field within the same {@code kind:ci} event shape:
+   *
+   * <pre>{@code {"kind":"ci","check":<name>,"conclusion":"pending","phase":<queued|in_progress>}}</pre>
+   *
+   * <p><b>Node acceptance (investigated per issue #5):</b> the node's {@code append_event} handler
+   * deserializes the CI event tolerantly (it keys the merge gate off {@code conclusion} alone and
+   * does not reject sibling fields), so the extra {@code phase} field is accepted and recorded on
+   * the event without affecting the gate. If a node build DID reject the field with a 400, the
+   * caller's per-transition error handling swallows it (a failed phase post never fails the build
+   * and is never mistaken for a cleared gate), and the terminal {@code success} event — posted on a
+   * separate transition with no {@code phase} — still clears the gate independently.
+   *
+   * @param phase when non-null, the lifecycle marker added as the {@code phase} field (terminal
+   *     verdicts pass {@code null} — a finished build has no in-flight phase)
+   */
+  public void postCheck(
+      @NonNull String repo,
+      @NonNull String changeId,
+      @NonNull String name,
+      @NonNull CheckConclusion conclusion,
+      @Nullable Phase phase,
+      @Nullable String detailsUrl) {
     Objects.requireNonNull(repo, "repo");
     Objects.requireNonNull(changeId, "changeId");
     Objects.requireNonNull(name, "name");
     Objects.requireNonNull(conclusion, "conclusion");
-    // EventKind::CiStatus shape — kind/check/conclusion only. LinkedHashMap for stable field order.
+    // EventKind::CiStatus shape — kind/check/conclusion(/phase). LinkedHashMap for stable order.
     Map<String, Object> payload = new LinkedHashMap<>();
     payload.put("kind", "ci");
     payload.put("check", name);
     payload.put("conclusion", conclusion.wire());
+    if (phase != null) {
+      payload.put("phase", phase.wire());
+    }
     String body;
     try {
       body = PulsarJson.MAPPER.writeValueAsString(payload);
@@ -326,6 +365,34 @@ public final class PulsarClient {
      * The wire token the Pulsar CI event records. Always one of the node-accepted set {@code
      * pending|success|failure} ({@link #UNSTABLE} collapses to {@code failure}).
      */
+    @NonNull
+    public String wire() {
+      return wire;
+    }
+  }
+
+  /**
+   * The in-flight lifecycle marker a {@link #postCheck} carries in the {@code phase} field while the
+   * build is non-terminal, mirroring GitHub's {@code queued} vs {@code in_progress} distinction
+   * under a single PENDING state (issue #5). It is orthogonal to {@link CheckConclusion}: both
+   * phases ride a {@code conclusion:"pending"} event, so neither clears the merge gate — only the
+   * terminal {@link CheckConclusion#SUCCESS} event (which carries NO phase) does. A typed enum (not
+   * a bare string) so producer and consumer can never drift — Manifesto rule "no stringly-typed
+   * cross-module discriminators". The {@link #wire()} form is the lower-case token recorded.
+   */
+  public enum Phase {
+    /** Build enqueued but not yet picked up by a worker (GitHub parity: {@code queued}). */
+    QUEUED("queued"),
+    /** Build actually started — worker pickup / {@code RUNNING} (GitHub parity: {@code in_progress}). */
+    IN_PROGRESS("in_progress");
+
+    private final String wire;
+
+    Phase(@NonNull String wire) {
+      this.wire = wire;
+    }
+
+    /** The wire token the Pulsar CI event records under the {@code phase} field. */
     @NonNull
     public String wire() {
       return wire;
