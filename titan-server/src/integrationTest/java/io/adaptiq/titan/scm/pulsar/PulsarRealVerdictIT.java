@@ -20,11 +20,11 @@ import io.adaptiq.titan.flow.TitanFlowExecution;
 import io.adaptiq.titan.queue.QueueProcessor;
 import io.adaptiq.titan.store.TitanStores;
 import io.adaptiq.titan.store.rows.BuildRow;
-import java.util.ArrayList;
-import java.util.List;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
@@ -42,21 +42,22 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * Pulsar node (WireMock) — exactly the payload that flips the change's merge gate.
  *
  * <p><strong>Why this is more than {@link io.adaptiq.titan.api.PulsarWebhookEnqueueIT}.</strong>
- * That IT proves the real clone + {@code .titan/pipelines} discovery up to the {@code QUEUED} enqueue
- * boundary and stops. This IT drives the <em>execution → verdict → reporter</em> leg the enqueue IT
- * never exercises: the synthesis-baked DAG advances through the real {@link QueueProcessor}, a real
- * {@code sh} subprocess decides the exit code (so the build's verdict is genuinely earned, not
- * stubbed), and the reporter maps that real verdict onto the wire. The adversarial mirror — a step
- * that exits non-zero → {@code FAILED} → {@code conclusion:failure} — is what goes RED if execution
- * is ever left mocked: a hand-completed task would always report exit 0.
+ * That IT proves the real clone + {@code .titan/pipelines} discovery up to the {@code QUEUED}
+ * enqueue boundary and stops. This IT drives the <em>execution → verdict → reporter</em> leg the
+ * enqueue IT never exercises: the synthesis-baked DAG advances through the real {@link
+ * QueueProcessor}, a real {@code sh} subprocess decides the exit code (so the build's verdict is
+ * genuinely earned, not stubbed), and the reporter maps that real verdict onto the wire. The
+ * adversarial mirror — a step that exits non-zero → {@code FAILED} → {@code conclusion:failure} —
+ * is what goes RED if execution is ever left mocked: a hand-completed task would always report exit
+ * 0.
  *
  * <p><strong>Scope.</strong> The Pulsar provenance (trigger type {@code "pulsar"} + a {@code
- * changeId} in the trigger meta) is the exact shape {@code PulsarWebhookApi.enqueueBuild} /
- * {@code BuildEnqueuer} write; worker-side synthesis runs in the {@code titan-worker} module and is
+ * changeId} in the trigger meta) is the exact shape {@code PulsarWebhookApi.enqueueBuild} / {@code
+ * BuildEnqueuer} write; worker-side synthesis runs in the {@code titan-worker} module and is
  * unreachable here, so the DAG is baked directly (the established {@code TitanOrchestratorIT} /
  * {@code BuildArchiveAndStartedAtIT} pattern) and the step is run by a real subprocess (the
- * established {@code ChaosWorker} pattern — the production {@code TaskExecutor} is package-private in
- * another module). Offline + deterministic: no live Pulsar node, no network.
+ * established {@code ChaosWorker} pattern — the production {@code TaskExecutor} is package-private
+ * in another module). Offline + deterministic: no live Pulsar node, no network.
  */
 @Testcontainers
 class PulsarRealVerdictIT {
@@ -69,6 +70,7 @@ class PulsarRealVerdictIT {
 
   private static final String REPO = "acme/web";
   private static final String CHANGE_ID = "42";
+
   /** The reporter URL-encodes the repo; "acme/web" → "acme%2Fweb". */
   private static final String EVENTS_URL =
       "/_pulsar/ledger/acme%2Fweb/changes/" + CHANGE_ID + "/events";
@@ -207,7 +209,8 @@ class PulsarRealVerdictIT {
 
       // Real worker: claim each QUEUED EXECUTE_COMMAND by reading its command array and running it
       // as a real subprocess — the exit code is EARNED, never hand-set. (We complete the row in
-      // the same pass, before the next tick's no-worker sweep, mirroring BuildArchiveAndStartedAtIT.)
+      // the same pass, before the next tick's no-worker sweep, mirroring
+      // BuildArchiveAndStartedAtIT.)
       runQueuedSteps(buildId);
 
       try (Connection c = ds.getConnection();
@@ -223,11 +226,15 @@ class PulsarRealVerdictIT {
       }
     }
     throw new AssertionError(
-        "build " + buildId + " did not finish; status="
+        "build "
+            + buildId
+            + " did not finish; status="
             + stores.builds().findById(buildId).orElseThrow().status);
   }
 
-  /** Run every QUEUED EXECUTE_COMMAND step for the build as a real subprocess; complete with exit. */
+  /**
+   * Run every QUEUED EXECUTE_COMMAND step for the build as a real subprocess; complete with exit.
+   */
   private void runQueuedSteps(long buildId) throws Exception {
     List<long[]> ids = new ArrayList<>();
     List<String> payloads = new ArrayList<>();
@@ -320,13 +327,16 @@ class PulsarRealVerdictIT {
     }
   }
 
-  /** A build with the exact Pulsar provenance {@code BuildEnqueuer}/{@code PulsarWebhookApi} write. */
+  /**
+   * A build with the exact Pulsar provenance {@code BuildEnqueuer}/{@code PulsarWebhookApi} write.
+   */
   private long insertPulsarBuild(long jobId) throws Exception {
     return insertBuild(
         jobId, "pulsar", "{\"commitSha\":\"deadbeef\",\"changeId\":\"" + CHANGE_ID + "\"}");
   }
 
-  private long insertBuild(long jobId, String triggerType, String triggerMetaJson) throws Exception {
+  private long insertBuild(long jobId, String triggerType, String triggerMetaJson)
+      throws Exception {
     try (Connection c = ds.getConnection();
         java.sql.PreparedStatement ps =
             c.prepareStatement(
