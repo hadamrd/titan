@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.annotations.Nullable;
+import io.adaptiq.titan.build.BuildEnqueuedEvent;
 import io.adaptiq.titan.build.BuildStateChangedEvent;
 import io.adaptiq.titan.scm.pulsar.PulsarClient.CheckConclusion;
 import io.adaptiq.titan.store.TitanStores;
@@ -116,8 +117,12 @@ public class PulsarCheckReporter {
     this(stores, new PulsarClient(nodeBaseUrl), publicBaseUrl, enabled);
   }
 
-  /** Test-only constructor — explicit {@link PulsarClient} (point it at a fake node), no config. */
-  PulsarCheckReporter(
+  /**
+   * Test-wiring constructor — explicit {@link PulsarClient} (point it at a fake node), no config.
+   * Public so cross-package integration tests (e.g. {@code PulsarWebhookEnqueueIT} in {@code api})
+   * can wire a real reporter as the enqueue-time sink against a WireMock node.
+   */
+  public PulsarCheckReporter(
       @NonNull TitanStores stores,
       @NonNull PulsarClient client,
       @NonNull String publicBaseUrl,
@@ -144,42 +149,93 @@ public class PulsarCheckReporter {
     }
   }
 
+  /**
+   * Enqueue-time observer (issue #1 — GitHub-Actions parity). Fired ONLY at the two Pulsar enqueue
+   * call sites ({@code PulsarWebhookApi.receive} / {@code PulsarScanScheduler.dispatchDiscovery}),
+   * the instant a {@code QUEUED} row is inserted and BEFORE any worker transition. Posts the same
+   * {@code conclusion:pending} / {@code phase:queued} check the later {@code QUEUED} state change
+   * would — so the {@code build} check shows up immediately rather than only when a worker frees
+   * up.
+   *
+   * <p>Idempotent with the later {@link BuildStateChangedEvent}-driven posts: the node folds the CI
+   * event into {@code state.ci}, so a second identical {@code pending/queued} post (or the eventual
+   * {@code in_progress}/terminal post) is harmless. Same skip + best-effort semantics as {@link
+   * #onBuildStateChanged} — a non-{@code pulsar} trigger, a missing {@code changeId}, an
+   * unresolvable repo, or {@code enabled=false} is a silent no-op, and any error is caught here so
+   * it never escapes into the enqueue transaction / webhook response.
+   */
+  public void onBuildEnqueued(@Observes @NonNull BuildEnqueuedEvent event) {
+    if (!enabled) {
+      return;
+    }
+    try {
+      reportEnqueued(event);
+    } catch (RuntimeException unexpected) {
+      LOGGER.log(
+          Level.WARNING,
+          "[pulsar-check] unexpected error reporting enqueued build {0}: {1}",
+          new Object[] {event.buildId(), unexpected.getMessage()});
+    }
+  }
+
   /** Visible for direct invocation from tests. */
   void report(@NonNull BuildStateChangedEvent event) {
-    String trigger = event.triggerType();
+    postCheckFor(
+        event.triggerType(),
+        event.triggerMetaJson(),
+        event.jobId(),
+        event.buildId(),
+        event.newStatus());
+  }
+
+  /**
+   * Visible for direct invocation from tests. An enqueued build is, by definition, {@code QUEUED},
+   * so it reuses the SAME resolution + transport path as a {@code QUEUED} state change — mapping to
+   * {@code conclusion:pending} / {@code phase:queued}.
+   */
+  void reportEnqueued(@NonNull BuildEnqueuedEvent event) {
+    postCheckFor(
+        event.triggerType(), event.triggerMetaJson(), event.jobId(), event.buildId(), "QUEUED");
+  }
+
+  /**
+   * The single resolution + post path shared by the state-change and enqueue observers. Filters to
+   * Pulsar provenance, maps the build {@code status} to a conclusion (+ optional phase), resolves
+   * the change id and repo, then posts one check through the shared retry/transport. Any missing
+   * piece is a silent skip — exactly the existing reporter semantics, now reused for enqueue time.
+   */
+  private void postCheckFor(
+      @Nullable String trigger,
+      @Nullable String triggerMetaJson,
+      long jobId,
+      long buildId,
+      @NonNull String status) {
     if (trigger == null || !trigger.startsWith(PULSAR_TRIGGER_PREFIX)) {
       return;
     }
-    Optional<CheckConclusion> conclusion = mapConclusion(event.newStatus());
+    Optional<CheckConclusion> conclusion = mapConclusion(status);
     if (conclusion.isEmpty()) {
       return; // intermediate state we don't report on (e.g. SLEEPING)
     }
-    @Nullable String changeId = extractChangeId(event.triggerMetaJson());
+    @Nullable String changeId = extractChangeId(triggerMetaJson);
     if (changeId == null || changeId.isEmpty()) {
       LOGGER.log(
-          Level.FINE,
-          "[pulsar-check] skipping build {0}: no changeId in trigger meta",
-          event.buildId());
+          Level.FINE, "[pulsar-check] skipping build {0}: no changeId in trigger meta", buildId);
       return;
     }
-    Optional<JobRow> jobOpt = stores.jobs().findById(event.jobId());
+    Optional<JobRow> jobOpt = stores.jobs().findById(jobId);
     if (jobOpt.isEmpty() || jobOpt.get().fullName == null || jobOpt.get().fullName.isBlank()) {
       LOGGER.log(
           Level.FINE,
           "[pulsar-check] skipping build {0}: job {1} has no resolvable repo",
-          new Object[] {event.buildId(), event.jobId()});
+          new Object[] {buildId, jobId});
       return;
     }
     String repo = jobOpt.get().fullName;
-    String detailsUrl = publicBaseUrl + "/builds/" + event.buildId();
+    String detailsUrl = publicBaseUrl + "/builds/" + buildId;
 
     postWithRetry(
-        repo,
-        changeId,
-        conclusion.get(),
-        mapPhase(event.newStatus()).orElse(null),
-        detailsUrl,
-        event.buildId());
+        repo, changeId, conclusion.get(), mapPhase(status).orElse(null), detailsUrl, buildId);
   }
 
   // ── http ──────────────────────────────────────────────────────────────────

@@ -15,6 +15,7 @@ import io.adaptiq.titan.api.FakeTitanStores;
 import io.adaptiq.titan.audit.AuditAction;
 import io.adaptiq.titan.audit.AuditService;
 import io.adaptiq.titan.audit.AuditTargetType;
+import io.adaptiq.titan.build.BuildEnqueuedEvent;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PipelineFile;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PulsarTrigger;
 import io.adaptiq.titan.scm.reconcile.EventDedupeStore;
@@ -407,6 +408,55 @@ class PulsarScanSchedulerTest {
     }
   }
 
+  // ── issue #1: poll-scanner dispatch fires the enqueue-time PENDING check event ─
+
+  @Test
+  void dispatch_firesEnqueuedCheckEvent_withPulsarProvenanceAndChangeId() {
+    // The poll-scanner path (a missed webhook recovered by the 30s scan) must make the SAME
+    // immediate PENDING post the webhook does — proven here by capturing the BuildEnqueuedEvent the
+    // dispatch fires, asserting pulsar provenance + the changeId the reporter resolves the repo
+    // from. Dropping the fire wiring leaves `fired` empty → RED.
+    seedJob(REPO);
+    String node = node(oneChange(REPO, CHANGE, REV1));
+    stores.pulsarSources().insert(node, "n", 1);
+    AtomicInteger enqueued = new AtomicInteger();
+    List<BuildEnqueuedEvent> fired = new ArrayList<>();
+    PulsarScanScheduler scheduler =
+        scheduler(
+            true, enqueued, withPipeline, new JdbiEventDedupeStore(stores), c -> {}, fired::add);
+
+    scheduler.tick();
+
+    assertEquals(1, enqueued.get(), "the change enqueues exactly one build");
+    assertEquals(1, fired.size(), "poll-scanner dispatch fires exactly one enqueue-time event");
+    assertEquals(
+        "pulsar", fired.get(0).triggerType(), "enqueue-time event carries pulsar provenance");
+    assertTrue(
+        fired.get(0).triggerMetaJson().contains("\"changeId\":\"" + CHANGE + "\""),
+        "enqueue-time event carries the changeId the reporter resolves the repo from");
+  }
+
+  // ── issue #1 adversarial: an honest no-op (no pipeline) fires NO check event ──
+
+  @Test
+  void noBuild_firesNoEnqueuedCheckEvent() {
+    seedJob(REPO);
+    String node = node(oneChange(REPO, CHANGE, REV1));
+    stores.pulsarSources().insert(node, "n", 1);
+    AtomicInteger enqueued = new AtomicInteger();
+    List<BuildEnqueuedEvent> fired = new ArrayList<>();
+    Function<String, Function<PulsarChangeDiscovery, Optional<PulsarTrigger>>> emptyResolver =
+        nodeUrl -> change -> Optional.empty();
+    PulsarScanScheduler scheduler =
+        scheduler(
+            true, enqueued, emptyResolver, new JdbiEventDedupeStore(stores), c -> {}, fired::add);
+
+    scheduler.tick();
+
+    assertEquals(0, enqueued.get());
+    assertTrue(fired.isEmpty(), "no build ⇒ no enqueue-time check event");
+  }
+
   // ── helpers ──────────────────────────────────────────────────────────────────
 
   private PulsarScanScheduler scheduler(
@@ -422,6 +472,16 @@ class PulsarScanSchedulerTest {
       Function<String, Function<PulsarChangeDiscovery, Optional<PulsarTrigger>>> resolver,
       EventDedupeStore dedupe,
       java.util.function.Consumer<PulsarChangeDiscovery> onRecovered) {
+    return scheduler(enabled, enqueueCounter, resolver, dedupe, onRecovered, e -> {});
+  }
+
+  private PulsarScanScheduler scheduler(
+      boolean enabled,
+      AtomicInteger enqueueCounter,
+      Function<String, Function<PulsarChangeDiscovery, Optional<PulsarTrigger>>> resolver,
+      EventDedupeStore dedupe,
+      java.util.function.Consumer<PulsarChangeDiscovery> onRecovered,
+      java.util.function.Consumer<BuildEnqueuedEvent> enqueuedSink) {
     PulsarScanScheduler.BuildDispatch dispatch =
         (s, jobId, triggeredBy, triggerType, meta, params) -> {
           assertEquals("pulsar", triggerType, "trigger tail must mirror PulsarWebhookApi");
@@ -432,7 +492,7 @@ class PulsarScanSchedulerTest {
         (change, jobId, buildId) -> onRecovered.accept(change);
     Function<String, PulsarClient> clientForNode = PulsarClient::new;
     return new PulsarScanScheduler(
-        stores, dedupe, enabled, clientForNode, resolver, dispatch, audit);
+        stores, dedupe, enabled, clientForNode, resolver, dispatch, audit, enqueuedSink);
   }
 
   private long seedJob(@NonNull String fullName) {
