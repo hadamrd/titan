@@ -45,10 +45,10 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * Closed-loop integration test for the Titan↔Pulsar CI cycle (issue #2). Where {@code
  * PulsarWebhookEnqueueIT} tests only the <em>left half</em> (signed change webhook → {@code QUEUED}
- * build) and {@code PulsarCheckReporterTest} tests only the <em>right half</em> (a hand-built {@link
- * BuildStateChangedEvent} → ledger POST), this IT joins them into ONE loop and proves the {@code
- * changeId} that arrives on the webhook is the SAME {@code changeId} the reporter posts the verdict
- * back to.
+ * build) and {@code PulsarCheckReporterTest} tests only the <em>right half</em> (a hand-built
+ * {@link BuildStateChangedEvent} → ledger POST), this IT joins them into ONE loop and proves the
+ * {@code changeId} that arrives on the webhook is the SAME {@code changeId} the reporter posts the
+ * verdict back to.
  *
  * <p><strong>No fabricated event.</strong> The {@link BuildStateChangedEvent} driven into the
  * reporter is constructed entirely from the build row the real {@link
@@ -71,12 +71,18 @@ class PulsarFullLoopIT {
 
   private static final String REPO = "acme/web";
   private static final String SECRET = "it-pulsar-secret";
-  /** The repo as it appears URL-encoded on the ledger path — {@code acme/web} → {@code acme%2Fweb}. */
+
+  /**
+   * The repo as it appears URL-encoded on the ledger path — {@code acme/web} → {@code acme%2Fweb}.
+   */
   private static final String ENC_REPO = URLEncoder.encode(REPO, StandardCharsets.UTF_8);
 
   private static final String CHANGE_GREEN = "CA";
   private static final String CHANGE_RED = "CF";
-  /** A change id that NOTHING in this loop touches — used to prove the verdict is not mis-routed. */
+
+  /**
+   * A change id that NOTHING in this loop touches — used to prove the verdict is not mis-routed.
+   */
   private static final String CHANGE_DECOY = "CZ";
 
   @TempDir Path root;
@@ -134,7 +140,8 @@ class PulsarFullLoopIT {
     BuildStateChangedEvent terminal = enqueueViaWebhookThenTerminal(CHANGE_GREEN, "SUCCESS");
     reporter.report(terminal);
 
-    // Exactly one CI verdict, on the change the webhook triggered, carrying the gate-clearing shape.
+    // Exactly one CI verdict, on the change the webhook triggered, carrying the gate-clearing
+    // shape.
     wiremock.verify(
         1,
         postRequestedFor(urlEqualTo(eventsUrl(CHANGE_GREEN)))
@@ -202,9 +209,9 @@ class PulsarFullLoopIT {
   /**
    * Drive the LEFT leg for {@code changeId} (signed webhook → real clone/discovery → {@code QUEUED}
    * build), then read the enqueued build row back and synthesise the terminal {@link
-   * BuildStateChangedEvent} EXCLUSIVELY from that row — never a typed {@code changeId} literal. This
-   * is the join point that makes the loop closed: the right leg can only post to the change the left
-   * leg actually threaded through {@code triggerMetaJson}.
+   * BuildStateChangedEvent} EXCLUSIVELY from that row — never a typed {@code changeId} literal.
+   * This is the join point that makes the loop closed: the right leg can only post to the change
+   * the left leg actually threaded through {@code triggerMetaJson}.
    */
   @NonNull
   private BuildStateChangedEvent enqueueViaWebhookThenTerminal(
