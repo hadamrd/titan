@@ -79,9 +79,10 @@ public class PatAuthenticationMechanism implements HttpAuthenticationMechanism {
   private static final String BEARER_SCHEME = "Bearer ";
 
   /**
-   * Non-admin roles granted to every PAT. Mirrors the role set we expect a typical CI / CLI user to
-   * need. Refining this to per-token scopes is a follow-up (tracked as a doc TODO in {@code
-   * docs/security.md}).
+   * Non-admin roles granted to every PAT. Mirrors the coarse role set we expect a typical CI / CLI
+   * user to need. Access can be narrowed further per-token: a PAT may be job-scoped with a glob
+   * over a job's full name, and requests outside that pattern are rejected with 403 plus an audit
+   * record. See {@code docs/guides/security.md} for the operator-facing security model.
    */
   private static final Set<String> PAT_ROLES;
 
