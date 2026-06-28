@@ -6,15 +6,20 @@ import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import io.adaptiq.titan.api.FakeTitanStores;
+import io.adaptiq.titan.audit.AuditAction;
+import io.adaptiq.titan.audit.AuditService;
+import io.adaptiq.titan.audit.AuditTargetType;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PipelineFile;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PulsarTrigger;
 import io.adaptiq.titan.scm.reconcile.EventDedupeStore;
 import io.adaptiq.titan.scm.reconcile.JdbiEventDedupeStore;
+import io.adaptiq.titan.scm.reconcile.ScmProvider;
 import io.adaptiq.titan.store.TitanStores;
 import io.adaptiq.titan.store.rows.JobRow;
 import java.nio.charset.StandardCharsets;
@@ -263,21 +268,171 @@ class PulsarScanSchedulerTest {
     assertEquals(0, enqueued.get(), "an unlinked repo must not build");
   }
 
+  // ── CROSS-PATH DEDUPE (issue #4): scan after a missed webhook → exactly one ──
+  // The webhook for this tip was DROPPED (no claim exists), so the poll scanner must recover it:
+  // discover + enqueue exactly one build.
+
+  @Test
+  void scanAfterMissedWebhook_enqueuesExactlyOne() {
+    seedJob(REPO);
+    String node = node(oneChange(REPO, CHANGE, REV1));
+    stores.pulsarSources().insert(node, "n", 1);
+    AtomicInteger enqueued = new AtomicInteger();
+    PulsarScanScheduler scheduler = scheduler(true, enqueued, withPipeline);
+
+    int count = scheduler.tick();
+
+    assertEquals(1, count, "the dropped-webhook change is recovered by the scan");
+    assertEquals(1, enqueued.get(), "scan-after-missed-webhook enqueues exactly one build");
+  }
+
+  // ── CROSS-PATH DEDUPE (issue #4): webhook-then-scan at same tip → scan no-ops ─
+  // The webhook already claimed this exact tip in the SHARED EventDedupeStore (Source.WEBHOOK).
+  // The scan re-sees the same <repo>:<changeId>:<revision> key and must skip — zero second build.
+  // Drop the webhook's claim (the pre-seed below) and the scan would enqueue → double build.
+
+  @Test
+  void scanAfterWebhookClaim_sameTip_doesNotDoubleBuild() {
+    seedJob(REPO);
+    String node = node(oneChange(REPO, CHANGE, REV1));
+    stores.pulsarSources().insert(node, "n", 1);
+    AtomicInteger enqueued = new AtomicInteger();
+    EventDedupeStore shared = new JdbiEventDedupeStore(stores);
+    // The webhook hot-path already dispatched this tip → it claimed the shared key as WEBHOOK.
+    String sharedKey = PulsarChangeDiscovery.dispatchEventId(REPO, CHANGE, REV1);
+    shared.markSeen(ScmProvider.PULSAR, sharedKey, EventDedupeStore.Source.WEBHOOK);
+
+    PulsarScanScheduler scheduler = scheduler(true, enqueued, withPipeline, shared, c -> {});
+    int count = scheduler.tick();
+
+    assertEquals(0, count, "the scan must not re-discover a tip the webhook already claimed");
+    assertEquals(
+        0, enqueued.get(), "webhook-then-scan at the same tip enqueues exactly one (zero here)");
+  }
+
+  // ── AUDIT (issue #4): a scan-recovered build emits SCM_WEBHOOK_RECOVERED ─────
+
+  @Test
+  void recoveredBuild_emitsOneReconcileAudit() {
+    seedJob(REPO);
+    String node = node(oneChange(REPO, CHANGE, REV1));
+    stores.pulsarSources().insert(node, "n", 1);
+    AtomicInteger enqueued = new AtomicInteger();
+    List<PulsarChangeDiscovery> recovered = new ArrayList<>();
+    PulsarScanScheduler scheduler =
+        scheduler(true, enqueued, withPipeline, new JdbiEventDedupeStore(stores), recovered::add);
+
+    scheduler.tick();
+
+    assertEquals(1, enqueued.get());
+    assertEquals(1, recovered.size(), "a scan-recovered build emits exactly one audit event");
+    assertEquals(REV1, recovered.get(0).revision(), "audit carries the recovered change tip");
+  }
+
+  // ── AUDIT adversarial: an honest no-op (no pipeline) emits NO audit ──────────
+
+  @Test
+  void noBuild_emitsNoReconcileAudit() {
+    seedJob(REPO);
+    String node = node(oneChange(REPO, CHANGE, REV1));
+    stores.pulsarSources().insert(node, "n", 1);
+    AtomicInteger enqueued = new AtomicInteger();
+    List<PulsarChangeDiscovery> recovered = new ArrayList<>();
+    Function<String, Function<PulsarChangeDiscovery, Optional<PulsarTrigger>>> emptyResolver =
+        nodeUrl -> change -> Optional.empty();
+    PulsarScanScheduler scheduler =
+        scheduler(true, enqueued, emptyResolver, new JdbiEventDedupeStore(stores), recovered::add);
+
+    scheduler.tick();
+
+    assertEquals(0, enqueued.get());
+    assertTrue(recovered.isEmpty(), "no build ⇒ no reconcile-recovered audit");
+  }
+
+  // ── AUDIT (issue #4): the REAL production sink emits the right row + details ──
+  // Every other test substitutes a ReconcileAudit lambda, so the SCM_WEBHOOK_RECOVERED enum and the
+  // hand-built details JSON in PulsarScanScheduler.reconcileAuditSink had zero coverage. This
+  // drives
+  // the actual production adapter through a thin AuditService spy and pins the contract: action,
+  // target, target id, and a details payload that PARSES and carries every required field.
+
+  @Test
+  void productionAuditSink_emitsRecoveredRow_withParseableDetails() throws Exception {
+    CapturingAuditService audit = new CapturingAuditService();
+    PulsarChangeDiscovery change = PulsarChangeDiscovery.of(REPO, CHANGE, REV1);
+
+    PulsarScanScheduler.reconcileAuditSink(audit).recordRecovered(change, 42L, 7L);
+
+    assertEquals(1, audit.calls.size(), "exactly one audit row per recovered build");
+    CapturingAuditService.Call call = audit.calls.get(0);
+    assertEquals("pulsar-scan", call.actor());
+    assertEquals(AuditAction.SCM_WEBHOOK_RECOVERED, call.action());
+    assertEquals(AuditTargetType.JOB, call.target());
+    assertEquals("42", call.targetId(), "target id is the linked job id");
+
+    JsonNode details = PulsarJson.MAPPER.readTree(call.detailsJson());
+    assertEquals("pulsar", details.path("provider").asText());
+    assertEquals(REPO, details.path("repo").asText());
+    assertEquals(CHANGE, details.path("changeId").asText());
+    assertEquals(REV1, details.path("revision").asText());
+    assertEquals(change.dispatchEventId(), details.path("eventId").asText());
+    assertEquals(7L, details.path("buildId").asLong());
+  }
+
+  /**
+   * Thin {@link AuditService} spy that captures {@code recordAs} args instead of hitting the DB.
+   */
+  private static final class CapturingAuditService extends AuditService {
+    record Call(
+        String actor,
+        AuditAction action,
+        AuditTargetType target,
+        String targetId,
+        String detailsJson) {}
+
+    final List<Call> calls = new ArrayList<>();
+
+    CapturingAuditService() {
+      super(null, null, null);
+    }
+
+    @Override
+    public void recordAs(
+        @NonNull String actor,
+        @NonNull AuditAction action,
+        @NonNull AuditTargetType targetType,
+        String targetId,
+        String detailsJson) {
+      calls.add(new Call(actor, action, targetType, targetId, detailsJson));
+    }
+  }
+
   // ── helpers ──────────────────────────────────────────────────────────────────
 
   private PulsarScanScheduler scheduler(
       boolean enabled,
       AtomicInteger enqueueCounter,
       Function<String, Function<PulsarChangeDiscovery, Optional<PulsarTrigger>>> resolver) {
-    EventDedupeStore dedupe = new JdbiEventDedupeStore(stores);
+    return scheduler(enabled, enqueueCounter, resolver, new JdbiEventDedupeStore(stores), c -> {});
+  }
+
+  private PulsarScanScheduler scheduler(
+      boolean enabled,
+      AtomicInteger enqueueCounter,
+      Function<String, Function<PulsarChangeDiscovery, Optional<PulsarTrigger>>> resolver,
+      EventDedupeStore dedupe,
+      java.util.function.Consumer<PulsarChangeDiscovery> onRecovered) {
     PulsarScanScheduler.BuildDispatch dispatch =
         (s, jobId, triggeredBy, triggerType, meta, params) -> {
           assertEquals("pulsar", triggerType, "trigger tail must mirror PulsarWebhookApi");
           assertTrue(triggeredBy.startsWith("pulsar:change:"), "triggeredBy shape mismatch");
           return enqueueCounter.incrementAndGet();
         };
+    PulsarScanScheduler.ReconcileAudit audit =
+        (change, jobId, buildId) -> onRecovered.accept(change);
     Function<String, PulsarClient> clientForNode = PulsarClient::new;
-    return new PulsarScanScheduler(stores, dedupe, enabled, clientForNode, resolver, dispatch);
+    return new PulsarScanScheduler(
+        stores, dedupe, enabled, clientForNode, resolver, dispatch, audit);
   }
 
   private long seedJob(@NonNull String fullName) {

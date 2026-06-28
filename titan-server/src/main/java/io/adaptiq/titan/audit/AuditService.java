@@ -44,7 +44,8 @@ public class AuditService {
   private final Instance<TitanMetrics> metrics;
 
   @Inject
-  AuditService(TitanStores stores, SecurityIdentity identity, Instance<TitanMetrics> metrics) {
+  public AuditService(
+      TitanStores stores, SecurityIdentity identity, Instance<TitanMetrics> metrics) {
     this.stores = stores;
     this.identity = identity;
     this.metrics = metrics;

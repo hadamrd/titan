@@ -279,6 +279,58 @@ class PulsarClientTest {
             .withRequestBody(containing("\"conclusion\":\"failure\"")));
   }
 
+  /**
+   * issue #5: the phase-carrying overload adds a {@code phase} field while {@code conclusion} stays
+   * {@code pending}, so a QUEUED event is distinguishable on the wire from an IN_PROGRESS one. The
+   * node-accepted conclusion token set is unchanged.
+   */
+  @Test
+  void postCheck_withQueuedPhase_addsPhaseFieldKeepingPendingConclusion() {
+    wiremock.stubFor(post(urlEqualTo(EVENTS_URL)).willReturn(aResponse().withStatus(201)));
+
+    client.postCheck(
+        REPO, CHANGE_ID, "build", CheckConclusion.PENDING, PulsarClient.Phase.QUEUED, null);
+
+    wiremock.verify(
+        1,
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"conclusion\":\"pending\""))
+            .withRequestBody(containing("\"phase\":\"queued\"")));
+    wiremock.verify(
+        0,
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"phase\":\"in_progress\"")));
+  }
+
+  @Test
+  void postCheck_withInProgressPhase_emitsInProgressMarker() {
+    wiremock.stubFor(post(urlEqualTo(EVENTS_URL)).willReturn(aResponse().withStatus(201)));
+
+    client.postCheck(
+        REPO, CHANGE_ID, "build", CheckConclusion.PENDING, PulsarClient.Phase.IN_PROGRESS, null);
+
+    wiremock.verify(
+        1,
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"phase\":\"in_progress\"")));
+  }
+
+  @Test
+  void postCheck_nullPhase_omitsPhaseField() {
+    wiremock.stubFor(post(urlEqualTo(EVENTS_URL)).willReturn(aResponse().withStatus(201)));
+
+    client.postCheck(REPO, CHANGE_ID, "build", CheckConclusion.SUCCESS, null, null);
+
+    wiremock.verify(
+        0, postRequestedFor(urlEqualTo(EVENTS_URL)).withRequestBody(containing("\"phase\"")));
+  }
+
+  @Test
+  void phaseWireTokens_mirrorGithubQueuedAndInProgress() {
+    assertEquals("queued", PulsarClient.Phase.QUEUED.wire());
+    assertEquals("in_progress", PulsarClient.Phase.IN_PROGRESS.wire());
+  }
+
   @Test
   void postCheck_wireTokens_areExactlyTheNodeAcceptedSet() {
     assertEquals("pending", CheckConclusion.PENDING.wire());
