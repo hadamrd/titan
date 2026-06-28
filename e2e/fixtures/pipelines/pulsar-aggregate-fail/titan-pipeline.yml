@@ -8,14 +8,15 @@
 # exactly one `failure` conclusion, keeping the Pulsar merge gate refused.
 #
 # WHY THIS IS A RED TEST (see 53-pulsar-aggregate-verdict.spec.ts)
-#   The aggregate `build` check is derived from the OVERALL build verdict, not
-#   from the `build` stage's own status. Here the `build` STAGE is SKIPPED yet the
-#   `build` CHECK is `failure`. If stage-failure propagation regressed — a mid-DAG
-#   failure no longer flipping the aggregate (e.g. `test` failing but `build`
-#   still running green, or the verdict rolling up SUCCESS) — the overall verdict
-#   would become SUCCESS, the derived check would flip to `success`, and the spec
-#   assertion `conclusion === 'failure'` would FAIL. That is the regression this
-#   fixture exists to catch.
+#   The overall build verdict (the single value PulsarCheckReporter maps to the
+#   aggregate `build` check) is a DAG rollup, not the `build` stage's own status.
+#   Here the `build` STAGE is SKIPPED yet the OVERALL verdict is FAILED. If
+#   stage-failure propagation regressed — a mid-DAG failure no longer flipping the
+#   rollup (e.g. `test` failing but `build` still running green, or the verdict
+#   rolling up SUCCESS) — the overall verdict would become SUCCESS and the `build`
+#   stage would run, so the spec's `toBe('FAILED')` and `build`-stage
+#   `toBe('SKIPPED')` assertions would FAIL. That is the regression this fixture
+#   exists to catch.
 #
 # SHAPE
 #   lint (ok) -> test (exit 1, FAILS) -> build (SKIPPED)  => overall FAILED => check build=failure

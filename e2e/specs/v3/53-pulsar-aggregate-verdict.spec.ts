@@ -13,40 +13,44 @@
  *   (a mid-DAG failure no longer flipping the aggregate `build` check to failure)
  *   would ship green. This spec is that missing end-to-end guard.
  *
- * WHAT IT ASSERTS (issue #6 acceptance criteria)
- *   - Happy leg (pulsar-aggregate-pass): all three stages pass → overall verdict
- *     SUCCESS → the single aggregate `build` check resolves to exactly one
- *     `success` conclusion.
+ * WHAT IT ASSERTS (issue #6 acceptance criteria, the end-to-end half)
+ *   - Happy leg (pulsar-aggregate-pass): all three stages pass → the engine rolls
+ *     the DAG up to a SINGLE overall build verdict = SUCCESS (lint/test/build all
+ *     SUCCESS).
  *   - Sad/adversarial leg (pulsar-aggregate-fail): the `test` stage fails →
  *     failure propagates under the default `blockOnFailure` → `lint` SUCCESS,
  *     `test` FAILED, downstream `build` stage SKIPPED (never pending/hung, never
- *     green) → overall verdict FAILED → the aggregate `build` check resolves to
- *     exactly one `failure` conclusion.
- *   - Shape: both legs collapse the 3-stage DAG to EXACTLY ONE check named
- *     `build` — not one check per stage.
+ *     green) → the engine rolls up to a SINGLE overall verdict = FAILED.
+ *
+ * WHY THIS IS THE RIGHT END-TO-END HALF (and NOT a tautology)
+ *   `PulsarCheckReporter` aggregates the WHOLE build into exactly ONE check named
+ *   `build` whose conclusion is mapped 1:1 from this single overall verdict
+ *   (SUCCESS→success, FAILED→failure). The reporter's HTTP behaviour (post shape,
+ *   `check:"build"`, exactly-one-post, retry/skip) AND that status→conclusion
+ *   mapping are already unit-covered by `PulsarCheckReporterTest`
+ *   (`mapConclusion_terminalAndIntermediate`). What was UNtested end-to-end — and
+ *   all this spec claims to cover — is the ENGINE producing the single aggregate
+ *   verdict the reporter consumes. So we assert that real engine output DIRECTLY
+ *   (the build resource's one `status` field + the per-stage rollup). We do NOT
+ *   re-derive the Java conclusion mapping in TypeScript and assert it against
+ *   itself — that would prove nothing the unit test doesn't already prove.
  *
  * WHY THIS IS A GENUINE RED TEST (acceptance criterion 4)
- *   The aggregate `build` CHECK is derived from the OVERALL build verdict, not
- *   from the `build` STAGE's own status. In the sad leg the `build` stage is
- *   SKIPPED yet the `build` check is `failure`. If stage-failure propagation were
- *   removed — a mid-DAG failure no longer flipping the aggregate (`test` fails but
- *   `build` still runs, or the verdict rolls up SUCCESS) — then:
- *     (a) the overall verdict would be SUCCESS, so `mapPulsarConclusion(...)` →
- *         `success` and the `toBe('failure')` assertion FAILS; and
- *     (b) the `build` stage would not be SKIPPED, so that assertion FAILS too.
- *   Either way the test goes red. That is the regression it exists to catch.
+ *   The overall verdict is a DAG rollup, not a passthrough of the `build` stage:
+ *   in the sad leg the `build` stage is SKIPPED yet the overall verdict is FAILED.
+ *   If stage-failure propagation regressed — a mid-DAG failure no longer flipping
+ *   the rollup (`test` fails but `build` still runs, or the verdict rolls up
+ *   SUCCESS) — then both the overall-verdict `toBe('FAILED')` assertion and the
+ *   `build`-stage `toBe('SKIPPED')` assertion go red. That is the regression it
+ *   exists to catch.
  *
- * WHY THE CHECK IS ASSERTED VIA THE MAPPING, NOT A LIVE POST
- *   `task dev:titan` (the local rig this suite runs against) wires NO Pulsar node
- *   — `pulsar.node-base-url` defaults to an unreachable endpoint and the manual
- *   build-trigger endpoint stamps `triggerType=manual`, so no live `build` check
- *   is posted anywhere to observe. The reporter's HTTP behaviour (post shape,
- *   `check:"build"`, exactly-one-post, retry/skip) is already unit-covered by
- *   `PulsarCheckReporterTest`. What was UNtested end-to-end — and what this spec
- *   covers — is the engine producing the aggregate verdict the reporter consumes.
- *   `mapPulsarConclusion` below mirrors `PulsarCheckReporter.mapConclusion`
- *   (its single source of truth); a true wire-level webhook→clone→check-POST
- *   roundtrip is a follow-up gated on a Pulsar-node e2e fixture.
+ * SCOPE NOTE — no live Pulsar post observed here
+ *   The local rig (`task dev:titan`) wires NO Pulsar node (`pulsar.node-base-url`
+ *   defaults to an unreachable endpoint) and the manual build-trigger endpoint
+ *   stamps `triggerType=manual`, so the reporter never fires and there is no live
+ *   `build` check to observe. A true wire-level webhook→clone→check-POST roundtrip
+ *   (asserting the actually-posted `build` check) is a follow-up gated on a
+ *   Pulsar-node e2e fixture; the reporter's own behaviour is unit-covered today.
  *
  * Skip rules (deterministic, no test.skip mid-body): rig unreachable / no bearer.
  */
@@ -63,9 +67,6 @@ const RIG_BASE_URL =
 const BUILD_TERMINAL_DEADLINE_MS = Number(process.env.TITAN_PULSAR_E2E_TIMEOUT_MS ?? 120_000)
 const TERMINAL = new Set(['SUCCESS', 'FAILED', 'ABORTED', 'CANCELLED', 'UNSTABLE'])
 
-/** The check name Pulsar's `required_checks` contract expects — MUST be `build`. */
-const CHECK_NAME = 'build'
-
 interface BuildDto {
   id: number
   status: string
@@ -81,49 +82,6 @@ interface JobCreateResp {
 }
 interface BuildTriggerResp {
   buildId: number
-}
-
-/** One Pulsar CI check, as the reporter would post it. */
-interface PulsarCheck {
-  name: string
-  conclusion: string
-}
-
-// ── mapping: mirrors PulsarCheckReporter.mapConclusion (Java source of truth) ──
-//
-// QUEUED/RUNNING → pending; SUCCESS → success; FAILED/ABORTED/CANCELLED → failure;
-// UNSTABLE → failure (an unstable build is not a clean green, so the gate stays
-// refused — the Pulsar CI event only accepts pending|success|failure). Any other
-// (intermediate) state is not reported. Correctness of this mapping itself is
-// unit-covered by PulsarCheckReporterTest#mapConclusion_terminalAndIntermediate.
-function mapPulsarConclusion(buildStatus: string): string | null {
-  switch (buildStatus) {
-    case 'QUEUED':
-    case 'RUNNING':
-      return 'pending'
-    case 'SUCCESS':
-      return 'success'
-    case 'FAILED':
-    case 'ABORTED':
-    case 'CANCELLED':
-      return 'failure'
-    case 'UNSTABLE':
-      return 'failure'
-    default:
-      return null
-  }
-}
-
-/**
- * The set of Pulsar CI checks the reporter posts for a terminal build verdict.
- * The reporter aggregates the WHOLE build into a SINGLE check named `build`
- * (`PulsarCheckReporter.CHECK_NAME`) — never one check per stage — so a terminal
- * verdict yields exactly one entry. This is the function under test for the
- * "exactly one `build` check" shape assertion.
- */
-function aggregateChecksFor(buildStatus: string): PulsarCheck[] {
-  const conclusion = mapPulsarConclusion(buildStatus)
-  return conclusion === null ? [] : [{ name: CHECK_NAME, conclusion }]
 }
 
 // ── REST helpers (drive the build; verdict drives the aggregate check) ────────
@@ -238,7 +196,7 @@ test.describe('@golden v3 pulsar-aggregate-verdict #6', () => {
     bearer = token!
   })
 
-  test('happy: lint→test→build all pass → ONE aggregate build check = success', async () => {
+  test('happy: lint→test→build all pass → single overall verdict = SUCCESS', async () => {
     test.setTimeout(BUILD_TERMINAL_DEADLINE_MS + 60_000)
     const fullName = `pulsar-sample/aggregate-pass-${Date.now()}`
 
@@ -253,14 +211,13 @@ test.describe('@golden v3 pulsar-aggregate-verdict #6', () => {
     expect(stageStatus(nodes, 'test'), 'test stage').toBe('SUCCESS')
     expect(stageStatus(nodes, 'build'), 'build stage').toBe('SUCCESS')
 
-    // Aggregate: the whole-build verdict collapses to EXACTLY ONE `build` check.
-    const checks = aggregateChecksFor(status)
-    expect(checks.length, 'exactly one aggregate Pulsar check (not one per stage)').toBe(1)
-    expect(checks[0]!.name, 'the aggregate check name is `build`').toBe(CHECK_NAME)
-    expect(checks[0]!.conclusion, 'all-pass → aggregate build check = success').toBe('success')
+    // The 3-stage DAG collapses to a SINGLE overall verdict (asserted above:
+    // status === 'SUCCESS'). That one verdict is what PulsarCheckReporter maps 1:1
+    // to the single `build` check = success — the mapping is unit-covered by
+    // PulsarCheckReporterTest, so we do not re-assert it here.
   })
 
-  test('sad: test stage fails → build SKIPPED, ONE aggregate build check = failure', async () => {
+  test('sad: test stage fails → build SKIPPED, single overall verdict = FAILED', async () => {
     test.setTimeout(BUILD_TERMINAL_DEADLINE_MS + 60_000)
     const fullName = `pulsar-sample/aggregate-fail-${Date.now()}`
 
@@ -277,20 +234,15 @@ test.describe('@golden v3 pulsar-aggregate-verdict #6', () => {
     // blockOnFailure: the downstream build stage must be SKIPPED, never run/green.
     expect(stageStatus(nodes, 'build'), 'downstream build stage is SKIPPED, not run').toBe('SKIPPED')
 
-    // The KEY aggregation proof + red test: the `build` STAGE is SKIPPED, yet the
-    // aggregate `build` CHECK is derived from the OVERALL verdict (FAILED) → failure.
-    // If propagation regressed, `status` would be SUCCESS here → conclusion `success`
-    // → this assertion fails (and the build-stage SKIPPED assertion above fails too).
-    const checks = aggregateChecksFor(status)
-    expect(checks.length, 'exactly one aggregate Pulsar check (not one per stage)').toBe(1)
-    expect(checks[0]!.name, 'the aggregate check name is `build`').toBe(CHECK_NAME)
-    expect(checks[0]!.conclusion, 'any stage failing → aggregate build check = failure').toBe('failure')
-    // Prove the check is the AGGREGATE, not the per-stage `build` status: the
-    // `build` stage is SKIPPED (a per-stage reporter would emit pending/skipped or
-    // no terminal conclusion) but the aggregate check is a hard `failure`.
+    // AGGREGATE + RED-TEST proof: the overall verdict is a DAG ROLLUP, not a
+    // passthrough of the `build` stage. The `build` STAGE is SKIPPED, yet the single
+    // overall verdict is FAILED — exactly the one value PulsarCheckReporter maps to
+    // the single `build` check = failure (mapping unit-covered, not re-asserted).
+    // If propagation regressed, `status` would be SUCCESS and the `build` stage
+    // would run instead of being SKIPPED → both assertions go red.
     expect(
-      stageStatus(nodes, 'build'),
-      'guard: the build STAGE is SKIPPED while the build CHECK is failure',
-    ).toBe('SKIPPED')
+      status,
+      'overall verdict (FAILED) is an aggregate rollup, not the SKIPPED build stage',
+    ).not.toBe(stageStatus(nodes, 'build'))
   })
 })
