@@ -72,7 +72,12 @@ class PulsarWebhookEnqueueIT {
 
     PulsarEventSource source = new PulsarEventSource(nodes.toUri().toString());
     stores = FakeTitanStores.create();
-    api = new PulsarWebhookApi(stores, () -> Optional.of(SECRET), source::triggerFor);
+    api =
+        new PulsarWebhookApi(
+            stores,
+            () -> Optional.of(SECRET),
+            new io.adaptiq.titan.scm.reconcile.JdbiEventDedupeStore(stores),
+            source::triggerFor);
 
     JobRow row = new JobRow();
     row.fullName = REPO;

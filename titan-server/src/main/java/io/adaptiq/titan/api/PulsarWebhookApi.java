@@ -10,6 +10,8 @@ import io.adaptiq.titan.scm.pulsar.PulsarChangeDiscovery;
 import io.adaptiq.titan.scm.pulsar.PulsarClientFactory;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PulsarTrigger;
+import io.adaptiq.titan.scm.reconcile.EventDedupeStore;
+import io.adaptiq.titan.scm.reconcile.ScmProvider;
 import io.adaptiq.titan.store.TitanStores;
 import io.adaptiq.titan.store.rows.JobRow;
 import jakarta.annotation.security.PermitAll;
@@ -61,6 +63,14 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * duplicates within {@link #DELIVERY_TTL_MIN} are fast-skipped, so a redelivery never
  * double-builds.
  *
+ * <p><strong>Cross-path dedupe (issue #4).</strong> The LRU only suppresses redeliveries to <em>this
+ * process</em>. The authoritative cross-path gate is the shared, DB-backed {@link EventDedupeStore}
+ * keyed by {@code <repo>:<changeId>:<revision>} — the SAME key the poll scanner ({@code
+ * PulsarRepoScanner}) claims. Whichever path sees a change tip first wins the {@code markSeen}
+ * claim; the other no-ops. So a change whose webhook arrives AND is later re-discovered by the
+ * scanner (or vice-versa) builds EXACTLY ONCE. The claim is taken before the fallible clone and
+ * released on failure, mirroring {@code PulsarScanScheduler.dispatchDiscovery}.
+ *
  * <p><strong>Job resolution.</strong> A change's {@code repo} maps to the Titan job whose {@code
  * full_name} equals that repo (the App-pattern linkage; UI install + a richer mapping land in
  * #1283). No matching job → authenticated no-op (2xx, no build), mirroring GitHub's "no matching
@@ -85,6 +95,7 @@ public class PulsarWebhookApi {
   private final TitanStores stores;
   private final Supplier<Optional<String>> webhookSecretSource;
   private final Function<PulsarChangeDiscovery, Optional<PulsarTrigger>> triggerResolver;
+  private final EventDedupeStore dedupe;
 
   /** Bounded insertion-ordered map → simple LRU for delivery-id replay suppression. */
   private final Map<String, Instant> deliveryLru =
@@ -100,6 +111,7 @@ public class PulsarWebhookApi {
   @Inject
   public PulsarWebhookApi(
       TitanStores stores,
+      EventDedupeStore dedupe,
       @ConfigProperty(name = "pulsar.webhook-secret") Optional<String> webhookSecret,
       @ConfigProperty(
               name = "pulsar.node-base-url",
@@ -108,16 +120,19 @@ public class PulsarWebhookApi {
     this(
         stores,
         () -> webhookSecret.filter(s -> !s.isBlank()),
+        dedupe,
         new PulsarEventSource(nodeBaseUrl)::triggerFor);
   }
 
-  /** Test-only constructor — explicit secret source + trigger resolver, no network. */
+  /** Test-only constructor — explicit secret source + dedupe + trigger resolver, no network. */
   PulsarWebhookApi(
       @NonNull TitanStores stores,
       @NonNull Supplier<Optional<String>> webhookSecretSource,
+      @NonNull EventDedupeStore dedupe,
       @NonNull Function<PulsarChangeDiscovery, Optional<PulsarTrigger>> triggerResolver) {
     this.stores = stores;
     this.webhookSecretSource = webhookSecretSource;
+    this.dedupe = dedupe;
     this.triggerResolver = triggerResolver;
   }
 
@@ -187,29 +202,52 @@ public class PulsarWebhookApi {
       return Response.noContent().build();
     }
 
-    // Step 5: normalize via the merged event source (clone tip + discover .titan/pipelines/*.yml).
+    // Step 5: cross-path dedupe claim (issue #4). Claim the SHARED key <repo>:<changeId>:<revision>
+    // in the DB-backed EventDedupeStore — the same key the poll scanner claims — so a change tip seen
+    // by BOTH the webhook and the scanner builds EXACTLY ONCE. If the scanner already claimed it,
+    // markSeen returns false and we no-op. Claimed BEFORE the fallible clone below; a failure
+    // releases it (mirrors PulsarScanScheduler.dispatchDiscovery) so a later delivery/scan retries.
     PulsarChangeDiscovery change = PulsarChangeDiscovery.of(repo, changeId, revision);
-    Optional<PulsarTrigger> trigger = triggerResolver.apply(change);
-    if (trigger.isEmpty()) {
-      // Honest no-op: a change with no pipeline file dispatches nothing, never an error.
+    if (!dedupe.markSeen(
+        ScmProvider.PULSAR, change.dispatchEventId(), EventDedupeStore.Source.WEBHOOK)) {
+      LOGGER.log(
+          Level.FINE,
+          "[pulsar] change {0}@{1} rev {2} already claimed by another path — no-op",
+          new Object[] {changeId, repo, revision});
       return Response.noContent().build();
     }
 
-    long buildId =
-        BuildEnqueuer.enqueue(
-            stores,
-            job.get().id,
-            "pulsar:change:" + changeId,
-            "pulsar",
-            "{\"commitSha\":\"" + revision + "\",\"changeId\":\"" + changeId + "\"}",
-            null);
-    LOGGER.log(
-        Level.INFO,
-        "[pulsar] enqueued build {0} for job {1} (change {2}@{3} rev {4})",
-        new Object[] {buildId, job.get().fullName, changeId, repo, revision});
-    return Response.status(202)
-        .entity(Map.of("accepted", true, "repo", repo, "changeId", changeId, "buildId", buildId))
-        .build();
+    try {
+      // Step 6: normalize via the merged event source (clone tip + discover .titan/pipelines/*.yml).
+      Optional<PulsarTrigger> trigger = triggerResolver.apply(change);
+      if (trigger.isEmpty()) {
+        // Honest no-op: a change with no pipeline file dispatches nothing, never an error. The claim
+        // is KEPT (mirrors the scan path) so a redelivery of the same empty change is not re-cloned.
+        return Response.noContent().build();
+      }
+
+      long buildId =
+          BuildEnqueuer.enqueue(
+              stores,
+              job.get().id,
+              "pulsar:change:" + changeId,
+              "pulsar",
+              "{\"commitSha\":\"" + revision + "\",\"changeId\":\"" + changeId + "\"}",
+              null);
+      LOGGER.log(
+          Level.INFO,
+          "[pulsar] enqueued build {0} for job {1} (change {2}@{3} rev {4})",
+          new Object[] {buildId, job.get().fullName, changeId, repo, revision});
+      return Response.status(202)
+          .entity(Map.of("accepted", true, "repo", repo, "changeId", changeId, "buildId", buildId))
+          .build();
+    } catch (RuntimeException e) {
+      // The shared claim was taken BEFORE this fallible clone/enqueue; release it so a later
+      // delivery or scan can retry (mirrors PulsarScanScheduler.dispatchDiscovery). Re-throw so the
+      // node sees a non-2xx and re-delivers.
+      dedupe.release(ScmProvider.PULSAR, change.dispatchEventId());
+      throw e;
+    }
   }
 
   // ── HMAC (mirrors GithubAppWebhookApi.verifyHmac) ────────────────────────────

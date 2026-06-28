@@ -9,6 +9,9 @@ import io.adaptiq.titan.scm.pulsar.PulsarChangeDiscovery;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PipelineFile;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PulsarTrigger;
 import io.adaptiq.titan.scm.pulsar.PulsarTriggerRequest;
+import io.adaptiq.titan.scm.reconcile.EventDedupeStore;
+import io.adaptiq.titan.scm.reconcile.JdbiEventDedupeStore;
+import io.adaptiq.titan.scm.reconcile.ScmProvider;
 import io.adaptiq.titan.store.TitanStores;
 import io.adaptiq.titan.store.rows.JobRow;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -51,6 +54,7 @@ class PulsarWebhookApiTest {
   private static final String REVISION = "abcdef1234567890";
 
   private TitanStores stores;
+  private EventDedupeStore dedupe;
 
   /** A resolver that always returns a trigger carrying one pipeline (change HAS a pipeline). */
   private final Function<PulsarChangeDiscovery, Optional<PulsarTrigger>> withPipeline =
@@ -70,10 +74,11 @@ class PulsarWebhookApiTest {
   @BeforeEach
   void setUp() {
     stores = FakeTitanStores.create();
+    dedupe = new JdbiEventDedupeStore(stores);
   }
 
   private PulsarWebhookApi api(Function<PulsarChangeDiscovery, Optional<PulsarTrigger>> resolver) {
-    return new PulsarWebhookApi(stores, () -> Optional.of(SECRET), resolver);
+    return new PulsarWebhookApi(stores, () -> Optional.of(SECRET), dedupe, resolver);
   }
 
   // ── 1. signed event + linked job + pipeline → 202 + enqueue ──────────────────
@@ -117,7 +122,7 @@ class PulsarWebhookApiTest {
 
   @Test
   void noSecretConfigured_returns401() {
-    PulsarWebhookApi api = new PulsarWebhookApi(stores, Optional::empty, withPipeline);
+    PulsarWebhookApi api = new PulsarWebhookApi(stores, Optional::empty, dedupe, withPipeline);
     byte[] body = changeBody(REPO, CHANGE_ID, REVISION);
     Response resp = api.receive(headers("sha256=deadbeef", "delivery-4"), body);
     assertEquals(401, resp.getStatus());
@@ -228,6 +233,79 @@ class PulsarWebhookApiTest {
         2,
         stores.builds().listByJob(jobId).size(),
         "a change whose tip advanced owes a fresh build");
+  }
+
+  // ── 10. CROSS-PATH DEDUPE (issue #4): webhook claims the SHARED key ──────────
+  // After the webhook builds a tip, the poll scanner (which dedupes on the SAME shared
+  // <repo>:<changeId>:<revision> key via EventDedupeStore) must find it already claimed and skip —
+  // so webhook-then-scan at the same tip builds EXACTLY ONCE. Removing the webhook's markSeen claim
+  // makes `scanWouldDispatch` flip to true → this test goes red (the double-build regression).
+
+  @Test
+  void webhookThenScan_sameTip_buildsOnce_viaSharedDedupe() {
+    long jobId = seedJob(REPO);
+    byte[] body = changeBody(REPO, CHANGE_ID, REVISION);
+
+    Response resp = api(withPipeline).receive(headers(sig(SECRET, body), "delivery-x"), body);
+    assertEquals(202, resp.getStatus());
+    assertEquals(1, stores.builds().listByJob(jobId).size());
+
+    // Simulate the poll scanner re-seeing the SAME change tip: it claims the shared key as RECONCILE
+    // exactly as PulsarRepoScanner does. The webhook already claimed it → markSeen returns false.
+    String sharedKey = PulsarChangeDiscovery.dispatchEventId(REPO, CHANGE_ID, REVISION);
+    boolean scanWouldDispatch =
+        dedupe.markSeen(ScmProvider.PULSAR, sharedKey, EventDedupeStore.Source.RECONCILE);
+
+    assertFalse(scanWouldDispatch, "the scanner must NOT re-dispatch a tip the webhook already built");
+    assertEquals(
+        1,
+        stores.builds().listByJob(jobId).size(),
+        "webhook-then-scan at the same tip builds exactly once");
+  }
+
+  // ── 11. CROSS-PATH (issue #4): scan-first then webhook no-ops ────────────────
+  // Inverse direction: the scanner claimed the tip first (it recovered a dropped webhook). A late
+  // webhook for the SAME tip must no-op (204), not double-build.
+
+  @Test
+  void scanFirstThenWebhook_sameTip_webhookNoOps() {
+    long jobId = seedJob(REPO);
+    // The poll scanner already claimed + built this exact tip (Source.RECONCILE).
+    String sharedKey = PulsarChangeDiscovery.dispatchEventId(REPO, CHANGE_ID, REVISION);
+    dedupe.markSeen(ScmProvider.PULSAR, sharedKey, EventDedupeStore.Source.RECONCILE);
+
+    byte[] body = changeBody(REPO, CHANGE_ID, REVISION);
+    Response resp = api(withPipeline).receive(headers(sig(SECRET, body), "delivery-y"), body);
+
+    assertEquals(204, resp.getStatus(), "a late webhook for an already-scanned tip is a no-op");
+    assertTrue(
+        stores.builds().listByJob(jobId).isEmpty(),
+        "scan-then-webhook at the same tip must not produce a second build");
+  }
+
+  // ── 12. CROSS-PATH adversarial: dispatch failure RELEASES the shared claim ───
+  // The claim is taken BEFORE the fallible clone; if the clone throws, the claim must be released so
+  // a later scan/delivery can retry — otherwise the change is permanently dropped.
+
+  @Test
+  void webhookDispatchFailure_releasesSharedClaim_soScanCanRetry() {
+    seedJob(REPO);
+    Function<PulsarChangeDiscovery, Optional<PulsarTrigger>> boom =
+        change -> {
+          throw new RuntimeException("clone failed: git missing");
+        };
+    byte[] body = changeBody(REPO, CHANGE_ID, REVISION);
+
+    try {
+      api(boom).receive(headers(sig(SECRET, body), "delivery-z"), body);
+    } catch (RuntimeException expected) {
+      // re-thrown so the node re-delivers — expected
+    }
+
+    String sharedKey = PulsarChangeDiscovery.dispatchEventId(REPO, CHANGE_ID, REVISION);
+    boolean scanCanClaim =
+        dedupe.markSeen(ScmProvider.PULSAR, sharedKey, EventDedupeStore.Source.RECONCILE);
+    assertTrue(scanCanClaim, "a failed webhook dispatch must release the shared claim for retry");
   }
 
   // ── HMAC primitive coverage ──────────────────────────────────────────────────
