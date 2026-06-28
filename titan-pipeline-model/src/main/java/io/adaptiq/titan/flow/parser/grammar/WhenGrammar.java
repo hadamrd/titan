@@ -58,7 +58,7 @@ public final class WhenGrammar {
             + "'always' are [experimental] — under the engine's default fail-fast mode an upstream "
             + "failure halts the build before a downstream step is dispatched, so a 'failure'/"
             + "'always' guard does not yet fire in the upstream-failed scenario (the AncestorClosure "
-            + "fail-fast exemption is a tracked follow-up; see docs/design/75-pdl-when.md). "
+            + "fail-fast exemption is a tracked follow-up). "
             + "'success' and all parse/evaluation semantics are fully supported today.");
 
     ObjectNode filesChanged = props.putObject("files_changed");

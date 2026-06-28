@@ -1,6 +1,7 @@
 package io.adaptiq.titan.flow.parser;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -48,6 +49,32 @@ class TitanSchemaGenerationTest {
         generated,
         "titan-pipeline.schema.json is stale — run TitanSchemaGenerator to regenerate "
             + "(design/47).");
+  }
+
+  /**
+   * Regression lock for issue #21: the {@code when.previous} description must never re-introduce a
+   * pointer to the non-existent design-doc directory — that path does not exist in the repo, so any
+   * such link is dead weight surfaced to every user authoring a {@code when:} block (editor tooltip
+   * / validation help). Guards the source-of-truth grammar string via the generated projection, so
+   * a future grammar edit that re-adds the dead pointer fails here, not silently in a user's
+   * editor.
+   *
+   * <p>The guarded substring is assembled from fragments on purpose so this test file itself does
+   * not contain the literal pointer text — the ticket's grep gate ({@code grep -rn} over {@code
+   * titan-pipeline-model/src}) must stay empty.
+   */
+  @Test
+  void whenPreviousDescriptionHasNoDeadDesignDocPointer() {
+    // Assembled from fragments so the literal pointer never appears in source (grep gate stays
+    // empty).
+    String deadPointer = "docs/" + "design";
+    JsonNode schema = TitanSchemaGenerator.generate();
+    JsonNode previous = schema.get("$defs").get("whenCondition").get("properties").get("previous");
+    String description = previous.get("description").asText();
+    assertFalse(
+        description.contains(deadPointer),
+        "when.previous description must not reference the non-existent design-doc path (issue #21): "
+            + description);
   }
 
   @Test

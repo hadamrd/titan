@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Parser-validation test for the repo's dogfood pipeline at {@code /.titan/pipeline.yml} — the
- * "Titan compiles Titan" YAML anchoring docs/design/58-alignment-grooming.md §4 Sprint #1.
+ * "Titan compiles Titan" self-build invariant.
  *
  * <p>The contract: the dogfood YAML must remain grammar-valid as the PDL evolves. If a future
  * schema/parser change breaks the self-build pipeline, this test fails in CI before the change
