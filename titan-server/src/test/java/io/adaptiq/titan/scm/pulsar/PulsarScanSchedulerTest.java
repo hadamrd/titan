@@ -14,8 +14,8 @@ import edu.umd.cs.findbugs.annotations.NonNull;
 import io.adaptiq.titan.api.FakeTitanStores;
 import io.adaptiq.titan.audit.AuditAction;
 import io.adaptiq.titan.audit.AuditService;
-import io.adaptiq.titan.build.BuildEnqueuedEvent;
 import io.adaptiq.titan.audit.AuditTargetType;
+import io.adaptiq.titan.build.BuildEnqueuedEvent;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PipelineFile;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PulsarTrigger;
 import io.adaptiq.titan.scm.reconcile.EventDedupeStore;
@@ -422,13 +422,15 @@ class PulsarScanSchedulerTest {
     AtomicInteger enqueued = new AtomicInteger();
     List<BuildEnqueuedEvent> fired = new ArrayList<>();
     PulsarScanScheduler scheduler =
-        scheduler(true, enqueued, withPipeline, new JdbiEventDedupeStore(stores), c -> {}, fired::add);
+        scheduler(
+            true, enqueued, withPipeline, new JdbiEventDedupeStore(stores), c -> {}, fired::add);
 
     scheduler.tick();
 
     assertEquals(1, enqueued.get(), "the change enqueues exactly one build");
     assertEquals(1, fired.size(), "poll-scanner dispatch fires exactly one enqueue-time event");
-    assertEquals("pulsar", fired.get(0).triggerType(), "enqueue-time event carries pulsar provenance");
+    assertEquals(
+        "pulsar", fired.get(0).triggerType(), "enqueue-time event carries pulsar provenance");
     assertTrue(
         fired.get(0).triggerMetaJson().contains("\"changeId\":\"" + CHANGE + "\""),
         "enqueue-time event carries the changeId the reporter resolves the repo from");
@@ -446,7 +448,8 @@ class PulsarScanSchedulerTest {
     Function<String, Function<PulsarChangeDiscovery, Optional<PulsarTrigger>>> emptyResolver =
         nodeUrl -> change -> Optional.empty();
     PulsarScanScheduler scheduler =
-        scheduler(true, enqueued, emptyResolver, new JdbiEventDedupeStore(stores), c -> {}, fired::add);
+        scheduler(
+            true, enqueued, emptyResolver, new JdbiEventDedupeStore(stores), c -> {}, fired::add);
 
     scheduler.tick();
 

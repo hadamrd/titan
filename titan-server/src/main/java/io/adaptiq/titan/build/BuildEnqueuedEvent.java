@@ -1,13 +1,12 @@
 package io.adaptiq.titan.build;
 
-import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.annotations.Nullable;
 
 /**
  * CDI event fired the instant a build is <em>enqueued</em> — i.e. right after {@link
  * BuildEnqueuer#enqueue} inserts the {@code QUEUED} row, BEFORE any worker picks it up and BEFORE
- * the first {@link BuildStateChangedEvent} (which only fires on a persisted {@code BuildServiceImpl}
- * transition, i.e. {@code QUEUED → RUNNING} at worker pickup).
+ * the first {@link BuildStateChangedEvent} (which only fires on a persisted {@code
+ * BuildServiceImpl} transition, i.e. {@code QUEUED → RUNNING} at worker pickup).
  *
  * <p><strong>Why this event exists (issue #1, GitHub-Actions parity).</strong> GitHub shows a check
  * the instant you push. Before this event the first signal the Pulsar reporter ever saw was the
@@ -19,9 +18,10 @@ import edu.umd.cs.findbugs.annotations.Nullable;
  * <p><strong>Narrow provenance — fired ONLY at the two Pulsar enqueue call sites</strong> ({@code
  * PulsarWebhookApi.receive} and {@code PulsarScanScheduler.dispatchDiscovery}). The other {@link
  * BuildEnqueuer#enqueue} callers ({@code DiscoveryServiceImpl}, {@code GithubAppWebhookApi}) MUST
- * NOT fire it — their trigger types are {@code discovery}/{@code github-app} and have no enqueue-time
- * check contract. The lone observer ({@code PulsarCheckReporter}) additionally filters on a {@code
- * pulsar*} {@code triggerType}, so even a stray fire from another provenance is a guaranteed no-op.
+ * NOT fire it — their trigger types are {@code discovery}/{@code github-app} and have no
+ * enqueue-time check contract. The lone observer ({@code PulsarCheckReporter}) additionally filters
+ * on a {@code pulsar*} {@code triggerType}, so even a stray fire from another provenance is a
+ * guaranteed no-op.
  *
  * <p>Mirrors {@link BuildStateChangedEvent}: a plain record carrying just enough context (build +
  * job identity, trigger provenance, the trigger meta JSON) for the observer to resolve the change

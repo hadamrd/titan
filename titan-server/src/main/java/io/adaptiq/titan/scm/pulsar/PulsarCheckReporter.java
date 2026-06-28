@@ -117,8 +117,12 @@ public class PulsarCheckReporter {
     this(stores, new PulsarClient(nodeBaseUrl), publicBaseUrl, enabled);
   }
 
-  /** Test-only constructor — explicit {@link PulsarClient} (point it at a fake node), no config. */
-  PulsarCheckReporter(
+  /**
+   * Test-wiring constructor — explicit {@link PulsarClient} (point it at a fake node), no config.
+   * Public so cross-package integration tests (e.g. {@code PulsarWebhookEnqueueIT} in {@code api})
+   * can wire a real reporter as the enqueue-time sink against a WireMock node.
+   */
+  public PulsarCheckReporter(
       @NonNull TitanStores stores,
       @NonNull PulsarClient client,
       @NonNull String publicBaseUrl,
@@ -150,7 +154,8 @@ public class PulsarCheckReporter {
    * call sites ({@code PulsarWebhookApi.receive} / {@code PulsarScanScheduler.dispatchDiscovery}),
    * the instant a {@code QUEUED} row is inserted and BEFORE any worker transition. Posts the same
    * {@code conclusion:pending} / {@code phase:queued} check the later {@code QUEUED} state change
-   * would — so the {@code build} check shows up immediately rather than only when a worker frees up.
+   * would — so the {@code build} check shows up immediately rather than only when a worker frees
+   * up.
    *
    * <p>Idempotent with the later {@link BuildStateChangedEvent}-driven posts: the node folds the CI
    * event into {@code state.ci}, so a second identical {@code pending/queued} post (or the eventual

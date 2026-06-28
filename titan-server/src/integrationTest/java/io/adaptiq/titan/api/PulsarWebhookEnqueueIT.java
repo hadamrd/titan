@@ -143,10 +143,10 @@ class PulsarWebhookEnqueueIT {
   /**
    * Issue #1 (GitHub-Actions parity): a signed change-event must surface an immediate {@code
    * conclusion:pending} {@code build} check on the node the instant the build is enqueued — BEFORE
-   * any worker picks it up (no worker / no {@code BuildStateChangedEvent} fires in this test). Wires
-   * the real {@link PulsarCheckReporter} as the enqueue-time sink (the production CDI fan-out),
-   * pointed at a WireMock node, and asserts exactly one pending/queued post lands. Reverting the
-   * fire/observe wiring leaves the node with zero posts → RED.
+   * any worker picks it up (no worker / no {@code BuildStateChangedEvent} fires in this test).
+   * Wires the real {@link PulsarCheckReporter} as the enqueue-time sink (the production CDI
+   * fan-out), pointed at a WireMock node, and asserts exactly one pending/queued post lands.
+   * Reverting the fire/observe wiring leaves the node with zero posts → RED.
    */
   @Test
   void signedChangeEvent_postsImmediatePendingCheck_beforeAnyWorkerPickup() {

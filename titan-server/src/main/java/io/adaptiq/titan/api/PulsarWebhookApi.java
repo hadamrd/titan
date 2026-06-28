@@ -101,9 +101,10 @@ public class PulsarWebhookApi {
   private final EventDedupeStore dedupe;
 
   /**
-   * Enqueue-time check sink (issue #1). In production this is {@code Event<BuildEnqueuedEvent>::fire}
-   * — CDI fans it out to {@code PulsarCheckReporter#onBuildEnqueued}, which posts the immediate
-   * PENDING check. A no-op in legacy test wiring.
+   * Enqueue-time check sink (issue #1). In production this is {@code
+   * Event<BuildEnqueuedEvent>::fire} — CDI fans it out to {@code
+   * PulsarCheckReporter#onBuildEnqueued}, which posts the immediate PENDING check. A no-op in
+   * legacy test wiring.
    */
   private final Consumer<BuildEnqueuedEvent> enqueuedSink;
 
@@ -134,6 +135,25 @@ public class PulsarWebhookApi {
         dedupe,
         new PulsarEventSource(nodeBaseUrl)::triggerFor,
         enqueuedEvent::fire);
+  }
+
+  /**
+   * Manual-wiring constructor for cross-package integration tests that cannot reach the
+   * package-private seam constructors (e.g. {@code PulsarFullLoopIT} in {@code scm.pulsar}). Builds
+   * the real {@link PulsarEventSource} for {@code nodeBaseUrl} with a no-op enqueue-time sink — the
+   * enqueue-time check is exercised by the seam constructor below + the reporter's own tests.
+   */
+  public PulsarWebhookApi(
+      @NonNull TitanStores stores,
+      @NonNull EventDedupeStore dedupe,
+      @NonNull Optional<String> webhookSecret,
+      @NonNull String nodeBaseUrl) {
+    this(
+        stores,
+        () -> webhookSecret.filter(s -> !s.isBlank()),
+        dedupe,
+        new PulsarEventSource(nodeBaseUrl)::triggerFor,
+        e -> {});
   }
 
   /** Test-only constructor — no enqueue-time check sink (legacy enqueue-path tests). */
@@ -253,8 +273,7 @@ public class PulsarWebhookApi {
         return Response.noContent().build();
       }
 
-      String triggerMeta =
-          "{\"commitSha\":\"" + revision + "\",\"changeId\":\"" + changeId + "\"}";
+      String triggerMeta = "{\"commitSha\":\"" + revision + "\",\"changeId\":\"" + changeId + "\"}";
       long buildId =
           BuildEnqueuer.enqueue(
               stores, job.get().id, "pulsar:change:" + changeId, "pulsar", triggerMeta, null);
@@ -280,11 +299,11 @@ public class PulsarWebhookApi {
   }
 
   /**
-   * Fire {@link BuildEnqueuedEvent} for a freshly-enqueued Pulsar build (issue #1). The build number
-   * is resolved from the just-inserted row (best-effort, {@code 0} if unreadable — the reporter does
-   * not key on it). Wrapped so a sink/CDI failure is logged and swallowed: the build is already
-   * committed and the webhook has already decided on a {@code 202}; an enqueue-time check is a
-   * convenience, never a correctness gate.
+   * Fire {@link BuildEnqueuedEvent} for a freshly-enqueued Pulsar build (issue #1). The build
+   * number is resolved from the just-inserted row (best-effort, {@code 0} if unreadable — the
+   * reporter does not key on it). Wrapped so a sink/CDI failure is logged and swallowed: the build
+   * is already committed and the webhook has already decided on a {@code 202}; an enqueue-time
+   * check is a convenience, never a correctness gate.
    */
   private void fireEnqueued(long buildId, long jobId, @NonNull String triggerMeta) {
     try {

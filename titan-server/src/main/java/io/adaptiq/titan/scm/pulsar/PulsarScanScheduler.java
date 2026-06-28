@@ -72,9 +72,10 @@ public class PulsarScanScheduler {
   private final ReconcileAudit audit;
 
   /**
-   * Enqueue-time check sink (issue #1). In production this is {@code Event<BuildEnqueuedEvent>::fire}
-   * — CDI fans it out to {@code PulsarCheckReporter#onBuildEnqueued}, which posts the immediate
-   * PENDING check for a poll-discovered change. A no-op in legacy test wiring.
+   * Enqueue-time check sink (issue #1). In production this is {@code
+   * Event<BuildEnqueuedEvent>::fire} — CDI fans it out to {@code
+   * PulsarCheckReporter#onBuildEnqueued}, which posts the immediate PENDING check for a
+   * poll-discovered change. A no-op in legacy test wiring.
    */
   private final Consumer<BuildEnqueuedEvent> enqueuedSink;
 
@@ -113,20 +114,10 @@ public class PulsarScanScheduler {
               triggerResolverForNode,
       @NonNull BuildDispatch dispatch,
       @NonNull ReconcileAudit audit) {
-    this(
-        stores,
-        dedupe,
-        enabled,
-        clientForNode,
-        triggerResolverForNode,
-        dispatch,
-        audit,
-        e -> {});
+    this(stores, dedupe, enabled, clientForNode, triggerResolverForNode, dispatch, audit, e -> {});
   }
 
-  /**
-   * Test constructor — explicit enqueue-time check sink (issue #1 wiring), no network.
-   */
+  /** Test constructor — explicit enqueue-time check sink (issue #1 wiring), no network. */
   PulsarScanScheduler(
       @NonNull TitanStores stores,
       @NonNull EventDedupeStore dedupe,
@@ -316,8 +307,8 @@ public class PulsarScanScheduler {
   /**
    * Fire {@link BuildEnqueuedEvent} for a freshly-enqueued poll-discovered build (issue #1). Build
    * number is resolved best-effort from the inserted row ({@code 0} if unreadable — the reporter
-   * does not key on it). Wrapped so a sink/CDI failure is logged and swallowed and never reaches the
-   * caller's {@code catch}, which would otherwise RELEASE the dedupe claim of an
+   * does not key on it). Wrapped so a sink/CDI failure is logged and swallowed and never reaches
+   * the caller's {@code catch}, which would otherwise RELEASE the dedupe claim of an
    * already-enqueued build and re-dispatch it on the next tick (double build).
    */
   private void fireEnqueued(long buildId, long jobId, @NonNull String triggerMeta) {

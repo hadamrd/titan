@@ -335,9 +335,12 @@ class PulsarCheckReporterTest {
     // An enqueued build has NOT started — it must never carry in_progress nor clear the gate.
     wiremock.verify(
         0,
-        postRequestedFor(urlEqualTo(EVENTS_URL)).withRequestBody(containing("\"conclusion\":\"success\"")));
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"conclusion\":\"success\"")));
     wiremock.verify(
-        0, postRequestedFor(urlEqualTo(EVENTS_URL)).withRequestBody(containing("\"phase\":\"in_progress\"")));
+        0,
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"phase\":\"in_progress\"")));
   }
 
   @Test
