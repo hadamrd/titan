@@ -56,7 +56,8 @@ class TitanSchemaGenerationTest {
    * pointer to the non-existent design-doc directory — that path does not exist in the repo, so any
    * such link is dead weight surfaced to every user authoring a {@code when:} block (editor tooltip
    * / validation help). Guards the source-of-truth grammar string via the generated projection, so
-   * a future grammar edit that re-adds the dead pointer fails here, not silently in a user's editor.
+   * a future grammar edit that re-adds the dead pointer fails here, not silently in a user's
+   * editor.
    *
    * <p>The guarded substring is assembled from fragments on purpose so this test file itself does
    * not contain the literal pointer text — the ticket's grep gate ({@code grep -rn} over {@code
@@ -64,7 +65,8 @@ class TitanSchemaGenerationTest {
    */
   @Test
   void whenPreviousDescriptionHasNoDeadDesignDocPointer() {
-    // Assembled from fragments so the literal pointer never appears in source (grep gate stays empty).
+    // Assembled from fragments so the literal pointer never appears in source (grep gate stays
+    // empty).
     String deadPointer = "docs/" + "design";
     JsonNode schema = TitanSchemaGenerator.generate();
     JsonNode previous = schema.get("$defs").get("whenCondition").get("properties").get("previous");
