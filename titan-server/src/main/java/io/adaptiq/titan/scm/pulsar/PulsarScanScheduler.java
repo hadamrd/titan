@@ -118,7 +118,7 @@ public class PulsarScanScheduler {
    * the webhook was dropped or never arrived. So it earns one {@code SCM_WEBHOOK_RECOVERED} audit
    * row (target=JOB), the operator's signal that the webhook channel is flaky for that repo.
    */
-  private static ReconcileAudit reconcileAuditSink(@NonNull AuditService auditService) {
+  static ReconcileAudit reconcileAuditSink(@NonNull AuditService auditService) {
     Objects.requireNonNull(auditService, "auditService");
     return (change, jobId, buildId) ->
         auditService.recordAs(

@@ -6,11 +6,15 @@ import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import io.adaptiq.titan.api.FakeTitanStores;
+import io.adaptiq.titan.audit.AuditAction;
+import io.adaptiq.titan.audit.AuditService;
+import io.adaptiq.titan.audit.AuditTargetType;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PipelineFile;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PulsarTrigger;
 import io.adaptiq.titan.scm.reconcile.EventDedupeStore;
@@ -343,6 +347,64 @@ class PulsarScanSchedulerTest {
 
     assertEquals(0, enqueued.get());
     assertTrue(recovered.isEmpty(), "no build ⇒ no reconcile-recovered audit");
+  }
+
+  // ── AUDIT (issue #4): the REAL production sink emits the right row + details ──
+  // Every other test substitutes a ReconcileAudit lambda, so the SCM_WEBHOOK_RECOVERED enum and the
+  // hand-built details JSON in PulsarScanScheduler.reconcileAuditSink had zero coverage. This
+  // drives
+  // the actual production adapter through a thin AuditService spy and pins the contract: action,
+  // target, target id, and a details payload that PARSES and carries every required field.
+
+  @Test
+  void productionAuditSink_emitsRecoveredRow_withParseableDetails() throws Exception {
+    CapturingAuditService audit = new CapturingAuditService();
+    PulsarChangeDiscovery change = PulsarChangeDiscovery.of(REPO, CHANGE, REV1);
+
+    PulsarScanScheduler.reconcileAuditSink(audit).recordRecovered(change, 42L, 7L);
+
+    assertEquals(1, audit.calls.size(), "exactly one audit row per recovered build");
+    CapturingAuditService.Call call = audit.calls.get(0);
+    assertEquals("pulsar-scan", call.actor());
+    assertEquals(AuditAction.SCM_WEBHOOK_RECOVERED, call.action());
+    assertEquals(AuditTargetType.JOB, call.target());
+    assertEquals("42", call.targetId(), "target id is the linked job id");
+
+    JsonNode details = PulsarJson.MAPPER.readTree(call.detailsJson());
+    assertEquals("pulsar", details.path("provider").asText());
+    assertEquals(REPO, details.path("repo").asText());
+    assertEquals(CHANGE, details.path("changeId").asText());
+    assertEquals(REV1, details.path("revision").asText());
+    assertEquals(change.dispatchEventId(), details.path("eventId").asText());
+    assertEquals(7L, details.path("buildId").asLong());
+  }
+
+  /**
+   * Thin {@link AuditService} spy that captures {@code recordAs} args instead of hitting the DB.
+   */
+  private static final class CapturingAuditService extends AuditService {
+    record Call(
+        String actor,
+        AuditAction action,
+        AuditTargetType target,
+        String targetId,
+        String detailsJson) {}
+
+    final List<Call> calls = new ArrayList<>();
+
+    CapturingAuditService() {
+      super(null, null, null);
+    }
+
+    @Override
+    public void recordAs(
+        @NonNull String actor,
+        @NonNull AuditAction action,
+        @NonNull AuditTargetType targetType,
+        String targetId,
+        String detailsJson) {
+      calls.add(new Call(actor, action, targetType, targetId, detailsJson));
+    }
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────────
