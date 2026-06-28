@@ -16,6 +16,7 @@ import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.github.tomakehurst.wiremock.stubbing.Scenario;
 import com.github.tomakehurst.wiremock.verification.LoggedRequest;
 import io.adaptiq.titan.api.FakeTitanStores;
+import io.adaptiq.titan.build.BuildEnqueuedEvent;
 import io.adaptiq.titan.build.BuildStateChangedEvent;
 import io.adaptiq.titan.scm.pulsar.PulsarClient.CheckConclusion;
 import io.adaptiq.titan.store.TitanStores;
@@ -313,6 +314,100 @@ class PulsarCheckReporterTest {
     wiremock.verify(0, postRequestedFor(urlMatching("/_pulsar/.*")));
   }
 
+  // ── issue #1: enqueue-time PENDING observer (GitHub-Actions parity) ──────────
+
+  @Test
+  void enqueuedObserver_postsExactlyOnePendingQueued_forResolvablePulsarBuild() {
+    wiremock.stubFor(post(urlEqualTo(EVENTS_URL)).willReturn(aResponse().withStatus(201)));
+
+    // The instant a Pulsar change is enqueued — BEFORE any worker pickup — the build check shows
+    // up as pending/queued, exactly the GitHub-Actions parity the ticket closes. Reverting the
+    // fire/observe wiring (a no-op onBuildEnqueued) makes this assertion go RED.
+    assertDoesNotThrow(() -> reporter.onBuildEnqueued(enqueuedEvent("pulsar", meta())));
+
+    wiremock.verify(
+        1,
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"kind\":\"ci\""))
+            .withRequestBody(containing("\"check\":\"build\""))
+            .withRequestBody(containing("\"conclusion\":\"pending\""))
+            .withRequestBody(containing("\"phase\":\"queued\"")));
+    // An enqueued build has NOT started — it must never carry in_progress nor clear the gate.
+    wiremock.verify(
+        0,
+        postRequestedFor(urlEqualTo(EVENTS_URL)).withRequestBody(containing("\"conclusion\":\"success\"")));
+    wiremock.verify(
+        0, postRequestedFor(urlEqualTo(EVENTS_URL)).withRequestBody(containing("\"phase\":\"in_progress\"")));
+  }
+
+  @Test
+  void enqueuedThenRunningThenSuccess_coherentIdempotentSequence_onlyTerminalClearsGate() {
+    wiremock.stubFor(post(urlEqualTo(EVENTS_URL)).willReturn(aResponse().withStatus(201)));
+
+    // Enqueue (pending/queued) → worker pickup RUNNING (pending/in_progress) → terminal SUCCESS.
+    // The enqueue-time pending and the QUEUED→RUNNING pending are idempotent at the node (folded
+    // into state.ci) — no error, no double terminal, and only the last event clears the gate.
+    reporter.onBuildEnqueued(enqueuedEvent("pulsar", meta()));
+    reporter.report(event("RUNNING"));
+    reporter.report(event("SUCCESS"));
+
+    List<LoggedRequest> posts = wiremock.findAll(postRequestedFor(urlEqualTo(EVENTS_URL)));
+    assertEquals(3, posts.size(), "enqueue + running + terminal = three ordered posts");
+    assertTrue(posts.get(0).getBodyAsString().contains("\"phase\":\"queued\""));
+    assertTrue(posts.get(1).getBodyAsString().contains("\"phase\":\"in_progress\""));
+    assertTrue(posts.get(2).getBodyAsString().contains("\"conclusion\":\"success\""));
+  }
+
+  @Test
+  void enqueuedObserver_noOp_whenDisabledByFeatureFlag() {
+    PulsarClient client = new PulsarClient("http://localhost:" + wiremock.port());
+    PulsarCheckReporter off =
+        new PulsarCheckReporter(stores, client, "https://titan.example.com", false);
+
+    off.onBuildEnqueued(enqueuedEvent("pulsar", meta()));
+
+    wiremock.verify(0, postRequestedFor(urlMatching("/_pulsar/.*")));
+  }
+
+  @Test
+  void enqueuedObserver_noOp_whenChangeIdMissing() {
+    assertDoesNotThrow(
+        () ->
+            reporter.onBuildEnqueued(
+                enqueuedEvent("pulsar", "{\"commitSha\":\"" + REVISION + "\"}")));
+
+    wiremock.verify(0, postRequestedFor(urlMatching("/_pulsar/.*")));
+  }
+
+  @Test
+  void enqueuedObserver_noOp_whenJobHasNoResolvableRepo() {
+    BuildEnqueuedEvent evt =
+        new BuildEnqueuedEvent(buildId, 999_999L /* no such job */, "pulsar", meta(), 7);
+
+    assertDoesNotThrow(() -> reporter.onBuildEnqueued(evt));
+
+    wiremock.verify(0, postRequestedFor(urlMatching("/_pulsar/.*")));
+  }
+
+  @Test
+  void enqueuedObserver_forGithubAppTrigger_makesNoHttpCall() {
+    // Provenance filter: BuildEnqueuer's other callers (github-app, discovery) MUST NOT reach the
+    // Pulsar ledger even if the event were somehow observed.
+    assertDoesNotThrow(
+        () ->
+            reporter.onBuildEnqueued(
+                enqueuedEvent("github-app:push", "{\"commitSha\":\"deadbeef\"}")));
+
+    wiremock.verify(0, postRequestedFor(urlMatching("/_pulsar/.*")));
+  }
+
+  @Test
+  void enqueuedObserver_forDiscoveryTrigger_makesNoHttpCall() {
+    assertDoesNotThrow(() -> reporter.onBuildEnqueued(enqueuedEvent("discovery", meta())));
+
+    wiremock.verify(0, postRequestedFor(urlMatching("/_pulsar/.*")));
+  }
+
   // ── adversarial: transport / non-2xx ────────────────────────────────────────
 
   @Test
@@ -396,6 +491,10 @@ class PulsarCheckReporterTest {
 
   private BuildStateChangedEvent event(String status) {
     return new BuildStateChangedEvent(buildId, status, "pulsar", meta(), jobId, 1);
+  }
+
+  private BuildEnqueuedEvent enqueuedEvent(String triggerType, String triggerMetaJson) {
+    return new BuildEnqueuedEvent(buildId, jobId, triggerType, triggerMetaJson, 1);
   }
 
   private static String meta() {

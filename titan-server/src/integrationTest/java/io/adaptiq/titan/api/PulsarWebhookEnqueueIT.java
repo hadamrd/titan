@@ -1,9 +1,19 @@
 package io.adaptiq.titan.api;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.containing;
+import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlMatching;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.github.tomakehurst.wiremock.WireMockServer;
+import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import edu.umd.cs.findbugs.annotations.NonNull;
+import io.adaptiq.titan.build.BuildEnqueuedEvent;
+import io.adaptiq.titan.scm.pulsar.PulsarCheckReporter;
+import io.adaptiq.titan.scm.pulsar.PulsarClient;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource;
 import io.adaptiq.titan.store.TitanStores;
 import io.adaptiq.titan.store.rows.JobRow;
@@ -23,6 +33,7 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -52,6 +63,7 @@ class PulsarWebhookEnqueueIT {
   private TitanStores stores;
   private long jobId;
   private String pipelineRevision;
+  private WireMockServer node;
 
   @BeforeEach
   void buildFixture() throws Exception {
@@ -119,6 +131,64 @@ class PulsarWebhookEnqueueIT {
 
     assertEquals(401, resp.getStatus());
     assertTrue(stores.builds().listByJob(jobId).isEmpty());
+  }
+
+  @AfterEach
+  void stopNode() {
+    if (node != null) {
+      node.stop();
+    }
+  }
+
+  /**
+   * Issue #1 (GitHub-Actions parity): a signed change-event must surface an immediate {@code
+   * conclusion:pending} {@code build} check on the node the instant the build is enqueued — BEFORE
+   * any worker picks it up (no worker / no {@code BuildStateChangedEvent} fires in this test). Wires
+   * the real {@link PulsarCheckReporter} as the enqueue-time sink (the production CDI fan-out),
+   * pointed at a WireMock node, and asserts exactly one pending/queued post lands. Reverting the
+   * fire/observe wiring leaves the node with zero posts → RED.
+   */
+  @Test
+  void signedChangeEvent_postsImmediatePendingCheck_beforeAnyWorkerPickup() {
+    node = new WireMockServer(WireMockConfiguration.options().dynamicPort());
+    node.start();
+    node.stubFor(
+        post(urlMatching("/_pulsar/ledger/.*/changes/42/events"))
+            .willReturn(aResponse().withStatus(201)));
+
+    PulsarCheckReporter reporter =
+        new PulsarCheckReporter(
+            stores,
+            new PulsarClient("http://localhost:" + node.port()),
+            "https://titan.example.com",
+            true);
+    java.util.function.Consumer<BuildEnqueuedEvent> sink = reporter::onBuildEnqueued;
+
+    PulsarWebhookApi wired =
+        new PulsarWebhookApi(
+            stores,
+            () -> Optional.of(SECRET),
+            new io.adaptiq.titan.scm.reconcile.JdbiEventDedupeStore(stores),
+            new PulsarEventSource(root.resolve("nodes").toUri().toString())::triggerFor,
+            sink);
+
+    byte[] body = changeBody(REPO, "42", pipelineRevision);
+    Response resp = wired.receive(headers(sig(SECRET, body), "delivery-it-pending"), body);
+
+    assertEquals(202, resp.getStatus(), "the webhook still returns 202 unchanged");
+    assertEquals(1, stores.builds().listByJob(jobId).size(), "exactly one build enqueued");
+    // The merge-gate-relevant proof: a pending/queued check reached the node at enqueue time.
+    node.verify(
+        1,
+        postRequestedFor(urlMatching("/_pulsar/ledger/.*/changes/42/events"))
+            .withRequestBody(containing("\"check\":\"build\""))
+            .withRequestBody(containing("\"conclusion\":\"pending\""))
+            .withRequestBody(containing("\"phase\":\"queued\"")));
+    // No terminal/in_progress post — nothing started yet.
+    node.verify(
+        0,
+        postRequestedFor(urlMatching("/_pulsar/.*"))
+            .withRequestBody(containing("\"conclusion\":\"success\"")));
   }
 
   // ── git fixture + http helpers ──────────────────────────────────────────────
