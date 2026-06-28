@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.annotations.Nullable;
+import io.adaptiq.titan.build.BuildEnqueuedEvent;
 import io.adaptiq.titan.build.BuildEnqueuer;
 import io.adaptiq.titan.scm.github.GithubAppWebhookSecretComparator;
 import io.adaptiq.titan.scm.pulsar.PulsarChangeDiscovery;
@@ -16,6 +17,7 @@ import io.adaptiq.titan.store.TitanStores;
 import io.adaptiq.titan.store.rows.JobRow;
 import jakarta.annotation.security.PermitAll;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Event;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -34,6 +36,7 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.logging.Level;
@@ -97,6 +100,14 @@ public class PulsarWebhookApi {
   private final Function<PulsarChangeDiscovery, Optional<PulsarTrigger>> triggerResolver;
   private final EventDedupeStore dedupe;
 
+  /**
+   * Enqueue-time check sink (issue #1). In production this is {@code
+   * Event<BuildEnqueuedEvent>::fire} — CDI fans it out to {@code
+   * PulsarCheckReporter#onBuildEnqueued}, which posts the immediate PENDING check. A no-op in
+   * legacy test wiring.
+   */
+  private final Consumer<BuildEnqueuedEvent> enqueuedSink;
+
   /** Bounded insertion-ordered map → simple LRU for delivery-id replay suppression. */
   private final Map<String, Instant> deliveryLru =
       Collections.synchronizedMap(
@@ -112,6 +123,7 @@ public class PulsarWebhookApi {
   public PulsarWebhookApi(
       TitanStores stores,
       EventDedupeStore dedupe,
+      Event<BuildEnqueuedEvent> enqueuedEvent,
       @ConfigProperty(name = "pulsar.webhook-secret") Optional<String> webhookSecret,
       @ConfigProperty(
               name = "pulsar.node-base-url",
@@ -121,19 +133,50 @@ public class PulsarWebhookApi {
         stores,
         () -> webhookSecret.filter(s -> !s.isBlank()),
         dedupe,
-        new PulsarEventSource(nodeBaseUrl)::triggerFor);
+        new PulsarEventSource(nodeBaseUrl)::triggerFor,
+        enqueuedEvent::fire);
   }
 
-  /** Test-only constructor — explicit secret source + dedupe + trigger resolver, no network. */
+  /**
+   * Manual-wiring constructor for cross-package integration tests that cannot reach the
+   * package-private seam constructors (e.g. {@code PulsarFullLoopIT} in {@code scm.pulsar}). Builds
+   * the real {@link PulsarEventSource} for {@code nodeBaseUrl} with a no-op enqueue-time sink — the
+   * enqueue-time check is exercised by the seam constructor below + the reporter's own tests.
+   */
+  public PulsarWebhookApi(
+      @NonNull TitanStores stores,
+      @NonNull EventDedupeStore dedupe,
+      @NonNull Optional<String> webhookSecret,
+      @NonNull String nodeBaseUrl) {
+    this(
+        stores,
+        () -> webhookSecret.filter(s -> !s.isBlank()),
+        dedupe,
+        new PulsarEventSource(nodeBaseUrl)::triggerFor,
+        e -> {});
+  }
+
+  /** Test-only constructor — no enqueue-time check sink (legacy enqueue-path tests). */
   PulsarWebhookApi(
       @NonNull TitanStores stores,
       @NonNull Supplier<Optional<String>> webhookSecretSource,
       @NonNull EventDedupeStore dedupe,
       @NonNull Function<PulsarChangeDiscovery, Optional<PulsarTrigger>> triggerResolver) {
+    this(stores, webhookSecretSource, dedupe, triggerResolver, e -> {});
+  }
+
+  /** Test-only constructor — explicit enqueue-time check sink (issue #1 wiring), no network. */
+  PulsarWebhookApi(
+      @NonNull TitanStores stores,
+      @NonNull Supplier<Optional<String>> webhookSecretSource,
+      @NonNull EventDedupeStore dedupe,
+      @NonNull Function<PulsarChangeDiscovery, Optional<PulsarTrigger>> triggerResolver,
+      @NonNull Consumer<BuildEnqueuedEvent> enqueuedSink) {
     this.stores = stores;
     this.webhookSecretSource = webhookSecretSource;
     this.dedupe = dedupe;
     this.triggerResolver = triggerResolver;
+    this.enqueuedSink = enqueuedSink;
   }
 
   // ── POST /api/v1/pulsar/events ───────────────────────────────────────────────
@@ -230,14 +273,15 @@ public class PulsarWebhookApi {
         return Response.noContent().build();
       }
 
+      String triggerMeta = "{\"commitSha\":\"" + revision + "\",\"changeId\":\"" + changeId + "\"}";
       long buildId =
           BuildEnqueuer.enqueue(
-              stores,
-              job.get().id,
-              "pulsar:change:" + changeId,
-              "pulsar",
-              "{\"commitSha\":\"" + revision + "\",\"changeId\":\"" + changeId + "\"}",
-              null);
+              stores, job.get().id, "pulsar:change:" + changeId, "pulsar", triggerMeta, null);
+      // Issue #1 (GitHub-Actions parity): announce the build the instant it is enqueued, BEFORE any
+      // worker pickup, so PulsarCheckReporter posts the immediate PENDING check. Best-effort — a
+      // dispatch failure must never fail the build insert nor flip the 202 (which would orphan the
+      // committed build behind a released dedupe claim → double build on redelivery).
+      fireEnqueued(buildId, job.get().id, triggerMeta);
       LOGGER.log(
           Level.INFO,
           "[pulsar] enqueued build {0} for job {1} (change {2}@{3} rev {4})",
@@ -251,6 +295,26 @@ public class PulsarWebhookApi {
       // node sees a non-2xx and re-delivers.
       dedupe.release(ScmProvider.PULSAR, change.dispatchEventId());
       throw e;
+    }
+  }
+
+  /**
+   * Fire {@link BuildEnqueuedEvent} for a freshly-enqueued Pulsar build (issue #1). The build
+   * number is resolved from the just-inserted row (best-effort, {@code 0} if unreadable — the
+   * reporter does not key on it). Wrapped so a sink/CDI failure is logged and swallowed: the build
+   * is already committed and the webhook has already decided on a {@code 202}; an enqueue-time
+   * check is a convenience, never a correctness gate.
+   */
+  private void fireEnqueued(long buildId, long jobId, @NonNull String triggerMeta) {
+    try {
+      int buildNumber = stores.builds().findById(buildId).map(b -> b.buildNumber).orElse(0);
+      enqueuedSink.accept(
+          new BuildEnqueuedEvent(buildId, jobId, "pulsar", triggerMeta, buildNumber));
+    } catch (RuntimeException e) {
+      LOGGER.log(
+          Level.WARNING,
+          "[pulsar] enqueue-time check report failed for build {0} (build already enqueued): {1}",
+          new Object[] {buildId, e.getMessage()});
     }
   }
 
