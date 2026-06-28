@@ -30,13 +30,13 @@ import org.junit.jupiter.api.Test;
  * node does ({@code success → allowed}, anything else → refused).
  *
  * <p>This is the integration-level proof that the chosen {@code phase} extra-field mechanism is
- * node-accepted (the stub deserializes the event tolerantly, keeping the sibling field) and that the
- * gate flips ONLY on the terminal success event — the two acceptance guarantees that the unit test's
- * pure wire assertions cannot demonstrate end-to-end.
+ * node-accepted (the stub deserializes the event tolerantly, keeping the sibling field) and that
+ * the gate flips ONLY on the terminal success event — the two acceptance guarantees that the unit
+ * test's pure wire assertions cannot demonstrate end-to-end.
  */
 class PulsarCheckLifecycleIT {
 
-  private static final String REPO = "acme/web";
+  private static final String REPO = "sample";
   private static final String CHANGE_ID = "42";
   private static final String EVENTS_URL =
       "/_pulsar/ledger/" + REPO + "/changes/" + CHANGE_ID + "/events";
@@ -48,6 +48,7 @@ class PulsarCheckLifecycleIT {
 
   /** The stub node's recorded ledger + folded gate verdict. */
   private final List<JsonNode> ledger = new ArrayList<>();
+
   private volatile String gateVerdict = "refused_incomplete";
 
   @BeforeEach

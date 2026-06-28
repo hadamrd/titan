@@ -202,16 +202,18 @@ public final class PulsarClient {
    * Lifecycle-aware variant of {@link #postCheck(String, String, String, CheckConclusion, String)}
    * that additionally carries a {@code phase} discriminator so a {@code QUEUED} update is
    * distinguishable on the wire from a {@code RUNNING} one even though BOTH keep {@code
-   * conclusion:"pending"} (issue #5 — GitHub-checks parity: GitHub distinguishes {@code queued} from
-   * {@code in_progress} under one pending state; Pulsar had collapsed both to a byte-identical
-   * {@code pending} event so a reviewer could not tell enqueued-but-not-started from actually-running).
+   * conclusion:"pending"} (issue #5 — GitHub-checks parity: GitHub distinguishes {@code queued}
+   * from {@code in_progress} under one pending state; Pulsar had collapsed both to a byte-identical
+   * {@code pending} event so a reviewer could not tell enqueued-but-not-started from
+   * actually-running).
    *
    * <p>The node contract for {@code conclusion} is unchanged and remains {@code
    * pending|success|failure} only — the queued/in_progress distinction therefore CANNOT ride on
    * {@code conclusion} (any other token → 400). It is carried as a SEPARATE optional {@code phase}
    * field within the same {@code kind:ci} event shape:
    *
-   * <pre>{@code {"kind":"ci","check":<name>,"conclusion":"pending","phase":<queued|in_progress>}}</pre>
+   * <pre>{@code {"kind":"ci","check":<name>,"conclusion":"pending","phase":<queued|in_progress>}}
+   * </pre>
    *
    * <p><b>Node acceptance (investigated per issue #5):</b> the node's {@code append_event} handler
    * deserializes the CI event tolerantly (it keys the merge gate off {@code conclusion} alone and
@@ -372,8 +374,8 @@ public final class PulsarClient {
   }
 
   /**
-   * The in-flight lifecycle marker a {@link #postCheck} carries in the {@code phase} field while the
-   * build is non-terminal, mirroring GitHub's {@code queued} vs {@code in_progress} distinction
+   * The in-flight lifecycle marker a {@link #postCheck} carries in the {@code phase} field while
+   * the build is non-terminal, mirroring GitHub's {@code queued} vs {@code in_progress} distinction
    * under a single PENDING state (issue #5). It is orthogonal to {@link CheckConclusion}: both
    * phases ride a {@code conclusion:"pending"} event, so neither clears the merge gate — only the
    * terminal {@link CheckConclusion#SUCCESS} event (which carries NO phase) does. A typed enum (not
@@ -383,7 +385,10 @@ public final class PulsarClient {
   public enum Phase {
     /** Build enqueued but not yet picked up by a worker (GitHub parity: {@code queued}). */
     QUEUED("queued"),
-    /** Build actually started — worker pickup / {@code RUNNING} (GitHub parity: {@code in_progress}). */
+    /**
+     * Build actually started — worker pickup / {@code RUNNING} (GitHub parity: {@code
+     * in_progress}).
+     */
     IN_PROGRESS("in_progress");
 
     private final String wire;

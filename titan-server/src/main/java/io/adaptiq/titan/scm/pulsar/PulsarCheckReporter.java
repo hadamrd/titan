@@ -67,9 +67,9 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * </ul>
  *
  * The {@code phase} field is orthogonal to {@code conclusion}: both phases stay {@code pending}, so
- * neither clears the merge gate — only the terminal {@code success} event does. A {@code
- * QUEUED → RUNNING → SUCCESS} build therefore posts three ordered, distinct lifecycle events, only
- * the last clearing the gate.
+ * neither clears the merge gate — only the terminal {@code success} event does. A {@code QUEUED →
+ * RUNNING → SUCCESS} build therefore posts three ordered, distinct lifecycle events, only the last
+ * clearing the gate.
  *
  * <h2>Error handling</h2>
  *
@@ -174,7 +174,11 @@ public class PulsarCheckReporter {
     String detailsUrl = publicBaseUrl + "/builds/" + event.buildId();
 
     postWithRetry(
-        repo, changeId, conclusion.get(), mapPhase(event.newStatus()).orElse(null), detailsUrl,
+        repo,
+        changeId,
+        conclusion.get(),
+        mapPhase(event.newStatus()).orElse(null),
+        detailsUrl,
         event.buildId());
   }
 

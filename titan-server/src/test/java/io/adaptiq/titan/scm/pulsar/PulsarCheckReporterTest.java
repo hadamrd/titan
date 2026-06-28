@@ -177,7 +177,8 @@ class PulsarCheckReporterTest {
     String third = posts.get(2).getBodyAsString();
 
     // Order: queued (pending) → in_progress (pending) → success — only the third clears the gate.
-    assertTrue(first.contains("\"phase\":\"queued\"") && first.contains("\"conclusion\":\"pending\""));
+    assertTrue(
+        first.contains("\"phase\":\"queued\"") && first.contains("\"conclusion\":\"pending\""));
     assertTrue(
         second.contains("\"phase\":\"in_progress\"")
             && second.contains("\"conclusion\":\"pending\""));
@@ -372,8 +373,7 @@ class PulsarCheckReporterTest {
 
   @Test
   void mapPhase_onlyNonTerminalStatesCarryAPhase() {
-    assertEquals(
-        Optional.of(PulsarClient.Phase.QUEUED), PulsarCheckReporter.mapPhase("QUEUED"));
+    assertEquals(Optional.of(PulsarClient.Phase.QUEUED), PulsarCheckReporter.mapPhase("QUEUED"));
     assertEquals(
         Optional.of(PulsarClient.Phase.IN_PROGRESS), PulsarCheckReporter.mapPhase("RUNNING"));
     // Terminal verdicts carry no in-flight phase.
