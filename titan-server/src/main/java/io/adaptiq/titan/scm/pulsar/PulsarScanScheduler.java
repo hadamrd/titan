@@ -4,6 +4,7 @@ import edu.umd.cs.findbugs.annotations.NonNull;
 import io.adaptiq.titan.audit.AuditAction;
 import io.adaptiq.titan.audit.AuditService;
 import io.adaptiq.titan.audit.AuditTargetType;
+import io.adaptiq.titan.build.BuildEnqueuedEvent;
 import io.adaptiq.titan.build.BuildEnqueuer;
 import io.adaptiq.titan.scm.pulsar.PulsarEventSource.PulsarTrigger;
 import io.adaptiq.titan.scm.reconcile.EventDedupeStore;
@@ -14,10 +15,12 @@ import io.adaptiq.titan.store.rows.JobRow;
 import io.adaptiq.titan.store.rows.PulsarSourceRow;
 import io.quarkus.scheduler.Scheduled;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Event;
 import jakarta.inject.Inject;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -68,6 +71,13 @@ public class PulsarScanScheduler {
   private final BuildDispatch dispatch;
   private final ReconcileAudit audit;
 
+  /**
+   * Enqueue-time check sink (issue #1). In production this is {@code Event<BuildEnqueuedEvent>::fire}
+   * — CDI fans it out to {@code PulsarCheckReporter#onBuildEnqueued}, which posts the immediate
+   * PENDING check for a poll-discovered change. A no-op in legacy test wiring.
+   */
+  private final Consumer<BuildEnqueuedEvent> enqueuedSink;
+
   private final AtomicBoolean running = new AtomicBoolean(false);
 
   /** Production constructor — real node clients, real {@link PulsarEventSource}, real enqueue. */
@@ -76,6 +86,7 @@ public class PulsarScanScheduler {
       TitanStores stores,
       EventDedupeStore dedupe,
       AuditService auditService,
+      Event<BuildEnqueuedEvent> enqueuedEvent,
       @ConfigProperty(name = "pulsar.scan.enabled", defaultValue = "false") boolean enabled) {
     this(
         stores,
@@ -84,12 +95,13 @@ public class PulsarScanScheduler {
         new PulsarClientFactory()::forNode,
         nodeUrl -> new PulsarEventSource(nodeUrl)::triggerFor,
         BuildEnqueuer::enqueue,
-        reconcileAuditSink(auditService));
+        reconcileAuditSink(auditService),
+        enqueuedEvent::fire);
   }
 
   /**
-   * Test constructor — explicit client factory, trigger resolver, dispatch and audit seam (no
-   * network).
+   * Test constructor — no enqueue-time check sink (legacy dispatch/dedupe tests). Delegates to the
+   * full constructor with a no-op sink.
    */
   PulsarScanScheduler(
       @NonNull TitanStores stores,
@@ -101,6 +113,31 @@ public class PulsarScanScheduler {
               triggerResolverForNode,
       @NonNull BuildDispatch dispatch,
       @NonNull ReconcileAudit audit) {
+    this(
+        stores,
+        dedupe,
+        enabled,
+        clientForNode,
+        triggerResolverForNode,
+        dispatch,
+        audit,
+        e -> {});
+  }
+
+  /**
+   * Test constructor — explicit enqueue-time check sink (issue #1 wiring), no network.
+   */
+  PulsarScanScheduler(
+      @NonNull TitanStores stores,
+      @NonNull EventDedupeStore dedupe,
+      boolean enabled,
+      @NonNull Function<String, PulsarClient> clientForNode,
+      @NonNull
+          Function<String, Function<PulsarChangeDiscovery, Optional<PulsarTrigger>>>
+              triggerResolverForNode,
+      @NonNull BuildDispatch dispatch,
+      @NonNull ReconcileAudit audit,
+      @NonNull Consumer<BuildEnqueuedEvent> enqueuedSink) {
     this.stores = Objects.requireNonNull(stores, "stores");
     this.dedupe = Objects.requireNonNull(dedupe, "dedupe");
     this.enabled = enabled;
@@ -109,6 +146,7 @@ public class PulsarScanScheduler {
         Objects.requireNonNull(triggerResolverForNode, "triggerResolverForNode");
     this.dispatch = Objects.requireNonNull(dispatch, "dispatch");
     this.audit = Objects.requireNonNull(audit, "audit");
+    this.enqueuedSink = Objects.requireNonNull(enqueuedSink, "enqueuedSink");
   }
 
   /**
@@ -228,18 +266,25 @@ public class PulsarScanScheduler {
       if (trigger.isEmpty()) {
         return; // honest no-op: a change with no pipeline file dispatches nothing — keep the claim
       }
+      String triggerMeta =
+          "{\"commitSha\":\""
+              + change.revision()
+              + "\",\"changeId\":\""
+              + change.changeId()
+              + "\"}";
       long buildId =
           dispatch.enqueue(
               stores,
               job.get().id,
               "pulsar:change:" + change.changeId(),
               "pulsar",
-              "{\"commitSha\":\""
-                  + change.revision()
-                  + "\",\"changeId\":\""
-                  + change.changeId()
-                  + "\"}",
+              triggerMeta,
               null);
+      // Issue #1 (GitHub-Actions parity): announce the build the instant it is enqueued, BEFORE any
+      // worker pickup, so PulsarCheckReporter posts the immediate PENDING check — the IDENTICAL
+      // repo/changeId resolution the webhook uses (carried in triggerMeta). Best-effort: a sink
+      // failure must never disturb the scanner's per-discovery isolation.
+      fireEnqueued(buildId, job.get().id, triggerMeta);
       LOGGER.log(
           Level.INFO,
           "[pulsar-scan] enqueued build {0} for job {1} (change {2}@{3} rev {4})",
@@ -265,6 +310,27 @@ public class PulsarScanScheduler {
           "[pulsar-scan] dispatch failed for change {0}@{1} rev {2} — released dedupe claim,"
               + " next tick retries: {3}",
           new Object[] {change.changeId(), change.repo(), change.revision(), e.getMessage()});
+    }
+  }
+
+  /**
+   * Fire {@link BuildEnqueuedEvent} for a freshly-enqueued poll-discovered build (issue #1). Build
+   * number is resolved best-effort from the inserted row ({@code 0} if unreadable — the reporter
+   * does not key on it). Wrapped so a sink/CDI failure is logged and swallowed and never reaches the
+   * caller's {@code catch}, which would otherwise RELEASE the dedupe claim of an
+   * already-enqueued build and re-dispatch it on the next tick (double build).
+   */
+  private void fireEnqueued(long buildId, long jobId, @NonNull String triggerMeta) {
+    try {
+      int buildNumber = stores.builds().findById(buildId).map(b -> b.buildNumber).orElse(0);
+      enqueuedSink.accept(
+          new BuildEnqueuedEvent(buildId, jobId, "pulsar", triggerMeta, buildNumber));
+    } catch (RuntimeException e) {
+      LOGGER.log(
+          Level.WARNING,
+          "[pulsar-scan] enqueue-time check report failed for build {0} (build already enqueued):"
+              + " {1}",
+          new Object[] {buildId, e.getMessage()});
     }
   }
 
