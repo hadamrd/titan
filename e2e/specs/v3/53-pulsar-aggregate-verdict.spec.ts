@@ -256,8 +256,8 @@ test.describe('@golden v3 pulsar-aggregate-verdict #6', () => {
     // Aggregate: the whole-build verdict collapses to EXACTLY ONE `build` check.
     const checks = aggregateChecksFor(status)
     expect(checks.length, 'exactly one aggregate Pulsar check (not one per stage)').toBe(1)
-    expect(checks[0].name, 'the aggregate check name is `build`').toBe(CHECK_NAME)
-    expect(checks[0].conclusion, 'all-pass → aggregate build check = success').toBe('success')
+    expect(checks[0]!.name, 'the aggregate check name is `build`').toBe(CHECK_NAME)
+    expect(checks[0]!.conclusion, 'all-pass → aggregate build check = success').toBe('success')
   })
 
   test('sad: test stage fails → build SKIPPED, ONE aggregate build check = failure', async () => {
@@ -283,8 +283,8 @@ test.describe('@golden v3 pulsar-aggregate-verdict #6', () => {
     // → this assertion fails (and the build-stage SKIPPED assertion above fails too).
     const checks = aggregateChecksFor(status)
     expect(checks.length, 'exactly one aggregate Pulsar check (not one per stage)').toBe(1)
-    expect(checks[0].name, 'the aggregate check name is `build`').toBe(CHECK_NAME)
-    expect(checks[0].conclusion, 'any stage failing → aggregate build check = failure').toBe('failure')
+    expect(checks[0]!.name, 'the aggregate check name is `build`').toBe(CHECK_NAME)
+    expect(checks[0]!.conclusion, 'any stage failing → aggregate build check = failure').toBe('failure')
     // Prove the check is the AGGREGATE, not the per-stage `build` status: the
     // `build` stage is SKIPPED (a per-stage reporter would emit pending/skipped or
     // no terminal conclusion) but the aggregate check is a hard `failure`.
