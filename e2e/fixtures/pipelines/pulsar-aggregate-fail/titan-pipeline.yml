@@ -1,0 +1,41 @@
+# pulsar-aggregate-fail — customer-shaped multi-stage Pulsar pipeline, SAD/adversarial leg (#6).
+#
+# Same lint -> test -> build DAG as the happy leg, but the middle `test` stage
+# fails (`exit 1`). Under the default `failurePolicy: blockOnFailure` the failure
+# MUST propagate: every node downstream of the failed `test` is SKIPPED (the
+# `build` stage never runs), and the whole-build verdict the PulsarCheckReporter
+# consumes is FAILED. The single aggregate `build` CI check therefore resolves to
+# exactly one `failure` conclusion, keeping the Pulsar merge gate refused.
+#
+# WHY THIS IS A RED TEST (see 53-pulsar-aggregate-verdict.spec.ts)
+#   The aggregate `build` check is derived from the OVERALL build verdict, not
+#   from the `build` stage's own status. Here the `build` STAGE is SKIPPED yet the
+#   `build` CHECK is `failure`. If stage-failure propagation regressed — a mid-DAG
+#   failure no longer flipping the aggregate (e.g. `test` failing but `build`
+#   still running green, or the verdict rolling up SUCCESS) — the overall verdict
+#   would become SUCCESS, the derived check would flip to `success`, and the spec
+#   assertion `conclusion === 'failure'` would FAIL. That is the regression this
+#   fixture exists to catch.
+#
+# SHAPE
+#   lint (ok) -> test (exit 1, FAILS) -> build (SKIPPED)  => overall FAILED => check build=failure
+agent: linux
+failurePolicy: blockOnFailure
+
+stages:
+  - stage: lint
+    steps:
+      - sh: "echo '[pulsar-sample] lint clean'"
+
+  - stage: test
+    dependsOn: [lint]
+    steps:
+      # Deliberate red: a non-zero exit -> terminal FAILED build. blockOnFailure
+      # then SKIPs the downstream `build` stage, and the aggregate `build` check
+      # the PulsarCheckReporter posts maps to `failure`.
+      - sh: "echo '[pulsar-sample] running tests' && exit 1"
+
+  - stage: build
+    dependsOn: [test]
+    steps:
+      - sh: "echo 'should never run — the failed test stage short-circuits this'"

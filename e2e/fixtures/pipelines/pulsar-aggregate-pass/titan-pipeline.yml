@@ -1,0 +1,31 @@
+# pulsar-aggregate-pass — customer-shaped multi-stage Pulsar pipeline, HAPPY leg (#6).
+#
+# Models a Pulsar `sample`-style repo whose merge gate blocks on a single
+# aggregate `build` CI check (Pulsar `required_checks: ["build"]`). The pipeline
+# is a real lint -> test -> build DAG expressed via stage `dependsOn` (NOT three
+# independent stages), exactly as a customer change would run.
+#
+# Driven by e2e/specs/v3/53-pulsar-aggregate-verdict.spec.ts, which asserts that
+# when ALL three stages pass the whole-build verdict the PulsarCheckReporter
+# consumes is SUCCESS, and therefore the single aggregate `build` check posted to
+# the Pulsar node resolves to exactly one `success` conclusion — never one check
+# per stage.
+#
+# SHAPE
+#   lint (ok) -> test (ok) -> build (ok)   => overall SUCCESS => check build=success
+agent: linux
+
+stages:
+  - stage: lint
+    steps:
+      - sh: "echo '[pulsar-sample] lint clean'"
+
+  - stage: test
+    dependsOn: [lint]
+    steps:
+      - sh: "echo '[pulsar-sample] tests green'"
+
+  - stage: build
+    dependsOn: [test]
+    steps:
+      - sh: "echo '[pulsar-sample] artifact built'"
