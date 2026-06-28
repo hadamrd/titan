@@ -63,13 +63,13 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * duplicates within {@link #DELIVERY_TTL_MIN} are fast-skipped, so a redelivery never
  * double-builds.
  *
- * <p><strong>Cross-path dedupe (issue #4).</strong> The LRU only suppresses redeliveries to <em>this
- * process</em>. The authoritative cross-path gate is the shared, DB-backed {@link EventDedupeStore}
- * keyed by {@code <repo>:<changeId>:<revision>} — the SAME key the poll scanner ({@code
- * PulsarRepoScanner}) claims. Whichever path sees a change tip first wins the {@code markSeen}
- * claim; the other no-ops. So a change whose webhook arrives AND is later re-discovered by the
- * scanner (or vice-versa) builds EXACTLY ONCE. The claim is taken before the fallible clone and
- * released on failure, mirroring {@code PulsarScanScheduler.dispatchDiscovery}.
+ * <p><strong>Cross-path dedupe (issue #4).</strong> The LRU only suppresses redeliveries to
+ * <em>this process</em>. The authoritative cross-path gate is the shared, DB-backed {@link
+ * EventDedupeStore} keyed by {@code <repo>:<changeId>:<revision>} — the SAME key the poll scanner
+ * ({@code PulsarRepoScanner}) claims. Whichever path sees a change tip first wins the {@code
+ * markSeen} claim; the other no-ops. So a change whose webhook arrives AND is later re-discovered
+ * by the scanner (or vice-versa) builds EXACTLY ONCE. The claim is taken before the fallible clone
+ * and released on failure, mirroring {@code PulsarScanScheduler.dispatchDiscovery}.
  *
  * <p><strong>Job resolution.</strong> A change's {@code repo} maps to the Titan job whose {@code
  * full_name} equals that repo (the App-pattern linkage; UI install + a richer mapping land in
@@ -203,7 +203,8 @@ public class PulsarWebhookApi {
     }
 
     // Step 5: cross-path dedupe claim (issue #4). Claim the SHARED key <repo>:<changeId>:<revision>
-    // in the DB-backed EventDedupeStore — the same key the poll scanner claims — so a change tip seen
+    // in the DB-backed EventDedupeStore — the same key the poll scanner claims — so a change tip
+    // seen
     // by BOTH the webhook and the scanner builds EXACTLY ONCE. If the scanner already claimed it,
     // markSeen returns false and we no-op. Claimed BEFORE the fallible clone below; a failure
     // releases it (mirrors PulsarScanScheduler.dispatchDiscovery) so a later delivery/scan retries.
@@ -218,11 +219,14 @@ public class PulsarWebhookApi {
     }
 
     try {
-      // Step 6: normalize via the merged event source (clone tip + discover .titan/pipelines/*.yml).
+      // Step 6: normalize via the merged event source (clone tip + discover
+      // .titan/pipelines/*.yml).
       Optional<PulsarTrigger> trigger = triggerResolver.apply(change);
       if (trigger.isEmpty()) {
-        // Honest no-op: a change with no pipeline file dispatches nothing, never an error. The claim
-        // is KEPT (mirrors the scan path) so a redelivery of the same empty change is not re-cloned.
+        // Honest no-op: a change with no pipeline file dispatches nothing, never an error. The
+        // claim
+        // is KEPT (mirrors the scan path) so a redelivery of the same empty change is not
+        // re-cloned.
         return Response.noContent().build();
       }
 

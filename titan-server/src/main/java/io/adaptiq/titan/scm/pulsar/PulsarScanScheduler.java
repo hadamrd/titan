@@ -285,8 +285,8 @@ public class PulsarScanScheduler {
 
   /**
    * The audit seam — {@code AuditService.recordAs(SCM_WEBHOOK_RECOVERED, …)} in production, a probe
-   * in tests. Invoked exactly once per build the poll scanner recovers (the webhook for this tip was
-   * dropped), so tests can assert recovery is audited without standing up a SecurityIdentity.
+   * in tests. Invoked exactly once per build the poll scanner recovers (the webhook for this tip
+   * was dropped), so tests can assert recovery is audited without standing up a SecurityIdentity.
    */
   @FunctionalInterface
   interface ReconcileAudit {

@@ -302,7 +302,8 @@ class PulsarScanSchedulerTest {
     int count = scheduler.tick();
 
     assertEquals(0, count, "the scan must not re-discover a tip the webhook already claimed");
-    assertEquals(0, enqueued.get(), "webhook-then-scan at the same tip enqueues exactly one (zero here)");
+    assertEquals(
+        0, enqueued.get(), "webhook-then-scan at the same tip enqueues exactly one (zero here)");
   }
 
   // ── AUDIT (issue #4): a scan-recovered build emits SCM_WEBHOOK_RECOVERED ─────

@@ -250,13 +250,15 @@ class PulsarWebhookApiTest {
     assertEquals(202, resp.getStatus());
     assertEquals(1, stores.builds().listByJob(jobId).size());
 
-    // Simulate the poll scanner re-seeing the SAME change tip: it claims the shared key as RECONCILE
+    // Simulate the poll scanner re-seeing the SAME change tip: it claims the shared key as
+    // RECONCILE
     // exactly as PulsarRepoScanner does. The webhook already claimed it → markSeen returns false.
     String sharedKey = PulsarChangeDiscovery.dispatchEventId(REPO, CHANGE_ID, REVISION);
     boolean scanWouldDispatch =
         dedupe.markSeen(ScmProvider.PULSAR, sharedKey, EventDedupeStore.Source.RECONCILE);
 
-    assertFalse(scanWouldDispatch, "the scanner must NOT re-dispatch a tip the webhook already built");
+    assertFalse(
+        scanWouldDispatch, "the scanner must NOT re-dispatch a tip the webhook already built");
     assertEquals(
         1,
         stores.builds().listByJob(jobId).size(),
@@ -284,7 +286,8 @@ class PulsarWebhookApiTest {
   }
 
   // ── 12. CROSS-PATH adversarial: dispatch failure RELEASES the shared claim ───
-  // The claim is taken BEFORE the fallible clone; if the clone throws, the claim must be released so
+  // The claim is taken BEFORE the fallible clone; if the clone throws, the claim must be released
+  // so
   // a later scan/delivery can retry — otherwise the change is permanently dropped.
 
   @Test
