@@ -14,12 +14,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.github.tomakehurst.wiremock.stubbing.Scenario;
+import com.github.tomakehurst.wiremock.verification.LoggedRequest;
 import io.adaptiq.titan.api.FakeTitanStores;
 import io.adaptiq.titan.build.BuildStateChangedEvent;
 import io.adaptiq.titan.scm.pulsar.PulsarClient.CheckConclusion;
 import io.adaptiq.titan.store.TitanStores;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -110,15 +112,126 @@ class PulsarCheckReporterTest {
   }
 
   @Test
-  void runningBuild_postsPendingCheck() {
+  void runningBuild_postsInProgressPhase_pendingConclusion() {
     wiremock.stubFor(post(urlEqualTo(EVENTS_URL)).willReturn(aResponse().withStatus(201)));
 
     reporter.report(event("RUNNING"));
 
+    // issue #5: RUNNING carries phase=in_progress, conclusion stays pending (gate not cleared), and
+    // is distinguishable from QUEUED — the queued marker must be ABSENT.
     wiremock.verify(
         1,
         postRequestedFor(urlEqualTo(EVENTS_URL))
-            .withRequestBody(containing("\"conclusion\":\"pending\"")));
+            .withRequestBody(containing("\"conclusion\":\"pending\""))
+            .withRequestBody(containing("\"phase\":\"in_progress\"")));
+    wiremock.verify(
+        0,
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"phase\":\"queued\"")));
+  }
+
+  @Test
+  void queuedBuild_postsQueuedPhase_pendingConclusion() {
+    wiremock.stubFor(post(urlEqualTo(EVENTS_URL)).willReturn(aResponse().withStatus(201)));
+
+    reporter.report(event("QUEUED"));
+
+    // issue #5: QUEUED carries phase=queued, conclusion stays pending, and is distinguishable from
+    // RUNNING — the in_progress marker must be ABSENT.
+    wiremock.verify(
+        1,
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"conclusion\":\"pending\""))
+            .withRequestBody(containing("\"phase\":\"queued\"")));
+    wiremock.verify(
+        0,
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"phase\":\"in_progress\"")));
+  }
+
+  @Test
+  void successBuild_carriesNoPhase_terminalVerdictHasNoInFlightPhase() {
+    wiremock.stubFor(post(urlEqualTo(EVENTS_URL)).willReturn(aResponse().withStatus(201)));
+
+    reporter.report(event("SUCCESS"));
+
+    // A finished build has no in-flight phase: the success event must NOT carry a phase field, so
+    // the merge-gate-clearing event is the bare {kind,check,conclusion:success} shape.
+    wiremock.verify(
+        0, postRequestedFor(urlEqualTo(EVENTS_URL)).withRequestBody(containing("\"phase\"")));
+  }
+
+  @Test
+  void queuedRunningSuccess_postsThreeOrderedLifecycleUpdates_onlyLastClearsGate() {
+    wiremock.stubFor(post(urlEqualTo(EVENTS_URL)).willReturn(aResponse().withStatus(201)));
+
+    // One reporter drives the real lifecycle: enqueue → worker pickup → green.
+    reporter.report(event("QUEUED"));
+    reporter.report(event("RUNNING"));
+    reporter.report(event("SUCCESS"));
+
+    List<LoggedRequest> posts = wiremock.findAll(postRequestedFor(urlEqualTo(EVENTS_URL)));
+    assertEquals(3, posts.size(), "expected three ordered lifecycle POSTs");
+
+    String first = posts.get(0).getBodyAsString();
+    String second = posts.get(1).getBodyAsString();
+    String third = posts.get(2).getBodyAsString();
+
+    // Order: queued (pending) → in_progress (pending) → success — only the third clears the gate.
+    assertTrue(
+        first.contains("\"phase\":\"queued\"") && first.contains("\"conclusion\":\"pending\""));
+    assertTrue(
+        second.contains("\"phase\":\"in_progress\"")
+            && second.contains("\"conclusion\":\"pending\""));
+    assertTrue(third.contains("\"conclusion\":\"success\""), "terminal event must be success");
+    assertFalse(third.contains("\"phase\""), "terminal success must carry no phase");
+    assertFalse(first.contains("\"conclusion\":\"success\""));
+    assertFalse(second.contains("\"conclusion\":\"success\""));
+  }
+
+  @Test
+  void inProgressEventRejectedWith400_buildNotFailed_terminalSuccessStillPostedIndependently() {
+    // The node rejects the in_progress phase event with a 400 (e.g. it refuses the extra field).
+    // This proves graceful degradation: the failure is swallowed (4xx not retried, build never
+    // fails) AND the later terminal success event is posted on its own transition regardless.
+    wiremock.stubFor(
+        post(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"phase\":\"in_progress\""))
+            .willReturn(aResponse().withStatus(400)));
+    wiremock.stubFor(
+        post(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"conclusion\":\"success\""))
+            .willReturn(aResponse().withStatus(201)));
+
+    assertDoesNotThrow(() -> reporter.report(event("RUNNING")));
+    assertDoesNotThrow(() -> reporter.report(event("SUCCESS")));
+
+    // in_progress attempted exactly once (400 is not retried), success still landed.
+    wiremock.verify(
+        1,
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"phase\":\"in_progress\"")));
+    wiremock.verify(
+        1,
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"conclusion\":\"success\"")));
+  }
+
+  @Test
+  void queuedOnlyBuildThatNeverStarts_postsExactlyOneQueuedEvent_neverClearsGate() {
+    wiremock.stubFor(post(urlEqualTo(EVENTS_URL)).willReturn(aResponse().withStatus(201)));
+
+    reporter.report(event("QUEUED"));
+
+    wiremock.verify(
+        1,
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"phase\":\"queued\"")));
+    // Never any gate-clearing success while it sits in the queue.
+    wiremock.verify(
+        0,
+        postRequestedFor(urlEqualTo(EVENTS_URL))
+            .withRequestBody(containing("\"conclusion\":\"success\"")));
   }
 
   @Test
@@ -257,6 +370,18 @@ class PulsarCheckReporterTest {
     assertEquals(
         Optional.of(CheckConclusion.PENDING), PulsarCheckReporter.mapConclusion("RUNNING"));
     assertTrue(PulsarCheckReporter.mapConclusion("SLEEPING").isEmpty());
+  }
+
+  @Test
+  void mapPhase_onlyNonTerminalStatesCarryAPhase() {
+    assertEquals(Optional.of(PulsarClient.Phase.QUEUED), PulsarCheckReporter.mapPhase("QUEUED"));
+    assertEquals(
+        Optional.of(PulsarClient.Phase.IN_PROGRESS), PulsarCheckReporter.mapPhase("RUNNING"));
+    // Terminal verdicts carry no in-flight phase.
+    assertTrue(PulsarCheckReporter.mapPhase("SUCCESS").isEmpty());
+    assertTrue(PulsarCheckReporter.mapPhase("FAILED").isEmpty());
+    assertTrue(PulsarCheckReporter.mapPhase("UNSTABLE").isEmpty());
+    assertTrue(PulsarCheckReporter.mapPhase("SLEEPING").isEmpty());
   }
 
   @Test

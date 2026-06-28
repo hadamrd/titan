@@ -51,6 +51,26 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  *       green, so the gate stays refused)
  * </ul>
  *
+ * <h2>Lifecycle phase (issue #5 — GitHub-checks parity)</h2>
+ *
+ * Both {@code QUEUED} and {@code RUNNING} map to {@code conclusion:"pending"}, so before #5 they
+ * produced byte-identical events and a reviewer could not tell enqueued-but-not-started from
+ * actually-running. GitHub distinguishes {@code queued} from {@code in_progress} under one PENDING
+ * state; this reporter restores parity by also emitting a {@code phase} field:
+ *
+ * <ul>
+ *   <li>{@code QUEUED} → {@link PulsarClient.Phase#QUEUED} ({@code "queued"})
+ *   <li>{@code RUNNING} → {@link PulsarClient.Phase#IN_PROGRESS} ({@code "in_progress"}) — fired at
+ *       the real worker-pickup transition, not at enqueue
+ *   <li>terminal verdicts (SUCCESS/FAILURE/UNSTABLE) → NO phase (a finished build has no in-flight
+ *       phase)
+ * </ul>
+ *
+ * The {@code phase} field is orthogonal to {@code conclusion}: both phases stay {@code pending}, so
+ * neither clears the merge gate — only the terminal {@code success} event does. A {@code QUEUED →
+ * RUNNING → SUCCESS} build therefore posts three ordered, distinct lifecycle events, only the last
+ * clearing the gate.
+ *
  * <h2>Error handling</h2>
  *
  * A check post MUST NOT fail the build (the status write has already committed). Every {@link
@@ -153,7 +173,13 @@ public class PulsarCheckReporter {
     String repo = jobOpt.get().fullName;
     String detailsUrl = publicBaseUrl + "/builds/" + event.buildId();
 
-    postWithRetry(repo, changeId, conclusion.get(), detailsUrl, event.buildId());
+    postWithRetry(
+        repo,
+        changeId,
+        conclusion.get(),
+        mapPhase(event.newStatus()).orElse(null),
+        detailsUrl,
+        event.buildId());
   }
 
   // ── http ──────────────────────────────────────────────────────────────────
@@ -162,10 +188,11 @@ public class PulsarCheckReporter {
       @NonNull String repo,
       @NonNull String changeId,
       @NonNull CheckConclusion conclusion,
+      @Nullable PulsarClient.Phase phase,
       @NonNull String detailsUrl,
       long buildId) {
     try {
-      client.postCheck(repo, changeId, CHECK_NAME, conclusion, detailsUrl);
+      client.postCheck(repo, changeId, CHECK_NAME, conclusion, phase, detailsUrl);
       return;
     } catch (PulsarApiException e) {
       if (!isRetryable(e.status())) {
@@ -184,7 +211,7 @@ public class PulsarCheckReporter {
     // Retry path (transient failure only) — a second failure is logged + skipped, never a crash and
     // never a silent success: the verdict is simply not published this time.
     try {
-      client.postCheck(repo, changeId, CHECK_NAME, conclusion, detailsUrl);
+      client.postCheck(repo, changeId, CHECK_NAME, conclusion, phase, detailsUrl);
     } catch (PulsarApiException retry) {
       LOGGER.log(
           Level.WARNING,
@@ -207,6 +234,22 @@ public class PulsarCheckReporter {
       case "SUCCESS" -> Optional.of(CheckConclusion.SUCCESS);
       case "FAILED", "ABORTED", "CANCELLED" -> Optional.of(CheckConclusion.FAILURE);
       case "UNSTABLE" -> Optional.of(CheckConclusion.UNSTABLE);
+      default -> Optional.empty();
+    };
+  }
+
+  /**
+   * The in-flight lifecycle marker for a non-terminal build state, or empty for terminal verdicts
+   * (issue #5). {@code QUEUED → queued}, {@code RUNNING → in_progress} (the real start transition,
+   * mirroring GitHub {@code queued → in_progress}); SUCCESS/FAILED/etc. carry no phase. Both phases
+   * keep {@code conclusion:"pending"} so neither clears the gate — the distinction is purely the
+   * reviewer-visible signal that a worker has picked the build up.
+   */
+  @NonNull
+  static Optional<PulsarClient.Phase> mapPhase(@NonNull String status) {
+    return switch (status) {
+      case "QUEUED" -> Optional.of(PulsarClient.Phase.QUEUED);
+      case "RUNNING" -> Optional.of(PulsarClient.Phase.IN_PROGRESS);
       default -> Optional.empty();
     };
   }
