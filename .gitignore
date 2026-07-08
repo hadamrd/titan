@@ -40,8 +40,11 @@ sprint-events.jsonl
 # Playwright outputs (e2e/)
 e2e/playwright-report/
 e2e/test-results/
-e2e/pnpm-lock.yaml
 e2e/node_modules/
+# The e2e harness is pnpm-driven (Taskfile uses `pnpm exec`); its
+# pnpm-lock.yaml IS committed (self-contained-build bar, same as titan-ui).
+# Keep npm artifacts from sneaking back in via a stray `npm install`.
+e2e/package-lock.json
 
 # IntelliJ IDEA project files
 *.iml
