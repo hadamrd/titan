@@ -296,8 +296,23 @@ public class JobBuildsApi {
 
   /**
    * Type-check one parameter value against its declaration. Mirrors the coercion rules the bake's
-   * ParameterResolver applies — duplicated at the HTTP boundary so a bad value yields 400 at
-   * trigger time instead of QUEUED-then-FAILED at bake time.
+   * {@link io.adaptiq.titan.flow.ParameterResolver} applies — duplicated at the HTTP boundary so a
+   * bad value yields 400 at trigger time instead of QUEUED-then-FAILED at bake time.
+   *
+   * <p>Issue #61 (spec 27) — this boundary check MUST accept everything the bake accepts, or the
+   * two validators drift and a value the bake would happily coerce (the params modal and the #778
+   * trigger contract both submit every value as a string — {@code VERBOSE: "true"}) is rejected
+   * with a spurious 400. The rules, verbatim from {@code ParameterResolver.coerce}:
+   *
+   * <ul>
+   *   <li>{@code boolean} — {@link Boolean}, or a string whose trimmed lowercase form is exactly
+   *       {@code "true"}/{@code "false"}.
+   *   <li>{@code number} — {@link Number}, or a string that parses as a double.
+   *   <li>{@code choice} — any scalar; its {@code String.valueOf} form must be a declared choice.
+   *   <li>{@code string} — any scalar ({@code String.valueOf} coercion never fails at bake).
+   *       Structured values (objects / arrays) are still rejected: the bake would stringify them
+   *       into JSON-ish noise, which is never what the caller meant.
+   * </ul>
    */
   private static void validateValue(ParameterModel decl, Object value) {
     if (value == null) {
@@ -306,33 +321,51 @@ public class JobBuildsApi {
       }
       return;
     }
+    if (value instanceof Map || value instanceof List) {
+      throw new ApiBadRequestException(
+          "parameter '"
+              + decl.getName()
+              + "' expects a scalar "
+              + decl.getType()
+              + " value, got a structured "
+              + value.getClass().getSimpleName());
+    }
     switch (decl.getType()) {
       case "boolean" -> {
-        if (!(value instanceof Boolean)) {
+        if (value instanceof Boolean) {
+          return;
+        }
+        String b = String.valueOf(value).trim().toLowerCase(java.util.Locale.ROOT);
+        if (!b.equals("true") && !b.equals("false")) {
           throw new ApiBadRequestException(
               "parameter '"
                   + decl.getName()
-                  + "' expects boolean, got "
-                  + value.getClass().getSimpleName());
+                  + "' expects boolean (true/false), got "
+                  + value.getClass().getSimpleName()
+                  + " '"
+                  + value
+                  + "'");
         }
       }
       case "number" -> {
-        if (!(value instanceof Number)) {
+        if (value instanceof Number) {
+          return;
+        }
+        try {
+          Double.parseDouble(String.valueOf(value).trim());
+        } catch (NumberFormatException e) {
           throw new ApiBadRequestException(
               "parameter '"
                   + decl.getName()
                   + "' expects number, got "
-                  + value.getClass().getSimpleName());
+                  + value.getClass().getSimpleName()
+                  + " '"
+                  + value
+                  + "'");
         }
       }
       case "choice" -> {
-        if (!(value instanceof String s)) {
-          throw new ApiBadRequestException(
-              "parameter '"
-                  + decl.getName()
-                  + "' expects string (choice), got "
-                  + value.getClass().getSimpleName());
-        }
+        String s = String.valueOf(value);
         if (!decl.getChoices().contains(s)) {
           throw new ApiBadRequestException(
               "parameter '"
@@ -344,13 +377,7 @@ public class JobBuildsApi {
         }
       }
       case "string" -> {
-        if (!(value instanceof String)) {
-          throw new ApiBadRequestException(
-              "parameter '"
-                  + decl.getName()
-                  + "' expects string, got "
-                  + value.getClass().getSimpleName());
-        }
+        // Any scalar coerces via String.valueOf at bake — nothing to reject here.
       }
       default -> {
         // Unknown declared type — be permissive; the bake will surface the issue.
