@@ -113,6 +113,13 @@ spec:
               value: {{ .Values.titanServer.oidc.issuerUrl | quote }}
             - name: QUARKUS_OIDC_TOKEN_ISSUER
               value: {{ .Values.titanServer.oidc.publicIssuerUrl | quote }}
+            # Browser-facing authority for GET /api/v1/system/ui-config (issue
+            # #38). Without it the endpoint falls back to TITAN_OIDC_ISSUER —
+            # the in-cluster service DNS above, which the browser cannot
+            # reach. publicIssuerUrl is already the browser-reachable issuer
+            # (it is what lands in the JWT `iss` claim), so reuse it.
+            - name: TITAN_UI_OIDC_AUTHORITY
+              value: {{ .Values.titanServer.oidc.publicIssuerUrl | quote }}
             - name: TITAN_OIDC_CLIENT_ID
               value: {{ .Values.titanServer.oidc.clientId | quote }}
             - name: TITAN_OIDC_AUDIENCE

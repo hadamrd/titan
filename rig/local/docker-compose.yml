@@ -92,6 +92,20 @@ services:
       QUARKUS_OIDC_TOKEN_ISSUER: "http://localhost:8081/realms/titan-dev"
       TITAN_OIDC_CLIENT_ID: "titan-server"
       TITAN_OIDC_AUDIENCE: "titan-server"
+      # Browser-facing OIDC bootstrap served by GET /api/v1/system/ui-config
+      # (issue #38). Without these the SPA is told to fetch OIDC metadata from
+      # the docker-internal keycloak:8080 (unreachable from the host, blocked
+      # by the UI's CSP connect-src) and to redirect back to the SERVER origin
+      # :18080 — while the realm seed allowlists exactly
+      # http://localhost:5180/* for the titan-ui client. Login dies on the
+      # first click.
+      #   • TITAN_UI_OIDC_AUTHORITY — the issuer URL the BROWSER reaches
+      #     (host-published keycloak port; matches QUARKUS_OIDC_TOKEN_ISSUER).
+      #   • TITAN_UI_PUBLIC_URL — the SPA origin; drives oidc.redirectUri /
+      #     postLogoutRedirectUri ONLY. TITAN_PUBLIC_URL below stays the
+      #     server origin for webhook/SCM-link consumers.
+      TITAN_UI_OIDC_AUTHORITY: "http://localhost:8081/realms/titan-dev"
+      TITAN_UI_PUBLIC_URL: "http://localhost:5180"
       # Required by %prod since #996 — no silent localhost fallback. The local
       # rig serves titan-server via the host port 18080 (see ports: below); the
       # public URL is what GitHub webhooks / SCM Check-Runs use as their base
