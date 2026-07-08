@@ -36,7 +36,12 @@
  *   9. HARD assert that some flow_node in the build carries the http response
  *      status code 200 (the worker step persists `{status: 200, ...}` in
  *      result_json when httpbin responds; we accept either explicit
- *      result_json scrape OR a log oracle containing "200").
+ *      result_json scrape OR a log oracle containing "200"). The log oracle
+ *      reads the REAL per-step log endpoint
+ *      `GET /api/v1/builds/{buildId}/logs?taskId={logTaskId}` (SSE; the
+ *      stream self-terminates once the build is terminal and logs are
+ *      drained — issue #66: an earlier revision hit a nonexistent
+ *      `/api/v1/logs/{taskId}` route).
  *  10. finally{}: delete credential. Job rows aren't deletable today; the
  *      per-run RUN_TAG suffix avoids fullName collisions across reruns.
  *
@@ -94,11 +99,14 @@ interface BuildDetail {
   status: string
 }
 
+// Field names mirror FlowNodeDto (titan-server api/dto/FlowNodeDto.java):
+// nodeType/displayName, NOT type/name (issue #66 — the old names made the
+// failure diagnostic print "[null,null]").
 interface FlowNode {
-  id: number
-  name?: string
-  type?: string
-  status?: string
+  nodeId: string
+  displayName?: string | null
+  nodeType?: string | null
+  status?: string | null
   resultJson?: string | null
   logTaskId?: string | null
 }
@@ -365,8 +373,13 @@ test.describe('v3 fixture-with-httpRequest @golden', () => {
       expect(nodeArray.length, 'no flow_nodes returned for build').toBeGreaterThan(0)
 
       // Oracle A: scrape any node's result_json for "status":200.
-      // Oracle B: scrape any node's step log (via logTaskId) for "200".
-      // Either is sufficient; we prefer A but fall back to B.
+      // Oracle B: scrape any node's step log for "200", via the REAL per-step
+      // log endpoint `GET /api/v1/builds/{buildId}/logs?taskId={logTaskId}`
+      // (BuildLogsSse — the same route the UI's streamBuildLogs uses). It is
+      // an SSE stream, but the build is already terminal here, so the server
+      // drains the rows and closes with a `done` event; a plain GET returns
+      // the full frame text. Either oracle is sufficient; we prefer A but
+      // fall back to B.
       let found200 = false
       for (const n of nodeArray) {
         if (n.resultJson && /"status"\s*:\s*200\b/.test(n.resultJson)) {
@@ -377,12 +390,17 @@ test.describe('v3 fixture-with-httpRequest @golden', () => {
       if (!found200) {
         for (const n of nodeArray) {
           if (!n.logTaskId) continue
-          const log = await apiGet<string>(
-            request,
-            bearer,
-            `/api/v1/logs/${n.logTaskId}?offset=0&limit=200000`,
+          const logResp = await request.get(
+            `${API_BASE}/api/v1/builds/${buildId}/logs?taskId=${encodeURIComponent(n.logTaskId)}`,
+            {
+              headers: {
+                Authorization: `Bearer ${bearer}`,
+                Accept: 'text/event-stream',
+              },
+            },
           )
-          if (log.raw && /\b200\b/.test(log.raw)) {
+          const raw = await logResp.text()
+          if (logResp.ok() && /\b200\b/.test(raw)) {
             found200 = true
             break
           }
@@ -393,7 +411,7 @@ test.describe('v3 fixture-with-httpRequest @golden', () => {
         `no flow_node carries http status 200 in result_json or step log on build ${buildId}. ` +
           `Either the httpRequest step did not run, the response status was not persisted, ` +
           `or the endpoint returned a non-200 (rig egress / httpbin down). ` +
-          `Observed node types: ${JSON.stringify(nodeArray.map((n) => n.type ?? n.name))}`,
+          `Observed nodes: ${JSON.stringify(nodeArray.map((n) => n.nodeType ?? n.displayName))}`,
       ).toBe(true)
     } catch (err) {
       await dump('assertion-failure')

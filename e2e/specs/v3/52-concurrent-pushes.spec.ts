@@ -29,16 +29,21 @@
  * Observed contract (LIVE rig, will be re-asserted on every run)
  * ──────────────────────────────────────────────────────────────
  * Per `GithubWebhookApi#receive` (titan-server/src/main/java/io/adaptiq/titan/
- * api/triggers/GithubWebhookApi.java) read at trunk SHA 189553f6:
+ * api/triggers/GithubWebhookApi.java):
  *
  *   - NO dedupe / debounce window. Each delivery whose HMAC verifies and
  *     whose branch matches at least one configured trigger inserts a new
  *     QUEUED build row (`enqueueBuild` is unconditional inside the loop).
  *     => 3 distinct-SHA pushes to the same branch yield 3 builds, NOT 1.
  *
- *   - `commitSha` in `triggerMeta` is the 7-character SHORT sha derived from
- *     `head_commit.id` (or `after` as fallback). This spec compares short
- *     SHAs accordingly; never the full 40-char hex.
+ *   - `commitSha` in `triggerMeta` is the FULL 40-character sha taken from
+ *     `head_commit.id` (or `after` as fallback). Issue #971 deliberately
+ *     made the receiver persist the full sha (GitHub's `POST /statuses/{sha}`
+ *     needs it; the UI truncates at display time), and
+ *     `BuildsApiTest.triggerMetaCommitSha_returnsFullSha` pins that as a
+ *     regression test. This spec therefore compares FULL SHAs; the 7-char
+ *     short form is used only for human-readable labels (issue #66 — an
+ *     earlier revision filtered on short SHAs and never matched anything).
  *
  *   - Per-job concurrency: the same job CAN have multiple builds RUNNING in
  *     parallel — there's no per-job max-concurrency knob in WebhooksApi /
@@ -126,7 +131,9 @@ function randomSha(): string {
   return crypto.randomBytes(20).toString('hex')
 }
 
-/** Short-sha as GithubWebhookApi#shortSha computes it (first 7 chars). */
+/** 7-char short form — used ONLY for human-readable labels (commit messages,
+ *  diagnostics). The engine persists the FULL sha in triggerMeta (#971), so
+ *  all oracle comparisons in this spec use full SHAs, never this. */
 function shortSha(full: string): string {
   return full.length > 7 ? full.substring(0, 7) : full
 }
@@ -174,14 +181,15 @@ async function postPushWebhook(
 }
 
 /**
- * List every build for a job whose `triggerMeta.commitSha` is in the expected
- * set. Returns the matching builds (newest-first by buildNumber).
+ * List every build for a job whose `triggerMeta.commitSha` (FULL 40-char sha,
+ * per #971) is in the expected set. Returns the matching builds
+ * (newest-first by buildNumber).
  */
 async function findBuildsForShas(
   api: APIRequestContext,
   bearer: string,
   jobId: number,
-  expectedShortShas: Set<string>,
+  expectedFullShas: Set<string>,
 ): Promise<BuildListItem[]> {
   const r = await apiGet<BuildsPage>(
     api,
@@ -191,24 +199,24 @@ async function findBuildsForShas(
   if (!r.ok || !r.body) return []
   return r.body.items.filter((b) => {
     const sha = b.triggerMeta?.commitSha ?? ''
-    return sha !== '' && expectedShortShas.has(sha)
+    return sha !== '' && expectedFullShas.has(sha)
   })
 }
 
-/** Wait for every expected short-SHA to materialise as a build row, or time out. */
+/** Wait for every expected full-SHA to materialise as a build row, or time out. */
 async function waitForBuildsForShas(
   api: APIRequestContext,
   bearer: string,
   jobId: number,
-  expectedShortShas: Set<string>,
+  expectedFullShas: Set<string>,
   budgetMs: number,
 ): Promise<BuildListItem[]> {
   let last: BuildListItem[] = []
-  const expectedList = [...expectedShortShas]
+  const expectedList = [...expectedFullShas]
   await expect
     .poll(
       async () => {
-        last = await findBuildsForShas(api, bearer, jobId, expectedShortShas)
+        last = await findBuildsForShas(api, bearer, jobId, expectedFullShas)
         const seen = new Set(last.map((b) => b.triggerMeta?.commitSha ?? ''))
         return expectedList.every((s) => seen.has(s))
       },
@@ -378,8 +386,8 @@ test.describe('v3 concurrent-push burst @golden', () => {
   /**
    * Test 1 — 3 rapid pushes to the SAME branch, distinct SHAs.
    *
-   * Asserts (the contract the engine ACTUALLY implements at trunk
-   * 189553f6, hardened here so any regression surfaces):
+   * Asserts (the contract the engine ACTUALLY implements on trunk,
+   * hardened here so any regression surfaces):
    *
    *   - Receiver returns dispatched=true on all 3 deliveries.
    *   - 3 build rows materialise (one per push) — no dedupe / debounce.
@@ -412,7 +420,6 @@ test.describe('v3 concurrent-push burst @golden', () => {
       // says "within ~3 seconds"; firing as fast as Node can `await` already
       // bunches them into <500ms, which is the worst case for the engine.
       const fullShas = [randomSha(), randomSha(), randomSha()]
-      const shortShas = fullShas.map(shortSha)
 
       // Fire in sequence (still in the same JS tick window). Sequential
       // awaits — we want each request to start IMMEDIATELY after the previous
@@ -451,12 +458,12 @@ test.describe('v3 concurrent-push burst @golden', () => {
         request,
         bearer,
         jobId,
-        new Set(shortShas),
+        new Set(fullShas),
         45_000,
       )
       expect(
         builds.length,
-        `expected exactly 3 builds for SHAs [${shortShas.join(', ')}] — got ${builds.length}. ` +
+        `expected exactly 3 builds for SHAs [${fullShas.map(shortSha).join(', ')}] — got ${builds.length}. ` +
           `If <3, the engine DEDUPED bursts (this is currently NOT the contract; ` +
           `if a dedupe window is added in future, update this spec + design doc).`,
       ).toBe(3)
@@ -538,8 +545,6 @@ test.describe('v3 concurrent-push burst @golden', () => {
 
       const shaA = randomSha()
       const shaB = randomSha()
-      const shortA = shortSha(shaA)
-      const shortB = shortSha(shaB)
 
       // Fire BOTH deliveries concurrently with Promise.all — same-tick parallel.
       const [resA, resB] = await Promise.all([
@@ -553,7 +558,7 @@ test.describe('v3 concurrent-push burst @golden', () => {
         request,
         bearer,
         jobId,
-        new Set([shortA, shortB]),
+        new Set([shaA, shaB]),
         45_000,
       )
 
@@ -577,14 +582,14 @@ test.describe('v3 concurrent-push burst @golden', () => {
       expect(bB, `no build with triggerMeta.branch="${branchB}"`).toBeDefined()
       expect(
         bA!.triggerMeta?.commitSha,
-        `branch ${branchA} build carries SHA "${bA!.triggerMeta?.commitSha}", expected "${shortA}" — ` +
+        `branch ${branchA} build carries SHA "${bA!.triggerMeta?.commitSha}", expected "${shaA}" — ` +
           `SHA cross-contaminated between concurrent deliveries`,
-      ).toBe(shortA)
+      ).toBe(shaA)
       expect(
         bB!.triggerMeta?.commitSha,
-        `branch ${branchB} build carries SHA "${bB!.triggerMeta?.commitSha}", expected "${shortB}" — ` +
+        `branch ${branchB} build carries SHA "${bB!.triggerMeta?.commitSha}", expected "${shaB}" — ` +
           `SHA cross-contaminated between concurrent deliveries`,
-      ).toBe(shortB)
+      ).toBe(shaB)
 
       // Both must terminate cleanly.
       const statuses = await waitForAllTerminal(
@@ -642,7 +647,6 @@ test.describe('v3 concurrent-push burst @golden', () => {
       jobId = setup.jobId
 
       const fullShas = Array.from({ length: 5 }, () => randomSha())
-      const shortShas = fullShas.map(shortSha)
 
       // Pace at ~1/sec. We use the elapsed-time approach (sleep until next
       // tick) rather than a fixed 1000ms `setTimeout`, so a slow HTTP roundtrip
@@ -676,10 +680,10 @@ test.describe('v3 concurrent-push burst @golden', () => {
         ).toBe(true)
       }
 
-      // We MUST see the FIRST and LAST short shas. Middle deliveries are
+      // We MUST see the FIRST and LAST shas. Middle deliveries are
       // acknowledged-but-merged territory if a future dedupe shows up.
-      const firstSha = shortShas[0]!
-      const lastSha = shortShas[shortShas.length - 1]!
+      const firstSha = fullShas[0]!
+      const lastSha = fullShas[fullShas.length - 1]!
       const builds = await waitForBuildsForShas(
         request,
         bearer,
@@ -691,15 +695,15 @@ test.describe('v3 concurrent-push burst @golden', () => {
 
       expect(
         seenShas.has(firstSha),
-        `FIRST sha ${firstSha} produced NO build row — P0 silent drop. ` +
+        `FIRST sha ${shortSha(firstSha)} produced NO build row — P0 silent drop. ` +
           `File: "engine: rapid pushes drop builds — silent loss". ` +
-          `Observed SHAs: [${[...seenShas].join(', ')}]`,
+          `Observed SHAs: [${[...seenShas].map(shortSha).join(', ')}]`,
       ).toBe(true)
       expect(
         seenShas.has(lastSha),
-        `LAST sha ${lastSha} produced NO build row — P0 silent drop. ` +
+        `LAST sha ${shortSha(lastSha)} produced NO build row — P0 silent drop. ` +
           `File: "engine: rapid pushes drop builds — silent loss". ` +
-          `Observed SHAs: [${[...seenShas].join(', ')}]`,
+          `Observed SHAs: [${[...seenShas].map(shortSha).join(', ')}]`,
       ).toBe(true)
 
       // Per current contract (no dedupe), we expect 5 distinct builds. Soft-
@@ -708,11 +712,11 @@ test.describe('v3 concurrent-push burst @golden', () => {
         request,
         bearer,
         jobId,
-        new Set(shortShas),
+        new Set(fullShas),
       )
-      if (allBuilds.length < shortShas.length) {
+      if (allBuilds.length < fullShas.length) {
         const seen = new Set(allBuilds.map((b) => b.triggerMeta?.commitSha ?? ''))
-        const missing = shortShas.filter((s) => !seen.has(s))
+        const missing = fullShas.filter((s) => !seen.has(s)).map(shortSha)
         // Attach the diagnostic — useful in CI logs without failing the spec
         // (the hard floor is first+last). If a dedupe window IS the new
         // contract, an updated design doc + this comment-block update lets a
@@ -748,7 +752,7 @@ test.describe('v3 concurrent-push burst @golden', () => {
   /**
    * Test 4 — adversarial: SAME sha pushed twice (force-push no-op / webhook
    * retry from GitHub). Per the documented contract (no dedupe / debounce),
-   * the engine creates TWO builds with identical short SHA. This locks in the
+   * the engine creates TWO builds with identical commit SHA. This locks in the
    * "no idempotency on (branch, commitSha)" behaviour so any future debounce
    * regression surfaces as a hard test diff, not a silent change.
    *
@@ -777,7 +781,6 @@ test.describe('v3 concurrent-push burst @golden', () => {
       // X-GitHub-Delivery across retries, but the engine has no replay-cache
       // keyed on delivery-id either; verifying that is the point).
       const fullSha = randomSha()
-      const short = shortSha(fullSha)
       const r1 = await postPushWebhook(
         request, setup.secret, FIXTURE_REPO, branch, fullSha, `e2e-dup-${runTag}-1`,
       )
@@ -792,22 +795,22 @@ test.describe('v3 concurrent-push burst @golden', () => {
           `docs/design/69 + adjust this assertion.`,
       ).toBe(true)
 
-      // Wait until 2 build rows for the same short SHA materialise.
+      // Wait until 2 build rows for the same SHA materialise.
       await expect.poll(
         async () => {
-          const builds = await findBuildsForShas(request, bearer!, jobId!, new Set([short]))
+          const builds = await findBuildsForShas(request, bearer!, jobId!, new Set([fullSha]))
           return builds.length
         },
         {
           message:
-            `expected 2 builds for duplicate SHA ${short} on branch ${branch}; ` +
+            `expected 2 builds for duplicate SHA ${shortSha(fullSha)} on branch ${branch}; ` +
             `if the engine now dedupes (count=1) update the design doc + this test`,
           timeout: 45_000,
           intervals: [500, 1_000, 2_000],
         },
       ).toBe(2)
 
-      const builds = await findBuildsForShas(request, bearer, jobId, new Set([short]))
+      const builds = await findBuildsForShas(request, bearer, jobId, new Set([fullSha]))
       // Both must terminate cleanly (no orphan).
       const statuses = await waitForAllTerminal(
         request, bearer, builds.map((b) => b.id), 4 * 60_000,
@@ -860,7 +863,6 @@ test.describe('v3 concurrent-push burst @golden', () => {
       jobId = setup.jobId
 
       const fullShas = [randomSha(), randomSha(), randomSha()]
-      const shortShas = fullShas.map(shortSha)
       for (let i = 0; i < fullShas.length; i++) {
         const res = await postPushWebhook(
           request, setup.secret, FIXTURE_REPO, branch, fullShas[i]!, `e2e-ui-${runTag}-${i}`,
@@ -869,7 +871,7 @@ test.describe('v3 concurrent-push burst @golden', () => {
       }
 
       // Wait for builds to materialise (rows in DB) before UI navigation.
-      await waitForBuildsForShas(request, bearer, jobId, new Set(shortShas), 30_000)
+      await waitForBuildsForShas(request, bearer, jobId, new Set(fullShas), 30_000)
 
       await loginViaKeycloak(page, ENV)
       await page.goto(`${ENV.uiBaseUrl}/pipelines/${jobId}`, {
@@ -885,7 +887,7 @@ test.describe('v3 concurrent-push burst @golden', () => {
         await test.info().attach('burst-ui-already-drained.txt', {
           body:
             `In-flight section not visible by page-load for job ${jobId}; ` +
-            `builds may have completed before the UI loaded. SHAs=[${shortShas.join(', ')}]`,
+            `builds may have completed before the UI loaded. SHAs=[${fullShas.map(shortSha).join(', ')}]`,
           contentType: 'text/plain',
         })
         return
