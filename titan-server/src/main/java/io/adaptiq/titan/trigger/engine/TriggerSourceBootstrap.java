@@ -16,8 +16,7 @@ import java.util.logging.Logger;
  * Quarkus {@link StartupEvent} and {@link TriggerSource#stop() stopped} on {@link ShutdownEvent}. A
  * failure in one source is isolated — it never blocks the others or the boot.
  *
- * <p>Lifecycle is driven by the Quarkus {@link StartupEvent}/{@link ShutdownEvent} pair (see
- * docs/design/57-phase3-preflight-audit.md Section 1, decision 3).
+ * <p>Lifecycle is driven by the Quarkus {@link StartupEvent}/{@link ShutdownEvent} pair.
  */
 @ApplicationScoped
 public final class TriggerSourceBootstrap {

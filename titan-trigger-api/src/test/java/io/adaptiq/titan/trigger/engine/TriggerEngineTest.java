@@ -19,10 +19,9 @@ import org.junit.jupiter.api.Test;
  * {@link TriggerCodec} round-trips through it (the mechanism that makes a third-party trigger type
  * Just Work).
  *
- * <p>See docs/design/57-phase3-preflight-audit.md Section 1, decision 2. The Quarkus engine wiring
- * (the {@code @Scheduled} bean + CDI {@code Instance<>} collection) is covered by {@code
- * DiscoveryScheduler}-style integration tests in a follow-up wave; this Wave-1 test pins descriptor
- * registry + codec round-trip only.
+ * <p>The Quarkus engine wiring (the {@code @Scheduled} bean + CDI {@code Instance<>} collection) is
+ * covered by {@code DiscoveryScheduler}-style integration tests in a follow-up wave; this Wave-1
+ * test pins descriptor registry + codec round-trip only.
  */
 class TriggerEngineTest {
 

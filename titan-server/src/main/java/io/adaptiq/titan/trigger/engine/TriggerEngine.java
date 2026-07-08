@@ -32,8 +32,6 @@ import java.util.logging.Logger;
  *
  * <p>Both honour the {@link SchedulerSettings#paused() pause} kill-switch. Per-subsystem failures
  * are isolated so one bad subsystem cannot silence the others.
- *
- * <p>See docs/design/57-phase3-preflight-audit.md Section 1, decision 3.
  */
 @ApplicationScoped
 public class TriggerEngine {
