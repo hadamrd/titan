@@ -32,8 +32,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * GithubAppWebhookApi} and {@code GitlabWebhookApi}). Until that lands, no build will ever carry
  * {@code triggerType == "bitbucket"} and this reporter is a quiet no-op. It ships now so the SCM
  * status-reporting fan-out shape (closes #1080) is complete and the Bitbucket inbound webhook
- * ticket has nothing left to do but stamp the right discriminator. See {@code
- * docs/design/73-scm-status-reporting.md} for the deferred-work list.
+ * ticket has nothing left to do but stamp the right discriminator.
  *
  * <h2>Filter</h2>
  *

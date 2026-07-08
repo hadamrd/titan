@@ -72,7 +72,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * the trigger at a single credential entry that holds both the shared webhook secret AND a personal
  * access token (the GitLab UI even encourages this — a single "CI integration token"). A future
  * ticket will split into a dedicated {@code "gitlab-api"} scope; until then the reporter and
- * verifier share one entry. Documented in {@code docs/design/73-scm-status-reporting.md}.
+ * verifier share one entry.
  *
  * <h2>Constitution §6</h2>
  *
