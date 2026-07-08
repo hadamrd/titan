@@ -47,7 +47,17 @@ public record FlowNodeDto(
     String failureCategory,
     String failureReason,
     UUID logTaskId,
-    Map<String, String> outputs) {
+    Map<String, String> outputs,
+    /**
+     * The node's persisted {@code result_json} verbatim (issue #61, spec 32) — the canonical
+     * structured record a step handler produced ({@code {"exitCode":0,"outputs":{...}}}). {@code
+     * outputs} above is the flattened string-map projection of the same blob; {@code resultJson}
+     * preserves the ORIGINAL value types (an {@code httpRequest} step's {@code "status":200} stays
+     * a JSON number), which is what external oracles and API consumers assert against. Content the
+     * step itself chose to publish — same secrets posture as {@code outputs} (see class javadoc).
+     * {@code null} (stripped by {@code JsonInclude.NON_NULL}) for nodes that produced no result.
+     */
+    String resultJson) {
 
   /** Map from a storage row. */
   public static FlowNodeDto from(FlowNodeRow row) {
@@ -68,7 +78,8 @@ public record FlowNodeDto(
         row.failureCategory,
         row.failureReason,
         row.logTaskId,
-        outputsFromResultJson(row.resultJson));
+        outputsFromResultJson(row.resultJson),
+        (row.resultJson == null || row.resultJson.isBlank()) ? null : row.resultJson);
   }
 
   /**

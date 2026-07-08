@@ -150,6 +150,46 @@ class DtoRoundTripTest {
     // outputs default to empty map when result_json is null (no published outputs).
     assertNotNull(restored.outputs());
     assertTrue(restored.outputs().isEmpty());
+    // No result_json → resultJson omitted, never an empty string (issue #61, spec 32).
+    assertNull(restored.resultJson());
+  }
+
+  /**
+   * Issue #61 (spec 32) — the node's persisted {@code result_json} must ride the wire VERBATIM
+   * alongside the flattened {@code outputs} map. The flattening stringifies every value, so an
+   * external oracle asserting on the ORIGINAL types (an httpRequest step's {@code "status":200} as
+   * a JSON number) had no API surface to read — the e2e spec scraped a field that did not exist.
+   */
+  @Test
+  void flowNodeDto_carriesResultJsonVerbatim() throws Exception {
+    FlowNodeRow row = new FlowNodeRow();
+    row.buildId = 12L;
+    row.nodeId = "call-s0";
+    row.nodeType = "STEP";
+    row.status = "SUCCESS";
+    row.resultJson = "{\"exitCode\":0,\"outputs\":{\"status\":200,\"body\":\"{}\"}}";
+
+    FlowNodeDto dto = FlowNodeDto.from(row);
+    assertEquals(row.resultJson, dto.resultJson(), "result_json must be surfaced verbatim");
+    // The numeric status is preserved as a number inside the blob (outputs stringifies it).
+    assertTrue(dto.resultJson().contains("\"status\":200"));
+    assertEquals("200", dto.outputs().get("status"));
+
+    String json = MAPPER.writeValueAsString(dto);
+    FlowNodeDto restored = MAPPER.readValue(json, FlowNodeDto.class);
+    assertEquals(dto.resultJson(), restored.resultJson());
+  }
+
+  /** Blank result_json degrades to omitted — mirrors the outputs-empty degradation below. */
+  @Test
+  void flowNodeDto_blankResultJsonOmitted() {
+    FlowNodeRow blank = new FlowNodeRow();
+    blank.buildId = 1L;
+    blank.nodeId = "n2";
+    blank.nodeType = "STEP";
+    blank.status = "FAILED";
+    blank.resultJson = "   ";
+    assertNull(FlowNodeDto.from(blank).resultJson());
   }
 
   /**
