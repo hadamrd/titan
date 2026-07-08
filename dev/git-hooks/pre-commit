@@ -35,7 +35,7 @@ untracked=$(git ls-files --others --exclude-standard -- 'src/main/java/**/*.java
 if [ -n "$untracked" ]; then
   printf 'ERROR: untracked .java files under src/main/java/\n\n' >&2
   printf '%s\n' "$untracked" | sed 's/^/    /' >&2
-  printf '\nFix: git add <file>, or rm if scratch. See docs/ops/post-mortems/2026-05-10-daos-facade-drift.md\n' >&2
+  printf '\nFix: git add <file>, or rm if scratch.\n' >&2
   exit 1
 fi
 

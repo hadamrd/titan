@@ -80,8 +80,8 @@ done
 if [ "${#MISSING[@]}" -gt 0 ]; then
   echo "[golden-roundtrip] FAIL: missing provisioning env var(s): ${MISSING[*]}" >&2
   echo "[golden-roundtrip] These come from registering + installing the GitHub App" >&2
-  echo "[golden-roundtrip] on the rig. See e2e/.env.golden-roundtrip.example and" >&2
-  echo "[golden-roundtrip] docs/ops/runbooks/layer2-e2e.md for how to retrieve them." >&2
+  echo "[golden-roundtrip] on the rig. See e2e/.env.golden-roundtrip.example for the" >&2
+  echo "[golden-roundtrip] expected names and where each value comes from." >&2
   exit 3
 fi
 
