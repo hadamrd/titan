@@ -40,10 +40,16 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  *   <li>{@code oidc.clientId} — {@code titan.ui.oidc-client-id} (default {@code "titan-ui"}). The
  *       UI is a public SPA client, separate from the {@code titan-server} bearer-token service
  *       client.
- *   <li>{@code oidc.redirectUri} — derived: {@code {publicUrl}/login/callback}.
- *   <li>{@code oidc.postLogoutRedirectUri} — derived: {@code {publicUrl}/login}.
+ *   <li>{@code oidc.redirectUri} — derived: {@code {uiPublicUrl}/login/callback}, where {@code
+ *       uiPublicUrl} is {@code titan.ui.public-url} when set, else {@code titan.public-url}. The
+ *       override exists for rigs where the SPA is served from a DIFFERENT origin than titan-server
+ *       (e.g. the local rig: SPA on {@code :5180}, server on {@code :18080}) — the OIDC redirect
+ *       must land on the SPA origin, which is also what the Keycloak client's redirect-URI
+ *       allowlist contains (issue #38).
+ *   <li>{@code oidc.postLogoutRedirectUri} — derived: {@code {uiPublicUrl}/login}.
  *   <li>{@code publicUrl} — {@code titan.public-url} (same property used by the GitHub status
- *       reporter for absolute target URLs).
+ *       reporter for absolute target URLs). Deliberately NOT the UI override: the SPA uses this for
+ *       server-reachable URLs such as GitHub App webhook endpoints.
  * </ul>
  *
  * <p>A blank/missing {@code titan.public-url} or unresolvable OIDC authority is a deployment
@@ -60,6 +66,7 @@ public class SystemUiConfigApi {
   static final String DEFAULT_UI_CLIENT_ID = "titan-ui";
 
   private final Optional<String> publicUrl;
+  private final Optional<String> uiPublicUrlOverride;
   private final String oidcClientId;
   private final Optional<String> uiOidcAuthorityOverride;
   private final Optional<String> oidcAuthServerUrl;
@@ -72,11 +79,18 @@ public class SystemUiConfigApi {
       // taking down the whole server (and the /api/v1/info endpoint with it) instead of giving the
       // SRE a clear error pointing at the missing key.
       @ConfigProperty(name = "titan.public-url") Optional<String> publicUrl,
+      // UI-origin override for the OIDC redirect URIs (issue #38). titan.public-url is consumed
+      // by MANY server-origin features (SCM status links, webhook callbacks, notification
+      // deep-links) and cannot be repointed at the SPA origin on split-origin rigs. This key
+      // affects ONLY the derived redirectUri/postLogoutRedirectUri; unset = same-origin rigs
+      // keep the titan.public-url behaviour.
+      @ConfigProperty(name = "titan.ui.public-url") Optional<String> uiPublicUrlOverride,
       @ConfigProperty(name = "titan.ui.oidc-client-id", defaultValue = DEFAULT_UI_CLIENT_ID)
           String oidcClientId,
       @ConfigProperty(name = "titan.ui.oidc-authority") Optional<String> uiOidcAuthorityOverride,
       @ConfigProperty(name = "quarkus.oidc.auth-server-url") Optional<String> oidcAuthServerUrl) {
     this.publicUrl = publicUrl;
+    this.uiPublicUrlOverride = uiPublicUrlOverride;
     this.oidcClientId = oidcClientId;
     this.uiOidcAuthorityOverride = uiOidcAuthorityOverride;
     this.oidcAuthServerUrl = oidcAuthServerUrl;
@@ -85,9 +99,17 @@ public class SystemUiConfigApi {
   @GET
   public UiConfigDto uiConfig() {
     String pub = normalisePublicUrl(publicUrl.orElse(null));
+    // Redirect URIs must land on the ORIGIN THE SPA IS SERVED FROM (it is also the origin the
+    // Keycloak client allowlists). On split-origin rigs that differs from titan.public-url.
+    String uiPub =
+        uiPublicUrlOverride
+            .filter(s -> !s.isBlank())
+            .map(s -> trimTrailingSlash(s.trim()))
+            .orElse(pub);
     String authority = resolveAuthority();
     return new UiConfigDto(
-        new OidcConfigDto(authority, oidcClientId, pub + "/login/callback", pub + "/login"), pub);
+        new OidcConfigDto(authority, oidcClientId, uiPub + "/login/callback", uiPub + "/login"),
+        pub);
   }
 
   /** Pick the public-issuer override, else the configured auth-server-url, else fail loudly. */
