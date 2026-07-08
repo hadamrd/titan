@@ -132,13 +132,18 @@ function findGitTagNode(nodes: FlowNode[]): FlowNode | undefined {
   )
 }
 
-/** Concatenate all titan.logs rows for a task token, ordered by id. */
+/**
+ * Concatenate all titan.logs rows for a task, ordered by id.
+ * Column contract: `titan.logs.task_id UUID` (V1__init.sql) — the flow_node's
+ * `logTaskId` is that task id. (Issue #66: this query previously referenced a
+ * nonexistent `task_token` column and errored at step 8.)
+ */
 async function fetchTaskLog(logTaskId: string): Promise<string> {
   const client = pgClient()
   await client.connect()
   try {
     const r = await client.query<{ data: string }>(
-      `SELECT data FROM titan.logs WHERE task_token = $1::uuid ORDER BY id ASC`,
+      `SELECT data FROM titan.logs WHERE task_id = $1::uuid ORDER BY id ASC`,
       [logTaskId],
     )
     return r.rows.map((row) => row.data).join('')
