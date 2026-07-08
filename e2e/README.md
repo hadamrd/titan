@@ -32,6 +32,38 @@ cd e2e && pnpm exec playwright show-trace playwright-report/trace.zip
 | `specs/v3/04-test-results.spec.ts` | SKIP    | TestResultsPanel on trunk + `titan.test_result` seed (follow-up) |
 | `specs/v3/05-artifacts-browser.spec.ts` | SKIP | `titan.artifact` seed helper (follow-up issue)        |
 
+### Spec-ownership rule (#59) — direct SQL against shared tables
+
+The rig's Postgres is **shared state across every spec in a run**. Direct SQL
+is allowed, but only under the ownership discipline below — violating it has
+force-ABORTed other specs' RUNNING builds and cascade-deleted `task_queue`
+rows the worker was actively executing (issue #59, evidence in PR #58).
+
+1. **Never mutate (UPDATE/DELETE) a row your spec did not create.** If your
+   test needs builds in a particular status mix, create your own job + build
+   rows (`seedOwnedJobWithBuilds` in `fixtures/seed-v3.ts`) or drive state
+   through the public API. Reads of foreign rows are fine.
+2. **Scope every cleanup DELETE to the ids/prefix your spec created.** Blanket
+   predicates like `WHERE status IN ('RUNNING','QUEUED')` are forbidden.
+3. **Never delete a `task_queue` row in CLAIMED/PROCESSING** — directly or
+   transitively (`DELETE FROM titan.builds` cascades onto `task_queue`). For
+   jobs whose builds ran through the real engine, tear down via
+   `safeDeleteJobCascade` (`fixtures/teardown-v3.ts`): it cancels live builds
+   via `POST /api/v1/builds/{id}/cancel`, waits for terminal status and lease
+   drain, and only then deletes. If the lease never drains it deletes nothing
+   — per-run unique job names keep orphans from colliding.
+4. **Snapshot/restore of foreign rows is NOT an acceptable substitute** for
+   ownership: restores run after your assertions (the foreign spec already
+   observed the mutation) and are themselves fallible — the pre-#59 restore
+   SQL failed on every run with `inconsistent types deduced for parameter $2`
+   (reusing one untyped `pg` parameter as both a varchar column value and a
+   text comparison; compute such flags in JS and pass a dedicated boolean
+   parameter instead).
+5. **Designated shared fixtures are the one exception:** the seed-data
+   `titan-ui` RUNNING build exists *for* the gate/cancel specs (01, 02, 11).
+   They may mutate it, must restore it (`setBuildStatus`), and nothing else
+   may touch it.
+
 ### Legacy (controller-bound) suite
 
 `scenarios.spec.ts` + `fixtures/titan-api.ts` target the legacy controller rig

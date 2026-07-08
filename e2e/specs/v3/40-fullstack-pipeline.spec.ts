@@ -44,8 +44,11 @@
  * spec can be extended with `simple-git` + push to a unique branch in <50 LOC.
  *
  * ─── Determinism / cleanup ────────────────────────────────────────────────────
- * Per-run suffix on credential + job. `finally{}` deletes approvals, flow_nodes,
- * task_queue rows, builds, and the job. No setTimeout-without-deadline; all
+ * Per-run suffix on credential + job. `finally{}` goes through
+ * safeDeleteJobCascade (#59): cancel any still-live build via the API, wait
+ * for terminal status + CLAIMED task_queue lease drain, THEN delete this
+ * spec's approvals/flow_nodes/task rows/builds/job — never yanking a leased
+ * task row out from under the worker. No setTimeout-without-deadline; all
  * waits use expect.poll or bounded helpers.
  *
  * ─── Test budget ──────────────────────────────────────────────────────────────
@@ -82,7 +85,7 @@ import * as crypto from 'node:crypto'
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken } from '../../fixtures/auth-v3'
 import { readFixtureYaml } from '../../fixtures/fixture-files'
-import { pgClient } from '../../fixtures/seed-v3'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -394,39 +397,14 @@ async function cleanupJobAndCred(
   credentialId: number | undefined,
 ): Promise<void> {
   if (jobId && jobId > 0) {
-    const client = pgClient()
-    await client.connect()
-    try {
-      // Drop approvals + flow_nodes + queued tasks + test_result + artifact
-      // rows BEFORE deleting the build rows (FK cascades cover most, but be
-      // explicit to keep the cleanup idempotent on schema drift).
-      const buildIdsRes = await client.query<{ id: string }>(
-        `SELECT id::text AS id FROM titan.builds WHERE job_id = $1`,
-        [jobId],
-      )
-      const buildIds = buildIdsRes.rows.map((r) => Number(r.id))
-      if (buildIds.length > 0) {
-        await client
-          .query(`DELETE FROM titan.approvals WHERE build_id = ANY($1::bigint[])`, [buildIds])
-          .catch(() => undefined)
-        await client
-          .query(`DELETE FROM titan.test_result WHERE build_id = ANY($1::bigint[])`, [buildIds])
-          .catch(() => undefined)
-        await client
-          .query(`DELETE FROM titan.artifact WHERE build_id = ANY($1::bigint[])`, [buildIds])
-          .catch(() => undefined)
-        await client
-          .query(`DELETE FROM titan.flow_nodes WHERE build_id = ANY($1::bigint[])`, [buildIds])
-          .catch(() => undefined)
-        await client
-          .query(`DELETE FROM titan.task_queue WHERE build_id = ANY($1::bigint[])`, [buildIds])
-          .catch(() => undefined)
-        await client.query(`DELETE FROM titan.builds WHERE id = ANY($1::bigint[])`, [buildIds])
-      }
-      await client.query(`DELETE FROM titan.jobs WHERE id = $1`, [jobId])
-    } finally {
-      await client.end()
-    }
+    // #59: NEVER cascade-delete task_queue rows the worker still holds a
+    // CLAIMED/PROCESSING lease on (pre-#58 that wedged an executor slot;
+    // post-#58 it still poisons the run). safeDeleteJobCascade cancels any
+    // non-terminal build via the public API, waits (bounded) for terminal
+    // status + lease drain, and only then deletes — scoped to this spec's
+    // own job. If a lease survives the budget it deletes nothing; the
+    // per-run unique job name keeps orphans from colliding with reruns.
+    await safeDeleteJobCascade(api, jobId)
   }
   if (credentialId && credentialId > 0) {
     await api
