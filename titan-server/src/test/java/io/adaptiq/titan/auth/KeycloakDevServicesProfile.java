@@ -4,7 +4,7 @@ import io.quarkus.test.junit.QuarkusTestProfile;
 import java.util.Map;
 
 /**
- * Minimal test profile for {@link KeycloakAuthIT}.
+ * Minimal test profile for {@code KeycloakAuthIT} (src/integrationTest).
  *
  * <p>Re-enables OIDC so that Quarkus Dev Services for Keycloak starts a real Keycloak container and
  * auto-injects {@code quarkus.oidc.auth-server-url}. No URL is set here — Dev Services resolves it

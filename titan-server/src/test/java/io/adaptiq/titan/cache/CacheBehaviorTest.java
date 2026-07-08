@@ -6,10 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.adaptiq.titan.build.Build;
 import io.adaptiq.titan.build.BuildService;
 import io.adaptiq.titan.build.BuildUpdate;
-import io.adaptiq.titan.build.NewBuildRequest;
 import io.adaptiq.titan.flow.model.PipelineModel;
 import io.adaptiq.titan.job.Job;
 import io.adaptiq.titan.job.JobService;
@@ -195,13 +193,27 @@ class CacheBehaviorTest {
 
   // ── helpers ──────────────────────────────────────────────────────────────
 
-  /** Insert a job + a build with a populated {@code pipeline_model_json}, return the build id. */
+  /**
+   * Insert a job + a build with a populated {@code pipeline_model_json}, return the build id.
+   *
+   * <p>The build row is inserted DIRECTLY in a terminal status — {@code buildService.create} would
+   * enqueue a real {@code task_queue} BAKE row that the shared app's background {@code
+   * QueueProcessorScheduler} tick can claim mid-test, invalidating the entry between two {@code
+   * load(...)} calls and flipping the identity assertions (#41 flake class — see {@link
+   * PipelineModelCacheResolvabilityTest}). A terminal build with no queue row is invisible to the
+   * scheduler.
+   */
   private long freshBuildWithModel() {
     long jobId = freshJob();
-    Build created =
-        buildService.create(
-            new NewBuildRequest(jobId, null, "test", "test", null, EMPTY_PIPELINE_JSON, null));
-    return created.id();
+    io.adaptiq.titan.store.rows.BuildRow b = new io.adaptiq.titan.store.rows.BuildRow();
+    b.jobId = jobId;
+    b.buildNumber = stores.builds().nextBuildNumber(jobId);
+    b.status = "SUCCESS";
+    b.queuedAt = java.time.Instant.now();
+    b.triggeredBy = "test";
+    b.triggerType = "manual";
+    b.pipelineModelJson = EMPTY_PIPELINE_JSON;
+    return stores.withTransaction(c -> stores.builds().insert(c, b));
   }
 
   private long freshJob() {

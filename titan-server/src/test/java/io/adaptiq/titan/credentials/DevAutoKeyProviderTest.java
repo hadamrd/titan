@@ -56,6 +56,18 @@ class DevAutoKeyProviderTest {
     }
   }
 
+  /**
+   * Mirror of the LaunchMode leg of {@link DevAutoKeyProvider#isDevProfile()}: DEVELOPMENT and TEST
+   * count as dev. LaunchMode.current() is a JVM-global that flips to TEST when a
+   * {@code @QuarkusTest} boots in the same fork, so fallback-dependent assertions must read it at
+   * assertion time (issue #41).
+   */
+  private static boolean launchModeCountsAsDev() {
+    io.quarkus.runtime.LaunchMode mode = io.quarkus.runtime.LaunchMode.current();
+    return mode == io.quarkus.runtime.LaunchMode.DEVELOPMENT
+        || mode == io.quarkus.runtime.LaunchMode.TEST;
+  }
+
   // ── Acceptance #1: construction throws in non-dev profile ──────────────────
 
   @Test
@@ -77,11 +89,31 @@ class DevAutoKeyProviderTest {
   }
 
   @Test
-  void noArgConstructor_throwsConfigException_whenProfileUnset() {
-    // No TITAN_PROFILE / titan.profile / quarkus.profile — and LaunchMode.current() is NORMAL
-    // outside Quarkus boot. This is the "ambiguous deployment" case that the gate must reject.
+  void noArgConstructor_profileUnset_tracksLaunchModeFallback() {
+    // No TITAN_PROFILE / titan.profile / quarkus.profile — the gate falls back to
+    // LaunchMode.current(). That is a JVM-GLOBAL: NORMAL in a pristine fork (→ ambiguous
+    // deployment → must refuse), but TEST once any @QuarkusTest has booted in the same suite
+    // JVM (→ counts as dev BY DESIGN, see isDevProfile javadoc — DevAutoKekIT relies on it).
+    // Assert the constructor tracks the fallback exactly rather than assuming a pristine JVM
+    // (issue #41 — this test was order-dependent under the full suite).
     System.clearProperty(DevAutoKeyProvider.PROFILE_SYSPROP);
     System.clearProperty(DevAutoKeyProvider.QUARKUS_PROFILE_SYSPROP);
+
+    if (launchModeCountsAsDev()) {
+      assertDoesNotThrow(
+          (org.junit.jupiter.api.function.ThrowingSupplier<DevAutoKeyProvider>)
+              DevAutoKeyProvider::new);
+    } else {
+      assertThrows(ConfigException.class, DevAutoKeyProvider::new);
+    }
+  }
+
+  @Test
+  void noArgConstructor_throws_whenQuarkusProfileIsProd_regardlessOfLaunchMode() {
+    // Deterministic refusal pin for the "not dev" branch that does NOT depend on JVM history:
+    // an explicit quarkus.profile=prod sysprop short-circuits BEFORE the LaunchMode fallback,
+    // so this must refuse even in a suite JVM where LaunchMode.current() == TEST.
+    System.setProperty(DevAutoKeyProvider.QUARKUS_PROFILE_SYSPROP, "prod");
 
     assertThrows(ConfigException.class, DevAutoKeyProvider::new);
   }
@@ -162,8 +194,13 @@ class DevAutoKeyProviderTest {
 
   @Test
   void isDevProfile_truthTable() {
-    // Empty → falls back to LaunchMode.current(), which is NORMAL outside Quarkus boot → false.
-    assertFalse(DevAutoKeyProvider.isDevProfile(), "no profile signal → not dev");
+    // Empty → falls back to LaunchMode.current(): NORMAL (→ false) in a pristine fork, TEST
+    // (→ true, by design) once any @QuarkusTest booted in this JVM. Pin that the fallback
+    // equals the LaunchMode decision instead of assuming a pristine JVM (issue #41).
+    org.junit.jupiter.api.Assertions.assertEquals(
+        launchModeCountsAsDev(),
+        DevAutoKeyProvider.isDevProfile(),
+        "no explicit profile signal → gate must equal the LaunchMode fallback");
 
     System.setProperty(DevAutoKeyProvider.PROFILE_SYSPROP, "dev");
     assertTrue(DevAutoKeyProvider.isDevProfile(), "titan.profile=dev → dev");

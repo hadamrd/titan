@@ -18,9 +18,9 @@ import org.junit.jupiter.api.Test;
  * bearer token is rejected with 401.
  *
  * <p><strong>Status: DISABLED — needs hand-rolled Keycloak Testcontainer harness.</strong> The
- * existing {@link KeycloakAuthIT} uses Quarkus Dev Services for Keycloak, which auto-injects {@code
- * quarkus.oidc.auth-server-url} at runtime and exposes a single URL to both sides. To reproduce the
- * dual-URL bug we'd need:
+ * existing {@code KeycloakAuthIT} (src/integrationTest) uses Quarkus Dev Services for Keycloak,
+ * which auto-injects {@code quarkus.oidc.auth-server-url} at runtime and exposes a single URL to
+ * both sides. To reproduce the dual-URL bug we'd need:
  *
  * <ol>
  *   <li>A {@code @QuarkusTestResource(KeycloakDualUrlResource.class)} that boots a Keycloak

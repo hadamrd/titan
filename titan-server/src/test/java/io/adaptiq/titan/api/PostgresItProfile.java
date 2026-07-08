@@ -3,7 +3,7 @@ package io.adaptiq.titan.api;
 import io.quarkus.test.junit.QuarkusTestProfile;
 
 /**
- * Quarkus test profile for {@link ApiSurfaceIT}.
+ * Quarkus test profile for {@code ApiSurfaceIT} (src/integrationTest).
  *
  * <p>Activates the {@code postgres-it} config profile, which sets {@code
  * quarkus.datasource.db-kind=postgresql} at augmentation time (build-time fixed property). Without
@@ -12,8 +12,8 @@ import io.quarkus.test.junit.QuarkusTestProfile;
  * driver.
  *
  * <p>Quarkus re-augments the application once per distinct profile, so unit tests (default {@code
- * test} profile, H2) and {@link ApiSurfaceIT} ({@code postgres-it} profile, PostgreSQL) run against
- * independently augmented applications.
+ * test} profile, H2) and {@code ApiSurfaceIT} (src/integrationTest) ({@code postgres-it} profile,
+ * PostgreSQL) run against independently augmented applications.
  */
 public class PostgresItProfile implements QuarkusTestProfile {
 

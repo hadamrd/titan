@@ -1,15 +1,13 @@
 package io.adaptiq.titan.cache;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.adaptiq.titan.build.Build;
-import io.adaptiq.titan.build.BuildService;
-import io.adaptiq.titan.build.NewBuildRequest;
 import io.adaptiq.titan.flow.model.PipelineModel;
 import io.adaptiq.titan.store.TitanStores;
+import io.adaptiq.titan.store.rows.BuildRow;
 import io.adaptiq.titan.store.rows.JobRow;
 import io.quarkus.cache.Cache;
 import io.quarkus.cache.CacheName;
@@ -46,7 +44,6 @@ import org.junit.jupiter.api.Test;
 class PipelineModelCacheResolvabilityTest {
 
   @Inject TitanStores stores;
-  @Inject BuildService buildService;
 
   @Inject
   @CacheName("pipeline-model")
@@ -94,31 +91,30 @@ class PipelineModelCacheResolvabilityTest {
         lookup.isResolvable(),
         "PipelineModelCache must be resolvable via programmatic lookup. ARC removed it as unused"
             + " (#37) — restore @Unremovable and the StartupEvent observer on the bean.");
-    PipelineModelCache cache = lookup.get();
-    long parsesBefore = cache.parseCount();
+    assertNotNull(lookup.get());
 
     // 2) Load the SAME pipeline model twice through the production entry point.
+    //    NOTE (#41): the oracle is per-key INSTANCE IDENTITY, not the bean's global parseCount.
+    //    The shared @QuarkusTest app runs QueueProcessorScheduler's background ticks, which may
+    //    parse OTHER builds' models (leftover QUEUED rows from sibling test classes) at any
+    //    moment — a global counter delta of "exactly one" is inherently racy under the suite.
+    //    Caffeine returns the same instance on a hit and a re-parse necessarily allocates a new
+    //    PipelineModel, so identity proves @CacheResult short-circuiting just as strongly.
     long buildId = freshBuildWithModel();
     PipelineModel first = PipelineModelCache.loadOrFresh(stores, buildId);
     PipelineModel second = PipelineModelCache.loadOrFresh(stores, buildId);
     assertNotNull(first);
 
-    // 3) Cache-hit oracle: Caffeine returns the same instance on a hit, and the parse counter
-    //    (incremented only inside the real load body, which @CacheResult short-circuits on a hit)
-    //    must have moved by exactly one.
+    // 3) Cache-hit oracle: same instance ⇔ the load body did not re-run.
     assertSame(first, second, "second loadOrFresh must be served from the pipeline-model cache");
-    assertEquals(
-        parsesBefore + 1,
-        cache.parseCount(),
-        "exactly one real parse expected — the second load must hit the cache, not re-parse");
 
     // 4) invalidateIfActive must ride the live bean too: after invalidation the next load
-    //    re-parses (counter moves), proving the static invalidation path is operative.
+    //    re-parses (new instance), proving the static invalidation path is operative.
     PipelineModelCache.invalidateIfActive(buildId);
-    PipelineModelCache.loadOrFresh(stores, buildId);
-    assertEquals(
-        parsesBefore + 2,
-        cache.parseCount(),
+    PipelineModel third = PipelineModelCache.loadOrFresh(stores, buildId);
+    assertNotSame(
+        second,
+        third,
         "load after invalidateIfActive must re-parse — invalidation path must be operative");
 
     // 5) Zero ARC lookup noise: the 126x-per-run WARN storm must be gone.
@@ -135,6 +131,13 @@ class PipelineModelCacheResolvabilityTest {
 
   // ── helpers (mirrors CacheBehaviorTest) ────────────────────────────────────
 
+  /**
+   * Insert the build row DIRECTLY in a terminal status — {@code buildService.create} would enqueue
+   * a real {@code task_queue} BAKE row that the shared app's background {@code
+   * QueueProcessorScheduler} tick can claim mid-test, invalidating this build's cache entry from
+   * under the assertions (#41 flake). A terminal build with no queue row is invisible to the
+   * scheduler.
+   */
   private long freshBuildWithModel() {
     JobRow row = new JobRow();
     row.fullName = "pipeline-cache-resolvability-test/" + System.nanoTime();
@@ -143,9 +146,15 @@ class PipelineModelCacheResolvabilityTest {
     row.configJson = "{}";
     row.enabled = true;
     long jobId = stores.jobs().insert(row);
-    Build created =
-        buildService.create(
-            new NewBuildRequest(jobId, null, "test", "test", null, EMPTY_PIPELINE_JSON, null));
-    return created.id();
+
+    BuildRow b = new BuildRow();
+    b.jobId = jobId;
+    b.buildNumber = stores.builds().nextBuildNumber(jobId);
+    b.status = "SUCCESS";
+    b.queuedAt = java.time.Instant.now();
+    b.triggeredBy = "test";
+    b.triggerType = "manual";
+    b.pipelineModelJson = EMPTY_PIPELINE_JSON;
+    return stores.withTransaction(c -> stores.builds().insert(c, b));
   }
 }

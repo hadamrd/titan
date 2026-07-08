@@ -6,11 +6,14 @@
  *
  * Source sets:
  *   src/main/       — production code
- *   src/test/       — @QuarkusTest unit tests (H2 via H2StoresProducer) +
- *                     @QuarkusTest ITs (Postgres via PostgresTestResource) +
- *                     plain @Testcontainers engine smoke tests (EngineSmokIT)
- *   src/integrationTest/  — reserved for @QuarkusIntegrationTest (packaged artifact tests);
- *                           owned by the Quarkus Gradle plugin.
+ *   src/test/       — @QuarkusTest unit tests (H2 via H2StoresProducer); hermetic —
+ *                     no Docker/network required (issue #41). IT infra helpers
+ *                     (PostgresTestResource, PostgresItProfile, KeycloakDevServicesProfile)
+ *                     live here too and are shared with integrationTest via
+ *                     integrationTestImplementation(sourceSets["test"].output).
+ *   src/integrationTest/  — Docker-dependent tests: @QuarkusTest ITs (Testcontainers
+ *                           Postgres / Dev Services Keycloak), plain @Testcontainers
+ *                           engine smoke tests (EngineSmokIT), and the chaos rig.
  *
  * No JaCoCo floor set yet — coverage baselines are still being established.
  */
@@ -209,6 +212,13 @@ tasks.withType<Test> {
     val keycloakImage =
         System.getenv("KEYCLOAK_DOCKER_IMAGE") ?: "quay.io/keycloak/keycloak:26.0"
     systemProperty("quarkus.keycloak.devservices.image-name", keycloakImage)
+
+    // Gradle's default 512m test-worker heap OOMs the full titan-server suite: every distinct
+    // QuarkusTestProfile re-augments and reboots the application in the SAME worker JVM, and a
+    // full run cycles through a dozen-plus profiles (issue #41 — "Gradle Test Executor" died
+    // with java.lang.OutOfMemoryError: Java heap space mid-suite, taking unrelated classes'
+    // results with it). 2g keeps headroom without starving the 8-worker daemon (-Xmx4g).
+    maxHeapSize = "2g"
 }
 
 // The Quarkus plugin compiles its generated sources (gRPC stubs, config) in a

@@ -30,6 +30,10 @@ class NotificationContextFormatterTest {
 
   @Test
   void webhookPayload_failedBuild_carriesAllSreFields() {
+    // deepLink is the FULLY-QUALIFIED build-detail URL per the NotificationContext contract —
+    // BuildCloser appends "/builds/{id}" to titan.public-url BEFORE constructing the context;
+    // the formatter emits it verbatim (issue #41: the old fixture passed the bare base URL and
+    // expected the formatter to append the path, which was never the formatter's job).
     NotificationContext ctx =
         NotificationContext.of(
             42L,
@@ -38,7 +42,7 @@ class NotificationContextFormatterTest {
             "team-app/release",
             72_345L,
             "Deploy to prod",
-            "https://titan.example.com");
+            "https://titan.example.com/builds/42");
 
     ObjectNode body = NotificationDispatcher.buildWebhookPayload(ctx);
     assertEquals("BUILD_FAILED", body.get("kind").asText());
