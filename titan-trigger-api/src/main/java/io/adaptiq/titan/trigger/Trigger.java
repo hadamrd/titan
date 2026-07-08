@@ -9,8 +9,7 @@ import java.util.UUID;
  * A scheduling trigger — the unit of "when should this owner act" (design/50, Tier 2).
  *
  * <p>Concrete trigger types subclass this and ship a companion {@link TriggerDescriptor} discovered
- * via JDK {@link java.util.ServiceLoader} (see docs/design/57-phase3-preflight-audit.md Section 1,
- * decision 2).
+ * via JDK {@link java.util.ServiceLoader}.
  *
  * <p>Each trigger carries a stable, minted {@link #getId() id} so its runtime state (last-fired
  * time) survives config round-trips even as other triggers are added or removed.

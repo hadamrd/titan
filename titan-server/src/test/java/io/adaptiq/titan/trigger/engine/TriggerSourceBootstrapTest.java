@@ -11,8 +11,6 @@ import org.junit.jupiter.api.Test;
  * TriggerSource} CDI bean is {@code start()}ed on Quarkus startup. The fake source below is a
  * {@code @ApplicationScoped} CDI bean discovered by Arc the same way a real {@code TriggerSource}
  * would be.
- *
- * <p>See docs/design/57-phase3-preflight-audit.md Section 1, decision 3.
  */
 @QuarkusTest
 class TriggerSourceBootstrapTest {

@@ -11,8 +11,7 @@ import java.util.ServiceLoader;
  * Descriptor base for {@link Trigger}s (design/50, Tier 2).
  *
  * <p>Discovery uses JDK {@link ServiceLoader}: each concrete descriptor is registered in {@code
- * META-INF/services/io.adaptiq.titan.trigger.TriggerDescriptor} (see
- * docs/design/57-phase3-preflight-audit.md Section 1, decision 2).
+ * META-INF/services/io.adaptiq.titan.trigger.TriggerDescriptor}.
  *
  * <p>A descriptor carries the trigger type's <em>persistence</em> half: {@link #triggerType} is the
  * JSON discriminator and {@link #readState} reconstructs an instance from stored JSON. A new
