@@ -118,7 +118,7 @@ public class CredentialKeyProviderProducer {
               + " refuses to boot in fail-closed mode rather than start an instance that cannot"
               + " seal user-submitted secrets. Configure a KMS-backed provider"
               + " (e.g. titan-keyprovider-infisical) or set TITAN_CREDENTIAL_KEY for the env"
-              + " fallback. See docs/ops/runbooks/kek-config.md.");
+              + " fallback. See docs/operations/runbooks/kek-config.md.");
     }
 
     return composed;
