@@ -31,13 +31,33 @@
  *    comments at the end purely to surface the gap as a follow-up, never
  *    to fail the test.
  *
+ * Required env — this is a LAYER-2 (real-commit) spec (#50):
+ *  - LAYER2_RIG_AVAILABLE=1 — REQUIRED. Opening a real PR and watching the
+ *    check flip needs a GitHub App installed on the fixture repo with a
+ *    webhook tunnel delivering to the rig — that env exists only on the
+ *    Layer-2 / public rig (`task rig:smoke:real`, docs/ops github-app-dev
+ *    runbook). Unset => skip: the local `task dev:titan` rig can never
+ *    satisfy it.
+ *  - TITAN_RIG_URL (or TITAN_UI_URL) — the Layer-2 rig base URL; defaults
+ *    to the local rig otherwise.
+ *  - gh CLI authenticated (`gh auth status` exit 0) with push rights on
+ *    hadamrd/titan-e2e-fixture.
+ *  - Keycloak direct-grant env for the rig (TITAN_KEYCLOAK_URL /
+ *    TITAN_DEV_USER / TITAN_DEV_PASSWORD — fixtures/auth-v3.ts defaults).
+ *
  * Skip rules (deterministic, no test.skip-in-the-middle):
+ *  - LAYER2_RIG_AVAILABLE unset          => skip (local-dev posture, #50)
  *  - `gh auth status` fails              => skip
  *  - rig /api/v1 not reachable (5s)      => skip
  *  - cannot fetch Keycloak bearer token  => skip (prod rig keycloak host
  *    may not resolve from CI / dev env)
  *
- * @tag @golden
+ * Tagging (#50): @real-commit ONLY — deliberately NOT @golden. The local
+ * @golden set (dev/rig-smoke/run-golden.sh, --grep @golden) must be green-able
+ * on `task dev:titan` by definition; this spec runs in the Layer-2 smoke
+ * (`task rig:smoke:real`, --grep @real-commit) instead.
+ *
+ * @tag @real-commit
  */
 import { test, expect } from '@playwright/test'
 import { execFileSync, spawnSync } from 'node:child_process'
@@ -258,10 +278,18 @@ function listPrComments(prNumber: number): PrComment[] {
 
 // ── the spec ───────────────────────────────────────────────────────────
 
-test.describe('@golden v3 github-pr-roundtrip', () => {
+// @real-commit only — NOT @golden. Layer-2 spec; see the header tagging note.
+test.describe('@real-commit v3 github-pr-roundtrip', () => {
   test('PR open -> Titan check appears -> goes terminal -> rig SHA matches', async () => {
     test.setTimeout(15 * 60_000)
 
+    // Same posture guard as 53-archive-artifacts-real-commit (#50): the
+    // GitHub App installation + webhook tunnel exist only on the Layer-2 rig.
+    test.skip(
+      !process.env.LAYER2_RIG_AVAILABLE,
+      'LAYER2_RIG_AVAILABLE unset; local-dev posture — GitHub App installation ' +
+        '+ webhook tunnel exist only on the Layer-2 rig (task rig:smoke:real)',
+    )
     if (!ghAuthOk()) {
       test.skip(true, 'gh CLI not authenticated; cannot drive the GitHub side')
     }
