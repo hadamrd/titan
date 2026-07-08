@@ -43,7 +43,15 @@ class CacheBehaviorTest {
   @Inject TitanStores stores;
   @Inject BuildService buildService;
   @Inject JobService jobService;
-  @Inject PipelineModelCache pipelineModelCache;
+
+  /**
+   * Deliberately NOT {@code @Inject}-ed (#37): an injection point — even one in test sources —
+   * counts as a "user" during ARC's unused-bean removal and would keep the bean alive under
+   * {@code @QuarkusTest} while production (where nothing injects it) silently loses it.
+   * Programmatic lookup here mirrors production and keeps the removability oracle honest — see
+   * {@link PipelineModelCacheResolvabilityTest}.
+   */
+  private PipelineModelCache pipelineModelCache;
 
   @Inject
   @CacheName("pipeline-model")
@@ -63,6 +71,8 @@ class CacheBehaviorTest {
 
   @BeforeEach
   void clearAll() {
+    pipelineModelCache =
+        jakarta.enterprise.inject.spi.CDI.current().select(PipelineModelCache.class).get();
     // Each test starts with all caches empty — @ApplicationScoped beans are shared across tests.
     pipelineModelCacheHandle.invalidateAll().await().indefinitely();
     jobLookupCacheHandle.invalidateAll().await().indefinitely();
