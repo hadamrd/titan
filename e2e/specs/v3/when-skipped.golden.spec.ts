@@ -40,15 +40,20 @@ const CREDENTIAL_KEY = `e2e-when-skipped-${RUN_TAG}`
 const WEBHOOK_SECRET = `s3cr3t-${RUN_TAG}`
 const REPO_FULL_NAME = `hadamrd/titan-e2e-when-${RUN_TAG}`
 
-// The inline pipeline: step "build" always runs; step "deploy" is branch-guarded and must skip
-// on `main` (the guard targets release/*).
+// The inline pipeline: the first sh step always runs; the second is branch-guarded and must
+// skip on `main` (the guard targets release/*).
+//
+// GH #51 spec fix: the PDL grammar has NO step-level `name:` key — a step is exactly ONE
+// descriptor key (`sh:`, `script:`, …) plus registered scope keys (`when:`, `image:`, …); the
+// server 400s on `name:` ("a step has exactly one descriptor key"), so the original YAML could
+// never even create the job. This mirrors the engine's own canonical fixture
+// (titan-server/src/integrationTest/resources/.../when-branch.yml + WhenBranchIT): node ids are
+// deterministic `<stage-slug>-s<index>` — `build-s0` (unguarded) and `build-s1` (guarded).
 const PIPELINE_YAML = `stages:
-  - stage: Build
+  - stage: build
     steps:
       - sh: "echo built"
-        name: build
       - sh: "echo deploy-release"
-        name: deploy
         when:
           branch: "${GUARD_GLOB}"
 `
@@ -258,16 +263,17 @@ test.describe('v3 when-skipped @golden', () => {
       const nodesResp = await apiGet<FlowNode[]>(request, bearer, `/api/v1/builds/${buildId}/nodes`)
       expect(nodesResp.ok, `GET /builds/${buildId}/nodes HTTP ${nodesResp.status}`).toBe(true)
       const nodes = nodesResp.body ?? []
-      const named = (want: string) =>
-        nodes.find((n) => (n.displayName ?? n.nodeType) === want || n.nodeId.includes(want))
-      const deploy = named('deploy')
-      const build = named('build')
+      // GH #51: steps are not nameable in the PDL grammar; node ids are the engine's
+      // deterministic `<stage-slug>-s<index>` (same ids WhenBranchIT asserts on).
+      const byId = (id: string) => nodes.find((n) => n.nodeId === id)
+      const deploy = byId('build-s1')
+      const build = byId('build-s0')
       expect(
         deploy?.status,
-        `branch-guarded step 'deploy' status was "${deploy?.status}", expected SKIPPED — ` +
-          `nodes: ${JSON.stringify(nodes.map((n) => [n.displayName ?? n.nodeType, n.status]))}`,
+        `branch-guarded step 'build-s1' status was "${deploy?.status}", expected SKIPPED — ` +
+          `nodes: ${JSON.stringify(nodes.map((n) => [n.nodeId, n.status]))}`,
       ).toBe('SKIPPED')
-      expect(build?.status, `plain step 'build' should be SUCCESS`).toBe('SUCCESS')
+      expect(build?.status, `plain step 'build-s0' should be SUCCESS`).toBe('SUCCESS')
 
       // ── 7. UI golden: build-detail rail counts the SKIPPED node as `skip`. ─
       // Before the variantOf fix a SKIPPED node fell through to `queued` and this total read 0.

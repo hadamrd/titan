@@ -15,6 +15,14 @@
  *
  * <p>Network coupling lives here, not in {@link BuildCompareView}, so the
  * view stays unit-testable with hand-built DTOs.
+ *
+ * <p>File-naming: the {@code $buildId_} trailing underscore UN-NESTS this
+ * route from {@code builds/$buildId.tsx} (GH #51). The build-detail page is a
+ * leaf that never renders an {@code <Outlet/>}, so as a nested child this
+ * route matched the URL but never rendered — the parent swallowed the subtree
+ * and {@code /builds/<a>/compare/<b>} (including the garbage-id 404 path)
+ * came up as build-detail-or-blank. Same bug class as the PR #343
+ * /login/callback fix. The URL is unchanged: {@code /builds/$buildId/compare/$other}.
  */
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useArtifacts, useBuild, useBuildNodes, useJob } from '@/api/hooks'
@@ -30,7 +38,7 @@ function toBuildId(raw: string | undefined): number | null {
   return n
 }
 
-export const Route = createFileRoute('/builds/$buildId/compare/$other')({
+export const Route = createFileRoute('/builds/$buildId_/compare/$other')({
   component: BuildComparePathPage,
 })
 
