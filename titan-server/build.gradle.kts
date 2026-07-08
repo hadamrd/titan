@@ -49,7 +49,7 @@ dependencies {
     implementation(libs.quarkus.flyway)
     implementation(libs.quarkus.oidc)
     implementation(libs.quarkus.scheduler)
-    // Structured JSON console logger — see docs/ops/logging.md (PR 1 of logging split).
+    // Structured JSON console logger — see docs/operations/logging.md (PR 1 of logging split).
     implementation(libs.quarkus.logging.json)
     // OpenTelemetry — traces+metrics export, gated on TITAN_OTEL_ENDPOINT (#314, PR 2). When the
     // env var is unset, the extension is on the classpath but no exporter is configured (no-op);
