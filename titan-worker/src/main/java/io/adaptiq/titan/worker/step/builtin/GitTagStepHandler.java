@@ -83,6 +83,16 @@ public final class GitTagStepHandler implements StepHandler {
    */
   private static final Pattern FORBIDDEN_TAG_CHARS = Pattern.compile("[~^:?*\\[\\\\]");
 
+  /**
+   * Fallback tagger identity for annotated tags on workers with no git identity configured (issue
+   * #61, spec 31). Deterministic and obviously synthetic — operators who want real attribution set
+   * {@code user.name}/{@code user.email} (or the {@code GIT_COMMITTER_*} env vars) on the worker.
+   */
+  static final String FALLBACK_IDENT_NAME = "Titan CI";
+
+  /** See {@link #FALLBACK_IDENT_NAME}. */
+  static final String FALLBACK_IDENT_EMAIL = "titan-ci@noreply.local";
+
   @Override
   public String descriptorId() {
     return "gitTag";
@@ -171,7 +181,30 @@ public final class GitTagStepHandler implements StepHandler {
     tagCmd.add(tag);
     tagCmd.add(ref);
 
-    int tagExit = request.executor().run(tagCmd, request.workDir(), request.env(), log);
+    // Annotated tags carry a tagger identity, and git hard-fails with exit 128 ("Committer
+    // identity unknown") when neither user.name/user.email nor the GIT_COMMITTER_* env vars are
+    // set — the normal state of a CI worker container (issue #61, spec 31). Probe first and only
+    // inject the deterministic fallback when git genuinely cannot resolve an identity: the
+    // GIT_COMMITTER_* env vars outrank git config, so injecting unconditionally would silently
+    // override an identity the operator configured on the worker host.
+    Map<String, String> tagEnv = request.env();
+    if (message != null
+        && !message.isBlank()
+        && !hasCommitterIdentity(request.workDir(), request.env())) {
+      tagEnv = new LinkedHashMap<>(request.env());
+      tagEnv.putIfAbsent("GIT_COMMITTER_NAME", FALLBACK_IDENT_NAME);
+      tagEnv.putIfAbsent("GIT_COMMITTER_EMAIL", FALLBACK_IDENT_EMAIL);
+      tagEnv.putIfAbsent("GIT_AUTHOR_NAME", FALLBACK_IDENT_NAME);
+      tagEnv.putIfAbsent("GIT_AUTHOR_EMAIL", FALLBACK_IDENT_EMAIL);
+      log.system(
+          "gitTag: no git committer identity configured on this worker — using fallback tagger '"
+              + FALLBACK_IDENT_NAME
+              + " <"
+              + FALLBACK_IDENT_EMAIL
+              + ">'");
+    }
+
+    int tagExit = request.executor().run(tagCmd, request.workDir(), tagEnv, log);
     if (tagExit != 0) {
       // The executor has already streamed stderr to the log; surface a clear message that
       // includes the most common cause (tag already exists) so a reaped retry's failure is
@@ -301,6 +334,35 @@ public final class GitTagStepHandler implements StepHandler {
     request.outputs().put("pushed", String.valueOf(pushed));
     if (refCommitSha != null && !refCommitSha.isBlank()) {
       request.outputs().put("ref", refCommitSha);
+    }
+  }
+
+  /**
+   * Whether git can already resolve a committer identity in this workspace — via repo/global/system
+   * config or the {@code GIT_COMMITTER_*}/{@code EMAIL} env vars the step environment carries.
+   * Probed with {@code git var GIT_COMMITTER_IDENT}, which exits non-zero ("Committer identity
+   * unknown") exactly when an annotated {@code git tag -a} would fail with exit 128 (issue #61,
+   * spec 31). The step env is layered over the inherited process env — the same layering {@code
+   * LocalProcessExecutor} applies — so the probe sees what the tag command will see.
+   *
+   * <p>Returns {@code false} on any probe failure (git missing, I/O error): the only consequence is
+   * injecting the harmless fallback identity, and the real tag command still reports its own
+   * errors.
+   */
+  private static boolean hasCommitterIdentity(Path workDir, Map<String, String> env) {
+    try {
+      ProcessBuilder pb =
+          new ProcessBuilder("git", "var", "GIT_COMMITTER_IDENT")
+              .directory(workDir.toFile())
+              .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+              .redirectError(ProcessBuilder.Redirect.DISCARD);
+      pb.environment().putAll(env);
+      return pb.start().waitFor() == 0;
+    } catch (IOException e) {
+      return false;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return false;
     }
   }
 

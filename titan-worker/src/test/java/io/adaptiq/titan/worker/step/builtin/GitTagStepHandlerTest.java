@@ -171,6 +171,68 @@ class GitTagStepHandlerTest extends StepHandlerTck {
         "annotated tag must be a 'tag' object, not 'commit'");
   }
 
+  // ── issue #61 (spec 31): annotated tag on a worker with NO git identity ─
+
+  @Test
+  void annotatedTagOnWorkerWithoutGitIdentity_succeedsWithFallbackTagger() throws Exception {
+    // Reproduces the live-rig failure: a fresh CI container has no user.name/user.email anywhere,
+    // so `git tag -a` exits 128 with "Committer identity unknown". Strip the repo-local identity
+    // the fixture set up and pin global/system config to an empty file so the developer's own
+    // ~/.gitconfig cannot mask the regression.
+    git(workDir, "config", "--unset", "user.email");
+    git(workDir, "config", "--unset", "user.name");
+    Path emptyConfig = Files.createTempFile("titan-gittag-noident-", ".gitconfig");
+    Map<String, String> env = new HashMap<>();
+    env.put("GIT_CONFIG_GLOBAL", emptyConfig.toAbsolutePath().toString());
+    env.put("GIT_CONFIG_SYSTEM", emptyConfig.toAbsolutePath().toString());
+
+    CapturingLog log = new CapturingLog();
+    StepResult result =
+        new GitTagStepHandler()
+            .execute(
+                requestWith(
+                    Map.of("tag", "v7.0.0-noident", "message", "release", "push", false),
+                    env,
+                    log));
+
+    assertTrue(
+        result.isSuccess(),
+        "annotated tag must not fail with 'Committer identity unknown' on an identity-less "
+            + "worker; log: "
+            + log.text());
+    assertEquals("tag", gitOut(workDir, "cat-file", "-t", "v7.0.0-noident"));
+    // The tagger must be the deterministic Titan fallback — observable provenance, not garbage.
+    String tagObject = gitOut(workDir, "cat-file", "tag", "v7.0.0-noident");
+    assertTrue(
+        tagObject.contains(GitTagStepHandler.FALLBACK_IDENT_NAME),
+        "fallback tagger name must appear in the tag object, got: " + tagObject);
+    assertTrue(
+        tagObject.contains(GitTagStepHandler.FALLBACK_IDENT_EMAIL),
+        "fallback tagger email must appear in the tag object, got: " + tagObject);
+  }
+
+  @Test
+  void annotatedTagWithConfiguredIdentity_neverOverriddenByFallback() throws Exception {
+    // The fixture repo HAS user.name/user.email ("Titan TCK"). The fallback must not clobber it —
+    // GIT_COMMITTER_* env vars outrank git config, so an unconditional injection would silently
+    // rewrite the tagger on every configured worker.
+    CapturingLog log = new CapturingLog();
+    StepResult result =
+        new GitTagStepHandler()
+            .execute(
+                requestWith(
+                    Map.of("tag", "v7.1.0-ident", "message", "release", "push", false), log));
+
+    assertTrue(result.isSuccess(), log.text());
+    String tagObject = gitOut(workDir, "cat-file", "tag", "v7.1.0-ident");
+    assertTrue(
+        tagObject.contains("Titan TCK"),
+        "configured identity must be preserved as the tagger, got: " + tagObject);
+    assertFalse(
+        tagObject.contains(GitTagStepHandler.FALLBACK_IDENT_EMAIL),
+        "fallback identity must NOT override a configured one, got: " + tagObject);
+  }
+
   @Test
   void reTaggingAnExistingTagFailsWithClearMessage() throws Exception {
     // Tag once, then attempt again. The second call must fail loudly — pure git is not
