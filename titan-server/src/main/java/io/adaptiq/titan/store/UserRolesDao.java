@@ -24,10 +24,19 @@ public interface UserRolesDao extends SqlObject {
   @NonNull
   List<UserRoleRow> findByUserId(@Bind("userId") String userId);
 
-  /** Insert one (user, role) pair. No-op on PK conflict — idempotent grant. */
+  /**
+   * Insert one (user, role) pair. No-op on PK conflict — idempotent grant.
+   *
+   * <p>Uses the target-less {@code ON CONFLICT DO NOTHING} form rather than {@code ON CONFLICT
+   * (user_id, role)}: the composite PK is the table's only constraint, so the two are semantically
+   * identical on Postgres, but the target-less form ALSO parses under H2's PostgreSQL compatibility
+   * mode (H2 rejects an explicit conflict-target column list). Same convention as {@link
+   * RbacUserRoleDao#grant} — keeps the DAO exercisable by H2-backed {@code @QuarkusTest} classes
+   * (e.g. {@code BuildReplayApiTest} seeds its ADMIN row through here; issue #41).
+   */
   @SqlUpdate(
       "INSERT INTO titan.user_roles (user_id, role) VALUES (:userId, :role) "
-          + "ON CONFLICT (user_id, role) DO NOTHING")
+          + "ON CONFLICT DO NOTHING")
   void grant(@Bind("userId") String userId, @Bind("role") String role);
 
   /** Remove one (user, role) pair. */

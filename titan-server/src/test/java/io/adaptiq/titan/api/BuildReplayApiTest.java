@@ -13,6 +13,8 @@ import io.quarkus.test.security.TestSecurity;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.Map;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -20,6 +22,12 @@ import org.junit.jupiter.api.Test;
  *
  * <p>RBAC matrix lives in {@code RbacTest} (the shared cross-API security check); these tests focus
  * on the request-validation surface and the happy-path 201 contract.
+ *
+ * <p>Beyond the {@code @RolesAllowed} realm-role gate, the replay endpoints run the DB-backed
+ * {@link io.adaptiq.titan.auth.Authz#requires} check (#1121), which reads {@code titan.user_roles}
+ * and default-denies users without a row. Each test therefore seeds an ADMIN row for {@code
+ * testuser} in {@code @BeforeEach} and revokes it in {@code @AfterEach} so no role assignment leaks
+ * into other test classes sharing the H2 database.
  */
 @QuarkusTest
 @TestSecurity(
@@ -28,6 +36,17 @@ import org.junit.jupiter.api.Test;
 class BuildReplayApiTest {
 
   @Inject TitanStores stores;
+
+  @BeforeEach
+  void grantAdminTitanRole() {
+    // Authz.requires(BUILD_RERUN) consults titan.user_roles — default-deny without this row.
+    stores.userRoles().grant("testuser", "ADMIN");
+  }
+
+  @AfterEach
+  void revokeAdminTitanRole() {
+    stores.userRoles().revoke("testuser", "ADMIN");
+  }
 
   @Test
   void replay_unknownParent_returns404() {
