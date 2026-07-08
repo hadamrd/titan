@@ -354,6 +354,26 @@ class QueueHandlerSupport {
     return msg != null && !msg.isBlank() ? msg : t.getClass().getSimpleName();
   }
 
+  /**
+   * A root-cause-preserving description of an exception (issue #36): the outermost exception's
+   * class + message, plus — when a cause chain exists — the innermost cause's class + message. A
+   * wrapper like {@code TitanDataException("Transaction failed")} can therefore never reach a
+   * build's {@code error_message}/{@code failure_summary} bare: the diagnostic an SRE acts on (the
+   * root cause) always rides along.
+   */
+  @NonNull
+  static String describeWithCause(@NonNull Throwable t) {
+    Throwable root = t;
+    while (root.getCause() != null && root.getCause() != root) {
+      root = root.getCause();
+    }
+    String summary = t.getClass().getSimpleName() + ": " + describe(t);
+    if (root != t) {
+      summary += " (caused by " + root.getClass().getSimpleName() + ": " + describe(root) + ")";
+    }
+    return summary;
+  }
+
   /** Coerce a payload {@code buildId} (a JSON number or numeric string) to a {@code long}. */
   static long toBuildId(@NonNull Object buildIdObj) {
     try {

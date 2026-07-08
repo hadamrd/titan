@@ -1,10 +1,12 @@
 package io.adaptiq.titan.queue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.adaptiq.titan.db.TitanDataException;
 import io.adaptiq.titan.flow.CasLostException;
 import io.adaptiq.titan.flow.NotificationDispatcher;
 import io.adaptiq.titan.flow.TitanOrchestrator;
@@ -150,6 +152,75 @@ class QueueHandlersTest {
 
     TaskQueueRow after = stores.taskQueue().findById(taskId).orElseThrow();
     assertEquals("FAILED", after.status);
+  }
+
+  @Test
+  void bakeHandler_wrappedTransactionFailure_persistsRootCauseNotBareWrapper() {
+    // Issue #36 regression: a bake blowing up inside a transaction used to persist ONLY the
+    // wrapper's message — builds died with an opaque 'Transaction failed'. The persisted
+    // error_message/failure_summary must now carry the root cause's class + message.
+    long jobId = freshJob();
+    long buildId = freshBuild(jobId, "QUEUED", "{\"stages\":[]}");
+    long taskId =
+        insertOrchestrateTask(buildId, "{\"action\":\"BAKE\",\"buildId\":" + buildId + "}");
+    TaskQueueRow task = stores.taskQueue().findById(taskId).orElseThrow();
+
+    new BakeHandler(
+            support,
+            (s, bid) -> {
+              throw new TitanDataException(
+                  "Transaction failed",
+                  new IllegalStateException(
+                      "Stage 'build' has an invalid `when:` expression"
+                          + " (steps.unit-test.result == 'success'): unknown variable 'steps'"));
+            })
+        .handle(stores, task, Map.of("buildId", buildId));
+
+    BuildRow build = stores.builds().findById(buildId).orElseThrow();
+    assertEquals("FAILED", build.status);
+    // Adversarial oracle: the CONTENT, not just the status. A bare wrapper message is the bug.
+    assertNotEquals("Transaction failed", build.failureSummary);
+    assertNotEquals("bake failed: Transaction failed", build.failureSummary);
+    assertNotEquals("Transaction failed", build.errorMessage);
+    assertNotEquals("bake failed: Transaction failed", build.errorMessage);
+    assertTrue(
+        build.failureSummary.contains("TitanDataException: Transaction failed"),
+        "wrapper class+message must be present: " + build.failureSummary);
+    assertTrue(
+        build.failureSummary.contains("IllegalStateException"),
+        "root-cause class must be present: " + build.failureSummary);
+    assertTrue(
+        build.failureSummary.contains("unknown variable 'steps'"),
+        "root-cause message must be present: " + build.failureSummary);
+    assertTrue(
+        build.errorMessage.contains("unknown variable 'steps'"),
+        "error_message must carry the root cause too: " + build.errorMessage);
+
+    TaskQueueRow after = stores.taskQueue().findById(taskId).orElseThrow();
+    assertEquals("FAILED", after.status);
+    assertTrue(
+        after.resultJson.contains("unknown variable 'steps'"),
+        "the failed task's result must carry the root cause: " + after.resultJson);
+  }
+
+  @Test
+  void bakeHandler_causelessRuntime_persistsClassAndMessage() {
+    long jobId = freshJob();
+    long buildId = freshBuild(jobId, "QUEUED", "{\"stages\":[]}");
+    long taskId =
+        insertOrchestrateTask(buildId, "{\"action\":\"BAKE\",\"buildId\":" + buildId + "}");
+    TaskQueueRow task = stores.taskQueue().findById(taskId).orElseThrow();
+
+    new BakeHandler(
+            support,
+            (s, bid) -> {
+              throw new IllegalStateException("boom without a cause");
+            })
+        .handle(stores, task, Map.of("buildId", buildId));
+
+    BuildRow build = stores.builds().findById(buildId).orElseThrow();
+    assertEquals("FAILED", build.status);
+    assertEquals("bake failed: IllegalStateException: boom without a cause", build.failureSummary);
   }
 
   // ── SynthesizeHandler ────────────────────────────────────────────────────
