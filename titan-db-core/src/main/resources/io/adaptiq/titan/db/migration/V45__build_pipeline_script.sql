@@ -1,0 +1,16 @@
+-- Per-build pipeline-script snapshot (issue #61, spec 24).
+--
+-- A build's YAML source was previously only readable from titan.jobs.pipeline_script,
+-- which is MUTABLE — an operator edit between two builds silently rewrote history for
+-- every past build, and the build-detail API could not answer "what source did THIS
+-- build bake from?" at all (the UI's Build type already declares `pipelineScript` and
+-- rendered nothing). The controller now snapshots the job's script onto the build at
+-- SYNTHESIZE dispatch time (QueueHandlerSupport.enqueueWorkerSynthesis) — the exact
+-- moment the script is handed to the worker as the synthesis source.
+--
+-- Additive only. Nullable; existing rows and replay builds (which reuse the parent's
+-- pipeline_model_json and never re-synthesize) stay NULL — the API strips the field
+-- via JsonInclude.NON_NULL. No backfill: jobs.pipeline_script may have drifted since
+-- an old build ran, so a backfill would fabricate provenance.
+-- Portable DDL: plain TEXT, one ADD COLUMN per statement (H2 + PostgreSQL).
+ALTER TABLE titan.builds ADD COLUMN pipeline_script TEXT;

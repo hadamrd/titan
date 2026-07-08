@@ -245,6 +245,11 @@ class QueueHandlerSupport {
   /** Enqueue a worker-side {@code SYNTHESIZE} task (design/38 Stage 1b). */
   void enqueueWorkerSynthesis(
       @NonNull TitanStores daos, long buildId, @NonNull String pipelineScript) {
+    // Snapshot the synthesis source onto the build (issue #61, spec 24): this is the exact
+    // script the worker will parse, so GET /api/v1/builds/{id} can answer "what YAML did this
+    // build run from?" even after the job's mutable pipeline_script is edited. Idempotent —
+    // a re-dispatch after a cancelled worker task rewrites the same value.
+    daos.builds().updatePipelineScript(buildId, pipelineScript);
     TaskQueueRow synth = new TaskQueueRow();
     synth.type = "EXECUTE_COMMAND";
     synth.queueName = QueueProcessor.SYNTHESIS_QUEUE;

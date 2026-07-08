@@ -56,7 +56,8 @@ class BuildDtoMapperTest {
         triggerMetaJson, // triggerMetaJson
         null, // displayName
         null, // failureCause
-        null); // failureCauseDetail
+        null, // failureCauseDetail
+        null); // pipelineScript
   }
 
   /** A manual build carrying the given raw {@code parameters_json} blob (issue #1266). */
@@ -83,7 +84,36 @@ class BuildDtoMapperTest {
         null, // triggerMetaJson
         null, // displayName
         null, // failureCause
-        null); // failureCauseDetail
+        null, // failureCauseDetail
+        null); // pipelineScript
+  }
+
+  /** A manual build carrying the given per-build pipeline-YAML snapshot (issue #61, spec 24). */
+  private static Build buildWithScript(String pipelineScript) {
+    return new Build(
+        4711L, // id
+        7L, // jobId
+        12, // buildNumber
+        "SUCCESS", // status
+        null, // parametersJson
+        "octocat", // triggeredBy
+        "manual", // triggerType
+        null, // deploymentId
+        Instant.parse("2026-06-01T10:00:00Z"), // queuedAt
+        null, // startedAt
+        null, // finishedAt
+        null, // durationMs
+        null, // errorMessage
+        null, // pipelineModelJson
+        null, // startedByInstance
+        null, // failureSummary
+        null, // replayedFromBuildId
+        null, // replayedFromNodeId
+        null, // triggerMetaJson
+        null, // displayName
+        null, // failureCause
+        null, // failureCauseDetail
+        pipelineScript); // pipelineScript
   }
 
   /** A list-level row carrying the given raw {@code parameters_json} blob (issue #1266). */
@@ -239,6 +269,7 @@ class BuildDtoMapperTest {
             META_JSON,
             null,
             null,
+            null,
             null);
     BuildDto dto = BuildDto.from(appBuild, linkage("hadamrd", "titan"));
 
@@ -287,6 +318,73 @@ class BuildDtoMapperTest {
     // A key whose value is JSON null is dropped rather than mapped to the string "null".
     BuildDto dto = BuildDto.from(buildWithParams("{\"GREETING\":\"world\",\"MODE\":null}"));
     assertEquals(Map.of("GREETING", "world"), dto.parametersUsed());
+  }
+
+  // ── pipelineScript snapshot projection (issue #61, spec 24) ─────────────────
+
+  @Test
+  void from_detailMapper_projectsPipelineScriptSnapshot() {
+    String yaml = "agent: linux\nstages:\n  - stage: Build\n    steps:\n      - sh: make\n";
+    BuildDto dto = BuildDto.from(buildWithScript(yaml));
+
+    assertEquals(
+        yaml,
+        dto.pipelineScript(),
+        "detail mapper must surface the per-build pipeline-YAML snapshot verbatim");
+  }
+
+  @Test
+  void from_detailMapperWithLinkage_alsoProjectsPipelineScript() {
+    String yaml = "stages:\n  - stage: Build\n    steps:\n      - sh: make\n";
+    Build appBuild =
+        new Build(
+            4711L,
+            7L,
+            12,
+            "SUCCESS",
+            null,
+            "octocat",
+            "github-app:push",
+            null,
+            Instant.parse("2026-06-01T10:00:00Z"),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            META_JSON,
+            null,
+            null,
+            null,
+            yaml);
+    BuildDto dto = BuildDto.from(appBuild, linkage("hadamrd", "titan"));
+
+    assertEquals(yaml, dto.pipelineScript(), "App-enriched detail path must carry the script too");
+  }
+
+  @Test
+  void from_listProjection_neverCarriesPipelineScript() {
+    // The list mapper (BuildRow → DTO) must never ship the script blob at list level — same
+    // byte-identical-list contract as parametersUsed (#1266).
+    BuildRow row = rowWithParams(null);
+    row.pipelineScript = "stages: []\n";
+
+    assertNull(
+        BuildDto.from(row).pipelineScript(),
+        "pipelineScript must never leak to the list-level projection");
+  }
+
+  @Test
+  void from_nullOrBlankPipelineScript_omitsField() {
+    // Pre-migration rows / replay builds carry null; a degenerate blank snapshot is also omitted
+    // so clients never receive an empty-string script.
+    assertNull(BuildDto.from(buildWithScript(null)).pipelineScript());
+    assertNull(BuildDto.from(buildWithScript("")).pipelineScript());
+    assertNull(BuildDto.from(buildWithScript("   ")).pipelineScript());
   }
 
   @Test
