@@ -12,7 +12,12 @@
 #      identified by the presence of a `"marker":` key — they record
 #      *that* the bar was met, they don't contribute to the next sample).
 #   2. Each must satisfy: passed >= RIG_SMOKE_GOLDEN_MIN (default 12)
-#      AND failed == 0. Anything else => exit 1 with a diagnostic.
+#      AND failed == 0 AND did_not_run == 0. Anything else => exit 1 with
+#      a diagnostic. did_not_run > 0 means playwright hit globalTimeout and
+#      amputated the suite (#45) — such a run must never count as green.
+#      Lines from before #45 lack the did_not_run field entirely; they are
+#      treated as disqualifying-safe (can't prove they weren't amputated),
+#      never as a crash.
 #   3. On success, appends ONE marker line of the form:
 #        {"ts":"<utc>","marker":"3-consecutive-green target met YYYY-MM-DD"}
 #      to the jsonl and prints it to stdout. Subsequent invocations are
@@ -65,14 +70,23 @@ while IFS= read -r line; do
   i=$((i + 1))
   passed=$(parse_field "$line" passed)
   failed=$(parse_field "$line" failed)
+  did_not_run=$(parse_field "$line" did_not_run)
   if [ -z "$passed" ] || [ -z "$failed" ]; then
     BAR_MET=0
     DIAG="$DIAG\n  run #$i: malformed line, missing passed/failed: $line"
     continue
   fi
-  if [ "$failed" -ne 0 ] || [ "$passed" -lt "$MIN" ]; then
+  # Pre-#45 lines have no did_not_run field. Disqualifying-safe: we cannot
+  # prove such a run wasn't amputated by the old 20-min globalTimeout, so it
+  # never counts toward the bar — but it must not crash the gate either.
+  if [ -z "$did_not_run" ]; then
     BAR_MET=0
-    DIAG="$DIAG\n  run #$i: passed=$passed failed=$failed (need passed>=$MIN, failed==0)"
+    DIAG="$DIAG\n  run #$i: old-format line without did_not_run — cannot prove the run wasn't amputated; rerun rig:smoke to accumulate post-#45 telemetry: $line"
+    continue
+  fi
+  if [ "$failed" -ne 0 ] || [ "$passed" -lt "$MIN" ] || [ "$did_not_run" -ne 0 ]; then
+    BAR_MET=0
+    DIAG="$DIAG\n  run #$i: passed=$passed failed=$failed did_not_run=$did_not_run (need passed>=$MIN, failed==0, did_not_run==0)"
   fi
 done <<< "$LAST3"
 

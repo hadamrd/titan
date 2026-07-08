@@ -21,9 +21,11 @@ fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-green='{"ts":"2026-05-28T10:00:00Z","passed":13,"failed":0,"durationMs":120000}'
-red='{"ts":"2026-05-28T10:05:00Z","passed":11,"failed":2,"durationMs":121000}'
-under='{"ts":"2026-05-28T10:10:00Z","passed":11,"failed":0,"durationMs":121000}'
+green='{"ts":"2026-05-28T10:00:00Z","passed":13,"failed":0,"did_not_run":0,"durationMs":120000}'
+red='{"ts":"2026-05-28T10:05:00Z","passed":11,"failed":2,"did_not_run":0,"durationMs":121000}'
+under='{"ts":"2026-05-28T10:10:00Z","passed":11,"failed":0,"did_not_run":0,"durationMs":121000}'
+amputated='{"ts":"2026-07-08T10:15:00Z","passed":14,"failed":0,"did_not_run":23,"durationMs":1200000}'
+old_format='{"ts":"2026-05-20T09:00:00Z","passed":13,"failed":0,"durationMs":118000}'
 
 # ── Case 1: 3 greens → bar met, marker appended, exit 0 ──────────────────
 printf '%s\n%s\n%s\n' "$green" "$green" "$green" > "$TMP/g.jsonl"
@@ -107,6 +109,70 @@ if [ "$RC" -ne 2 ]; then
   exit 1
 fi
 echo "ok: missing jsonl exits 2"
+
+# ── Case 8: ADVERSARIAL — amputated run (did_not_run>0) MUST refuse marker ─
+# A 20-min globalTimeout amputation (#45) can leave passed>=MIN and failed==0
+# while dozens of specs never ran. That run must never count as green.
+printf '%s\n%s\n%s\n' "$green" "$green" "$amputated" > "$TMP/a.jsonl"
+set +e
+bash "$SCRIPT" "$TMP/a.jsonl" >/dev/null 2>&1
+RC=$?
+set -e
+if [ "$RC" -eq 0 ]; then
+  echo "FAIL: amputated run (did_not_run=23) must refuse to mark the bar met" >&2
+  exit 1
+fi
+if grep -q '"marker":' "$TMP/a.jsonl"; then
+  echo "FAIL: a marker was appended despite an amputated run in the trio" >&2
+  exit 1
+fi
+echo "ok: ADVERSARIAL — amputated run (did_not_run>0) refuses marker"
+
+# ── Case 9: pre-#45 old-format line (no did_not_run) — graceful disqualify ─
+# Old telemetry can't prove it wasn't amputated: it must NOT count as green,
+# and it must NOT crash the gate (exit 1, not a set -e/-u blowup).
+printf '%s\n%s\n%s\n' "$green" "$old_format" "$green" > "$TMP/o.jsonl"
+set +e
+bash "$SCRIPT" "$TMP/o.jsonl" > "$TMP/o.out" 2>&1
+RC=$?
+set -e
+if [ "$RC" -ne 1 ]; then
+  echo "FAIL: old-format line should disqualify gracefully with exit 1, got $RC" >&2
+  cat "$TMP/o.out" >&2
+  exit 1
+fi
+if grep -q '"marker":' "$TMP/o.jsonl"; then
+  echo "FAIL: a marker was appended despite an old-format line in the trio" >&2
+  exit 1
+fi
+echo "ok: old-format line (no did_not_run) disqualifies gracefully, no crash"
+
+# ── Case 10: ADVERSARIAL chain — a real amputated tee flows end-to-end ─────
+# Feed rig-smoke-parse.sh a tee containing '23 did not run', assert the JSON
+# it appends carries did_not_run=23, then assert check-3-consecutive.sh
+# rejects the trio. This pins the whole #45 pipeline, not just each half.
+PARSE="$REPO_ROOT/dev/rig-smoke/rig-smoke-parse.sh"
+cat > "$TMP/amputated-tee.txt" <<'EOF'
+Running 43 tests using 2 workers
+  14 passed (20.0m)
+  23 did not run
+Timed out waiting 1200s for the test suite to run
+EOF
+printf '%s\n%s\n' "$green" "$green" > "$TMP/chain.jsonl"
+CHAIN_LINE=$(bash "$PARSE" "$TMP/amputated-tee.txt" 0 1200000 "$TMP/chain.jsonl")
+if ! printf '%s' "$CHAIN_LINE" | grep -q '"did_not_run":23'; then
+  echo "FAIL: parse did not carry did_not_run=23 into the JSON: $CHAIN_LINE" >&2
+  exit 1
+fi
+set +e
+bash "$SCRIPT" "$TMP/chain.jsonl" >/dev/null 2>&1
+RC=$?
+set -e
+if [ "$RC" -eq 0 ]; then
+  echo "FAIL: chain — amputated telemetry line was counted as green" >&2
+  exit 1
+fi
+echo "ok: ADVERSARIAL chain — '23 did not run' tee → JSON did_not_run=23 → marker refused"
 
 echo ""
 echo "PASS: all check-3-consecutive.sh cases (including adversarial false-green guards)"

@@ -37,8 +37,13 @@ fi
 
 PASSED=$(grep -oE '[0-9]+ passed' "$TEE" | tail -n1 | grep -oE '[0-9]+' || echo 0)
 FAILED=$(grep -oE '[0-9]+ failed' "$TEE" | tail -n1 | grep -oE '[0-9]+' || echo 0)
+# "X did not run" is playwright's amputation signature (#45): the suite hit
+# globalTimeout and never scheduled X specs. 0 when absent. Recording it in
+# the telemetry makes an amputated run machine-visible so the 3-consecutive
+# marker (check-3-consecutive.sh) can refuse to count it as green.
+DID_NOT_RUN=$(grep -oE '[0-9]+ did not run' "$TEE" | tail -n1 | grep -oE '[0-9]+' || echo 0)
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-LINE="{\"ts\":\"$TS\",\"passed\":$PASSED,\"failed\":$FAILED,\"durationMs\":$DUR}"
+LINE="{\"ts\":\"$TS\",\"passed\":$PASSED,\"failed\":$FAILED,\"did_not_run\":$DID_NOT_RUN,\"durationMs\":$DUR}"
 
 echo "$LINE"
 if [ -n "$OUT" ]; then

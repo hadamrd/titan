@@ -23,6 +23,9 @@
 #   RIG_SMOKE_PLAYWRIGHT_CMD  command prefix run instead of `pnpm exec playwright`
 #   RIG_SMOKE_JSONL           telemetry file (default docs/operations/rig-smoke.jsonl)
 #   RIG_SMOKE_TEE             tee capture path (default /tmp/rig-smoke-out.txt)
+#   SPECS_DIR                 specs dir counted for the time budget (default e2e/specs)
+#   TITAN_PW_WORKERS          playwright workers (default 2 — the sanctioned CI value)
+#   TITAN_GLOBAL_TIMEOUT_MS   suite budget; if unset, derived from the @golden count
 set -euo pipefail
 
 # Repo root is two levels up from dev/rig-smoke/ — resolves correctly no
@@ -32,6 +35,34 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PLAYWRIGHT_CMD="${RIG_SMOKE_PLAYWRIGHT_CMD:-pnpm exec playwright}"
 JSONL="${RIG_SMOKE_JSONL:-$REPO_ROOT/docs/operations/rig-smoke.jsonl}"
 TEE_FILE="${RIG_SMOKE_TEE:-/tmp/rig-smoke-out.txt}"
+
+# ── Suite budget (#45) ──────────────────────────────────────────────────────
+# playwright.config.ts defaults globalTimeout to 20 min, which amputated
+# every smoke run once the @golden set grew past what fits in 20 min at
+# workers=1 (43 specs, most driving REAL worker-executed builds of 30-60s+).
+# The fix lives HERE, in the smoke harness, not in the config defaults:
+# `task e2e` keeps its current behavior; rig:smoke exports its own budget.
+#
+#   workers  — 2, the sanctioned CI default ("keep workers modest").
+#   budget   — @golden count × 90s per spec × 1.5 safety, floored at 45 min.
+#              Scaling with the count preserves the wedge-detection property
+#              (a hung compose still surfaces as a timeout) while never
+#              amputating a healthy run as the golden surface grows.
+export TITAN_PW_WORKERS="${TITAN_PW_WORKERS:-2}"
+
+GOLDEN_COUNT=$(SPECS_DIR="${SPECS_DIR:-$REPO_ROOT/e2e/specs}" \
+  bash "$REPO_ROOT/dev/rig-smoke/golden-count.sh")
+
+if [ -z "${TITAN_GLOBAL_TIMEOUT_MS:-}" ]; then
+  PER_SPEC_MS=90000
+  BUDGET_MS=$((GOLDEN_COUNT * PER_SPEC_MS * 3 / 2)) # ×1.5 safety, integer math
+  FLOOR_MS=$((45 * 60 * 1000))
+  if [ "$BUDGET_MS" -lt "$FLOOR_MS" ]; then
+    BUDGET_MS=$FLOOR_MS
+  fi
+  export TITAN_GLOBAL_TIMEOUT_MS="$BUDGET_MS"
+fi
+echo "[rig-smoke] budget: ${TITAN_GLOBAL_TIMEOUT_MS}ms for ${GOLDEN_COUNT} golden specs, workers=${TITAN_PW_WORKERS}"
 
 START_MS=$(date +%s%3N)
 cd "$REPO_ROOT/e2e"
