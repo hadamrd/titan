@@ -53,6 +53,31 @@ public class QueueProcessor {
   private static final int REAP_VISIBILITY_TIMEOUT_SECONDS = 3600;
 
   /**
+   * Heartbeat freshness window under which a task's claimant counts as alive — the reaper spares
+   * {@code CLAIMED}/{@code PROCESSING} rows whose {@code claimed_by} worker heartbeated inside this
+   * window even past the visibility timeout (issue #49: never reap a live worker's in-flight task).
+   * Defaults to 90s (3x the worker's 30s heartbeat tick) and follows the same {@code
+   * TITAN_AGENT_REAPER_STALE_SECONDS} knob as {@code AgentReaperScheduler} so "alive" means the
+   * same thing to both reapers.
+   */
+  static final int WORKER_LIVENESS_SECONDS = workerLivenessSecondsFromEnv();
+
+  private static int workerLivenessSecondsFromEnv() {
+    String raw = System.getenv("TITAN_AGENT_REAPER_STALE_SECONDS");
+    if (raw != null) {
+      try {
+        return Integer.parseInt(raw.trim());
+      } catch (NumberFormatException e) {
+        LOGGER.log(
+            Level.WARNING,
+            "[titan] QueueProcessor: invalid TITAN_AGENT_REAPER_STALE_SECONDS \"{0}\" — using 90",
+            raw);
+      }
+    }
+    return 90;
+  }
+
+  /**
    * The well-known shared queue every worker polls for {@code SYNTHESIZE} tasks (design/38 Stage
    * 1b). Synthesis is not agent-pinned — any worker may run it.
    */
@@ -222,10 +247,14 @@ public class QueueProcessor {
     }
   }
 
-  /** Reap stale CLAIMED/PROCESSING tasks; the recovered rows become QUEUED again. Best-effort. */
+  /**
+   * Reap stale CLAIMED/PROCESSING tasks; the recovered rows become QUEUED again. Best-effort. Rows
+   * whose claimant worker heartbeated within {@link #WORKER_LIVENESS_SECONDS} are spared — a live
+   * worker's in-flight task is never reaped, however long it runs (issue #49).
+   */
   private void reapStaleTasks(@NonNull TitanStores daos, int reapTimeoutSeconds) {
     try {
-      var reaped = daos.taskQueue().reapStale(reapTimeoutSeconds);
+      var reaped = daos.taskQueue().reapStale(reapTimeoutSeconds, WORKER_LIVENESS_SECONDS);
       if (reaped.requeued() > 0 || reaped.failed() > 0) {
         LOGGER.log(
             Level.INFO,

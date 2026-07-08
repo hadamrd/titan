@@ -14,7 +14,7 @@ import java.util.logging.Logger;
  * {@code 0} is the operator opt-out (keeps full history).
  *
  * <p>Cutoff is computed in Java and bound as a {@link java.sql.Timestamp} for H2/PG portability —
- * mirrors {@link io.adaptiq.titan.store.TaskQueueDao#reapStale(int)} (PR #520; in-DB {@code
+ * mirrors {@link io.adaptiq.titan.store.TaskQueueDao#reapStale(int, int)} (PR #520; in-DB {@code
  * INTERVAL} math is rejected by H2). Extracted from {@link QueueProcessor} per the orchestrator-
  * decomposition convention (design/59) to keep the controller-loop class under the 1000-line cap.
  */
