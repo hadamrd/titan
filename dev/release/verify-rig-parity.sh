@@ -88,7 +88,7 @@ main() {
   log "  in-pod /index.html : ${pod}"
   log "  rig URL            : ${RIG_URL}"
   log "  deployment         : ${KUBE_NAMESPACE}/${KUBE_DEPLOYMENT}"
-  log "  remediation        : see docs/ops/runbooks/rig-parity.md"
+  log "  remediation        : redeploy so served + in-pod bundles agree (task deploy:k3s, then re-run task verify:rig)"
   exit 1
 }
 

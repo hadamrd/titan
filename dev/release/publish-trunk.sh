@@ -108,7 +108,7 @@ if [[ "$DRY_RUN" != "1" ]]; then
   if [[ -z "${REGISTRY_USER:-}" || -z "${REGISTRY_PASSWORD:-}" ]]; then
     echo "ERROR: REGISTRY_USER and REGISTRY_PASSWORD must be exported" >&2
     echo "       (in-cluster registry: source REGISTRY_HTPASSWD's plaintext" >&2
-    echo "        from Infisical — see docs/ops/runbooks/in-cluster-registry.md)" >&2
+    echo "        from Infisical — project adaptiq, env staging, key REGISTRY_HTPASSWD)" >&2
     exit 1
   fi
 fi

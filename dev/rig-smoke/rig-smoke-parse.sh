@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Parse a captured playwright "line" reporter tee'd file and emit the
-# canonical one-line JSON appended to docs/ops/rig-smoke.jsonl.
+# canonical one-line JSON appended to docs/operations/rig-smoke.jsonl.
 #
 # Why this is its own script (#1048):
 #   The acceptance criterion for the V1-shippable bar requires that a

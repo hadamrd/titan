@@ -4,7 +4,7 @@
 # The CONSTITUTION §1 V1-shippable bar requires `task rig:smoke` to land
 # ≥RIG_SMOKE_GOLDEN_MIN passing @golden specs with zero failures across
 # THREE consecutive runs. Without this helper, declaring the bar met is
-# a manual eyeball of docs/ops/rig-smoke.jsonl, which is exactly the
+# a manual eyeball of docs/operations/rig-smoke.jsonl, which is exactly the
 # kind of step a loop tick under pressure skips.
 #
 # What this script does:
@@ -25,7 +25,7 @@
 #
 # Usage:
 #   check-3-consecutive.sh [jsonl-path]
-#   RIG_SMOKE_GOLDEN_MIN=12 ./check-3-consecutive.sh docs/ops/rig-smoke.jsonl
+#   RIG_SMOKE_GOLDEN_MIN=12 ./check-3-consecutive.sh docs/operations/rig-smoke.jsonl
 #
 # Exit codes:
 #   0 — bar is met (marker appended or already present for today's run trio)
@@ -33,7 +33,7 @@
 #   2 — config error (jsonl missing, fewer than 3 non-marker entries, etc.)
 set -euo pipefail
 
-JSONL="${1:-docs/ops/rig-smoke.jsonl}"
+JSONL="${1:-docs/operations/rig-smoke.jsonl}"
 MIN="${RIG_SMOKE_GOLDEN_MIN:-12}"
 
 if [ ! -f "$JSONL" ]; then

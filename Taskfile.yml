@@ -54,7 +54,7 @@ tasks:
       - task: check:builds-limit-sync
 
   ci:verify:
-    desc: "CI gate — full suite that MUST pass on every PR. gradle check + integrationTest + Quarkus app-build (ARC/DI + config augmentation, #1153/#1156) + dup-migration scan (#1157) + ui verify + routeTree freshness (#1155). See docs/ops/runbooks/ci-on-pr.md (closes #381, #1159)."
+    desc: "CI gate — full suite that MUST pass on every PR. gradle check + integrationTest + Quarkus app-build (ARC/DI + config augmentation, #1153/#1156) + dup-migration scan (#1157) + ui verify + routeTree freshness (#1155). See docs/operations/runbooks/ci-on-pr.md (closes #381, #1159)."
     cmds:
       - task: gradle:check
       - task: gradle:integrationTest
@@ -216,7 +216,7 @@ tasks:
       - pnpm build
 
   dev:titan:
-    desc: "Bring up the Titan-only local rig (postgres + keycloak + server + ui + worker). For GitHub App flows also run `task dev:tunnel` in a side terminal — see docs/ops/runbooks/github-app-dev.md."
+    desc: "Bring up the Titan-only local rig (postgres + keycloak + server + ui + worker). For GitHub App flows also run `task dev:tunnel` in a side terminal — see docs/operations/runbooks/github-app-dev.md."
     deps: [gradle:build, build:worker, ui:build]
     dir: rig/local
     cmds:
@@ -274,7 +274,7 @@ tasks:
       - "java -jar {{.WORKER_JAR}}"
 
   dev:tunnel:
-    desc: "Relay GitHub webhooks to the local rig via smee.io (foreground). Required when iterating on the Titan GitHub App — see docs/ops/runbooks/github-app-dev.md."
+    desc: "Relay GitHub webhooks to the local rig via smee.io (foreground). Required when iterating on the Titan GitHub App — see docs/operations/runbooks/github-app-dev.md."
     cmds:
       - |
         if ! command -v smee >/dev/null 2>&1; then
@@ -327,7 +327,7 @@ tasks:
       - task: verify:rig
 
   verify:rig:
-    desc: "Post-deploy bundle-parity check — compares the index-<hash>.js served by the public rig ingress against the index.html in the live titan-ui pod. Catches in-cluster split-brain (#1041). See docs/ops/runbooks/rig-parity.md."
+    desc: "Post-deploy bundle-parity check — compares the index-<hash>.js served by the public rig ingress against the index.html in the live titan-ui pod. Catches in-cluster split-brain (#1041)."
     cmds:
       - bash dev/release/verify-rig-parity.sh
 
@@ -402,7 +402,7 @@ tasks:
   # Credentials are sourced from Infisical (project: adaptiq, env: staging,
   # key: REGISTRY_HTPASSWD). The script reads them via REGISTRY_USER +
   # REGISTRY_PASSWORD env vars — the operator exports them from Infisical
-  # before calling task. See docs/ops/runbooks/in-cluster-registry.md.
+  # before calling task.
   #
   #   In-cluster (default):
   #     REGISTRY_USER=releaseflow REGISTRY_PASSWORD=$(infisical get ...) \
@@ -619,7 +619,7 @@ tasks:
   # ── Rig smoke (the loop's dogfood gate, closes #787) ──────────────────────
   # task rig:smoke — boot rig if needed, wait for /api/v1/system/info, run only
   # the @golden Playwright subset, append a one-line JSON result to
-  # docs/ops/rig-smoke.jsonl. Designed to run every 5th loop tick to keep the
+  # docs/operations/rig-smoke.jsonl. Designed to run every 5th loop tick to keep the
   # rig hot and surface integration drift fast.
   rig:smoke:golden-guard:
     desc: "Fail if fewer than RIG_SMOKE_GOLDEN_MIN (default 12) tests are tagged @golden — prevents quiet shrinking of the V1-shippable bar (#1048)"
@@ -627,18 +627,18 @@ tasks:
       - bash dev/rig-smoke/check-golden-count.sh
 
   # task rig:smoke:mark-3-green — V1-shippable-bar gate (#1048). Scans
-  # docs/ops/rig-smoke.jsonl for the last 3 non-marker runs, and if all
+  # docs/operations/rig-smoke.jsonl for the last 3 non-marker runs, and if all
   # three satisfy passed>=RIG_SMOKE_GOLDEN_MIN AND failed==0 appends a
   # `"marker":"3-consecutive-green target met YYYY-MM-DD"` line. Idempotent
   # (re-runs on the same day do not duplicate). Used by the loop tick to
   # declare the V1 bar met without manual jsonl-eyeballing.
   rig:smoke:mark-3-green:
-    desc: "Append 3-consecutive-green marker to docs/ops/rig-smoke.jsonl if the last 3 runs all hit ≥RIG_SMOKE_GOLDEN_MIN passed / 0 failed (#1048)."
+    desc: "Append 3-consecutive-green marker to docs/operations/rig-smoke.jsonl if the last 3 runs all hit ≥RIG_SMOKE_GOLDEN_MIN passed / 0 failed (#1048)."
     cmds:
-      - bash dev/sprint-loop/check-3-consecutive.sh docs/ops/rig-smoke.jsonl
+      - bash dev/sprint-loop/check-3-consecutive.sh docs/operations/rig-smoke.jsonl
 
   rig:smoke:
-    desc: "Boot rig if down, wait for /api/v1/system/info, run @golden Playwright specs, append result to docs/ops/rig-smoke.jsonl (closes #787, #1048)"
+    desc: "Boot rig if down, wait for /api/v1/system/info, run @golden Playwright specs, append result to docs/operations/rig-smoke.jsonl (closes #787, #1048)"
     cmds:
       - bash dev/rig-smoke/check-golden-count.sh
       - |
@@ -667,28 +667,20 @@ tasks:
           fi
           sleep 1
         done
-      - |
-        set -euo pipefail
-        START_MS=$(date +%s%3N)
-        cd e2e
-        set +e
-        pnpm exec playwright test --grep @golden --reporter=line | tee /tmp/rig-smoke-out.txt
-        EXIT=${PIPESTATUS[0]}
-        set -e
-        END_MS=$(date +%s%3N)
-        DUR=$((END_MS - START_MS))
-        # Parse + append + propagate exit through the unit-tested helper
-        # (#1048 adversarial guard — dev/rig-smoke/tests/test_rig_smoke_parse.sh).
-        bash ../dev/rig-smoke/rig-smoke-parse.sh /tmp/rig-smoke-out.txt "$EXIT" "$DUR" ../docs/ops/rig-smoke.jsonl
+      # Run + capture + parse lives in a bash script, NOT a raw cmd: go-task's
+      # mvdan/sh interpreter lacks bash's pipe-status array, so the old inline
+      # block aborted on every run and telemetry was never written (#31). The
+      # script appends to docs/operations/rig-smoke.jsonl and propagates the
+      # playwright exit code via the unit-tested rig-smoke-parse.sh helper (#1048).
+      - bash dev/rig-smoke/run-golden.sh
 
   # ── Parkour smoke (adversarial sweep, #1061) ──────────────────────────────
   # task rig:smoke:parkour — boot the rig if needed, wait for /q/health/ready,
   # then run the @parkour Playwright subset (every v3 route × happy +
   # adversarial-rows + flaky-network variants + the meta guard). Designed to
   # run weekly by operators before tagging a release candidate.
-  # See docs/ops/runbooks/parkour-smoke.md for the full playbook.
   rig:smoke:parkour:
-    desc: "Adversarial sweep of every v3 route (long unicode / null fields / 5% flaky net). Boots rig if down, runs @parkour specs. See docs/ops/runbooks/parkour-smoke.md. Closes #1061."
+    desc: "Adversarial sweep of every v3 route (long unicode / null fields / 5% flaky net). Boots rig if down, runs @parkour specs. Closes #1061."
     cmds:
       - |
         set -euo pipefail
@@ -768,7 +760,6 @@ tasks:
   #     App provisioning (fail-closed if missing — never a silent green skip)
   # Drop those in a gitignored e2e/.env.golden-roundtrip (template:
   # e2e/.env.golden-roundtrip.example) and the gate sources it for you.
-  # See docs/ops/runbooks/layer2-e2e.md.
   rig:smoke:golden-roundtrip:
     desc: "Golden-path PR round-trip demo gate (specs 55/40/50 green legs). Requires LAYER2_RIG_AVAILABLE=1 + gh auth + App provisioning vars. Closes #1239."
     cmds:
@@ -796,7 +787,6 @@ tasks:
   # Then run from the repo root — forge-loop autodetects forge-loop.yaml.
   # The thin task wrappers below exist so muscle memory (`task loop:status`)
   # still works; everything else is forge-loop's CLI directly.
-  # Full operator playbook: docs/ops/runbooks/forge-loop.md.
   loop:status:
     desc: "Print forge-loop state (current tick, dispatched workers, last outcomes)."
     cmds:
