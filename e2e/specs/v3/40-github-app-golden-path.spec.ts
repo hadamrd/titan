@@ -21,16 +21,29 @@
  *    #836, never a hard fail (production-code changes are out of scope for
  *    this ticket).
  *
- * Pre-conditions (env vars):
+ * Pre-conditions (env vars) — this is a LAYER-2 (real-commit) spec (#50):
+ *   - LAYER2_RIG_AVAILABLE=1 — REQUIRED. The GitHub App prerequisites (a
+ *     registered App row, an installation on the fixture org, and a webhook
+ *     tunnel delivering to the rig) exist only on the Layer-2 / public rig
+ *     (`task rig:smoke:real`, docs/ops github-app-dev runbook). Unset →
+ *     every test here skips — the local `task dev:titan` rig can never
+ *     satisfy them.
+ *   - TITAN_RIG_URL — the Layer-2 rig base URL (fixtures/github-app.ts
+ *     defaults to the local rig otherwise).
+ *   - gh CLI must be authenticated (`gh auth status` exit 0).
  *   - TITAN_E2E_GH_APP_MANIFEST_CODE — temp code from Child F's GitHub-App
  *     creation flow. Absent → the manifest step is `test.skip`'d (a freshly
  *     registered App is GET-able via /api/v1/github-app and we'll use that).
  *   - TITAN_E2E_GH_INSTALLATION_ID — known installation id on the fixture
  *     org. Absent → sync step uses the first installation listed.
  *   - TITAN_E2E_FIXTURE_REPO — overrideable, defaults `hadamrd/titan-e2e-fixture`.
- *   - gh CLI must be authenticated (`gh auth status` exit 0).
  *
- * @tag @golden @real-commit
+ * Tagging (#50): @real-commit ONLY — deliberately NOT @golden. The local
+ * @golden set (dev/rig-smoke/run-golden.sh, --grep @golden) must be green-able
+ * on `task dev:titan` by definition; this spec inherently needs the Layer-2
+ * rig, so it runs via `task rig:smoke:real` (--grep @real-commit) instead.
+ *
+ * @tag @real-commit
  */
 import { test, expect } from '@playwright/test'
 import {
@@ -59,6 +72,16 @@ const ASSERT_BUILD_SUCCESS = process.env.TITAN_E2E_ASSERT_BUILD_SUCCESS === '1'
 // --- skip predicates (deterministic — never test.skip inside a step) -------
 
 async function shouldSkipReason(): Promise<string | null> {
+  // Same posture guard as 53-archive-artifacts-real-commit: the GitHub App
+  // env (registered App + installation on the fixture org + webhook tunnel)
+  // exists only on the Layer-2 rig. Local `task dev:titan` rigs must skip,
+  // never fail (#50).
+  if (!process.env.LAYER2_RIG_AVAILABLE)
+    return (
+      'LAYER2_RIG_AVAILABLE unset; local-dev posture — GitHub App env ' +
+      '(registered App + installation + webhook tunnel) exists only on the ' +
+      'Layer-2 rig (task rig:smoke:real)'
+    )
   if (!ghAuthOk()) return 'gh CLI not authenticated; cannot drive GitHub side'
   if (!(await rigReachable())) return `Titan rig not reachable at ${RIG_BASE_URL}`
   return null
@@ -66,7 +89,8 @@ async function shouldSkipReason(): Promise<string | null> {
 
 // --- the spec --------------------------------------------------------------
 
-test.describe('@golden @real-commit v3 github-app-golden-path', () => {
+// @real-commit only — NOT @golden. Layer-2 spec; see the header tagging note.
+test.describe('@real-commit v3 github-app-golden-path', () => {
   test.describe.configure({ mode: 'serial' })
 
   test('manifest -> sync -> push -> build -> GitHub status -> UI badge', async ({

@@ -20,6 +20,17 @@
  *   8. /onboarding has a working "Or connect a Git URL directly" link to
  *      /onboarding/manual.
  *
+ * Required env (#50): NONE beyond the local rig (`task dev:titan`). Every
+ * `/api/v1/github-app/**` call is mocked via `page.route()` — this spec needs
+ * NO GitHub App registration, installation, or webhook tunnel. Only the
+ * standard rig env applies (TITAN_UI_URL, TITAN_KEYCLOAK_URL, TITAN_DEV_USER /
+ * TITAN_DEV_PASSWORD — see fixtures/auth-v3.ts defaults).
+ *
+ * DRIFT NOTE (#52): the "enable + sync" test below is `test.fixme` — Design 66
+ * removed the per-pipeline Enable button (pipelines auto-enable on discovery)
+ * and moved pipeline cards + "Sync now" to /integrations/github/:installId.
+ * Rewrite tracked in #52; do not un-fixme without it.
+ *
  * @tag @golden
  */
 import { test, expect, type Page, type Route } from '@playwright/test'
@@ -199,6 +210,16 @@ test.describe('@golden v3 github-app-ui', () => {
   test('admin → screen 2 → install link → /integrations/github → enable + sync', async ({
     page,
   }) => {
+    // Not an env gap — this test is fully mocked. It asserts the pre-Design-66
+    // UI: a per-pipeline Enable button (removed — pipelines auto-enable on
+    // discovery) and pipeline cards + "Sync now" on /integrations/github (moved
+    // to /integrations/github/:installId). Rewrite tracked in #52.
+    test.fixme(
+      true,
+      'UI drift (#52): Design 66 removed the per-pipeline Enable button and moved ' +
+        'pipeline cards + "Sync now" to /integrations/github/:installId — this test ' +
+        'asserts the pre-Design-66 Integrations UI. Test-only rewrite tracked in #52.',
+    )
     test.setTimeout(90_000)
     const state = freshState()
 
@@ -310,6 +331,11 @@ test.describe('@golden v3 github-app-ui', () => {
   }) => {
     test.setTimeout(60_000)
     const state = freshState()
+    // No app AND no installs → EmptyInstalls renders the "Set up Titan GitHub
+    // App" CTA (github-empty-onboarding) linking to /onboarding. (With an app
+    // present it renders the external installations/new link instead — see
+    // integrations.github.index.tsx EmptyInstalls.)
+    state.app = null
     state.installations = []
     await installMocks(page, state)
 
@@ -318,6 +344,8 @@ test.describe('@golden v3 github-app-ui', () => {
 
     const empty = page.locator('[data-testid="integrations-empty"]')
     await expect(empty).toBeVisible({ timeout: 10_000 })
-    await expect(empty.getByRole('link', { name: /connect github/i })).toBeVisible()
+    const onboardingLink = empty.locator('[data-testid="github-empty-onboarding"]')
+    await expect(onboardingLink).toBeVisible()
+    await expect(onboardingLink).toHaveAttribute('href', '/onboarding')
   })
 })
