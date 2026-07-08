@@ -104,5 +104,39 @@ if ! echo "$OUT" | grep -q '"passed":0'; then
 fi
 echo "ok: malformed tee defaults zeros + propagates exit code"
 
+# ── Case 6: absent 'did not run' → did_not_run:0 in the JSON ──────────────
+OUT=$(bash "$SCRIPT" "$TMP/green.txt" 0 12345)
+if ! echo "$OUT" | grep -q '"did_not_run":0'; then
+  echo "FAIL: healthy tee should record did_not_run=0: $OUT" >&2
+  exit 1
+fi
+echo "ok: healthy tee records did_not_run=0"
+
+# ── Case 7: ADVERSARIAL — amputated suite ('23 did not run') is machine-visible
+# The #45 failure mode: globalTimeout kills the suite, playwright reports
+# 'X did not run', yet passed/failed alone can look green. The JSON MUST
+# carry the amputation count so check-3-consecutive.sh can refuse the run.
+cat > "$TMP/amputated.txt" <<'EOF'
+Running 43 tests using 2 workers
+  14 passed (20.0m)
+  23 did not run
+Timed out waiting 1200s for the test suite to run
+EOF
+OUT=$(bash "$SCRIPT" "$TMP/amputated.txt" 0 1200000 "$TMP/jsonl")
+if ! echo "$OUT" | grep -q '"did_not_run":23'; then
+  echo "FAIL: amputated tee did not record did_not_run=23: $OUT" >&2
+  exit 1
+fi
+if ! echo "$OUT" | grep -q '"passed":14'; then
+  echo "FAIL: amputated tee did not parse passed=14: $OUT" >&2
+  exit 1
+fi
+# The appended jsonl line must carry the same field (independent oracle).
+if ! tail -n 1 "$TMP/jsonl" | grep -q '"did_not_run":23'; then
+  echo "FAIL: appended jsonl line lost did_not_run: $(tail -n1 "$TMP/jsonl")" >&2
+  exit 1
+fi
+echo "ok: ADVERSARIAL — amputated run ('23 did not run') recorded as did_not_run=23"
+
 echo ""
 echo "PASS: all rig-smoke-parse.sh cases (including adversarial breakage guard)"

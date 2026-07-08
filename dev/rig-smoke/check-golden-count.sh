@@ -17,19 +17,15 @@
 # Override the dir for unit-testing this script via SPECS_DIR.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SPECS_DIR="${SPECS_DIR:-e2e/specs}"
 MIN="${RIG_SMOKE_GOLDEN_MIN:-12}"
 
-if [ ! -d "$SPECS_DIR" ]; then
-  echo "[golden-guard] specs dir not found: $SPECS_DIR" >&2
-  exit 2
-fi
-
-# Count: lines matching `test(...@golden...)` or `test.describe(...@golden...)`.
-# We count test invocations, not files, because one file can hold many @golden
-# tests and the bar is a per-test count.
-COUNT=$(grep -rhE '(test|test\.describe|describe)\([^)]*@golden' "$SPECS_DIR" \
-  | wc -l | tr -d ' ')
+# Counting lives in the shared golden-count.sh helper (#45) so this guard
+# and run-golden.sh's time-budget derivation can never disagree about what
+# "the golden set" is. The helper exits 2 on a missing SPECS_DIR, which
+# propagates through this command substitution under `set -e`.
+COUNT=$(SPECS_DIR="$SPECS_DIR" bash "$SCRIPT_DIR/golden-count.sh")
 
 if [ "$COUNT" -lt "$MIN" ]; then
   echo "[golden-guard] FAIL: only $COUNT @golden tests found in $SPECS_DIR (minimum $MIN)" >&2
