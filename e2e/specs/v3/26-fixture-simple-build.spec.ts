@@ -23,8 +23,9 @@
  *           --> GET /api/v1/artifacts/{id}/download body contains 'hello'
  *
  * Workflow:
- *   1. Pre-check: GET raw.githubusercontent.com/.../simple-build.yml; if 404,
- *      test.skip (the fixture is the contract, the spec hard-depends on it).
+ *   1. Read the fixture YAML from the vendored mirror
+ *      `e2e/fixtures/titan-e2e-fixture/.titan/pipelines/simple-build.yml`
+ *      (#48 — Layer-1 specs are hermetic; no runtime GitHub fetch).
  *   2. Create HMAC credential (kind='STRING' per #793 — `STRING` is the only
  *      kind that round-trips for webhook-secret use; `secret-text` was the
  *      legacy mistake).
@@ -48,6 +49,7 @@
 import * as crypto from 'node:crypto'
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
+import { readFixtureYaml } from '../../fixtures/fixture-files'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -55,8 +57,6 @@ const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
 const FIXTURE_REPO = 'hadamrd/titan-e2e-fixture'
 const FIXTURE_BRANCH = 'main'
 const FIXTURE_PATH = '.titan/pipelines/simple-build.yml'
-const FIXTURE_RAW_URL = `https://raw.githubusercontent.com/${FIXTURE_REPO}/${FIXTURE_BRANCH}/${FIXTURE_PATH}`
-const FIXTURE_API_URL = `https://api.github.com/repos/${FIXTURE_REPO}/contents/${FIXTURE_PATH}`
 
 // Per-run suffix so re-runs don't collide on fullName / credential key.
 const RUN_TAG = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`
@@ -150,23 +150,8 @@ test.describe('v3 fixture-simple-build @golden', () => {
   }) => {
     test.setTimeout(180_000)
 
-    // ── 1. Pre-check fixture availability ───────────────────────────────────
-    const fixtureMeta = await request.get(FIXTURE_API_URL, {
-      headers: { Accept: 'application/vnd.github.v3+json' },
-    })
-    test.skip(
-      fixtureMeta.status() === 404,
-      `Fixture file gone — ${FIXTURE_API_URL} returned 404. ` +
-        `The spec hard-depends on ${FIXTURE_REPO}/${FIXTURE_PATH} being reachable.`,
-    )
-    expect(
-      fixtureMeta.ok(),
-      `GitHub API returned HTTP ${fixtureMeta.status()} for ${FIXTURE_API_URL}; fixture unreachable.`,
-    ).toBe(true)
-
-    const rawResp = await request.get(FIXTURE_RAW_URL)
-    expect(rawResp.ok(), `raw YAML fetch HTTP ${rawResp.status()}`).toBe(true)
-    const fixtureYaml = await rawResp.text()
+    // ── 1. Read the vendored fixture YAML (hermetic — #48) ──────────────────
+    const fixtureYaml = readFixtureYaml(FIXTURE_PATH)
     expect(fixtureYaml.length, 'fixture YAML is empty').toBeGreaterThan(50)
     // Sanity-check the fixture really is the simple-build oracle we expect.
     expect(

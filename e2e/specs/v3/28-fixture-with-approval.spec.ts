@@ -14,7 +14,7 @@
  * Two tests, one shared shape, two terminal outcomes:
  *
  *   A. APPROVE path:
- *      1. Pre-check fixture YAML is reachable on raw.githubusercontent.com.
+ *      1. Read the fixture YAML from the vendored mirror (hermetic — #48).
  *      2. Login (PKCE) + extract bearer.
  *      3. POST /api/v1/credentials (STRING, scope=github-webhook).
  *      4. POST /api/v1/jobs with pipelineScript=fixtureYaml + a github trigger.
@@ -55,6 +55,7 @@
 import * as crypto from 'node:crypto'
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
+import { readFixtureYaml } from '../../fixtures/fixture-files'
 import { pgClient } from '../../fixtures/seed-v3'
 
 const ENV = authEnv()
@@ -63,8 +64,6 @@ const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
 const FIXTURE_REPO = 'hadamrd/titan-e2e-fixture'
 const FIXTURE_BRANCH = 'main'
 const FIXTURE_PATH = '.titan/pipelines/with-approval.yml'
-const FIXTURE_RAW_URL = `https://raw.githubusercontent.com/${FIXTURE_REPO}/${FIXTURE_BRANCH}/${FIXTURE_PATH}`
-const FIXTURE_API_URL = `https://api.github.com/repos/${FIXTURE_REPO}/contents/${FIXTURE_PATH}`
 
 const APPROVAL_PROMPT = 'Promote to prod?'
 const DEPLOY_STAGE_NAME = 'Deploy'
@@ -185,19 +184,8 @@ async function setupFixtureJob(
   page: Page,
   runTag: string,
 ): Promise<FixtureContext> {
-  // 0. Fixture reachable?
-  const meta = await api.get(FIXTURE_API_URL, {
-    headers: { Accept: 'application/vnd.github.v3+json' },
-  })
-  test.skip(
-    meta.status() === 404,
-    `Fixture file gone (${FIXTURE_API_URL} → 404). Spec hard-depends on the public fixture.`,
-  )
-  expect(meta.ok(), `GitHub API HTTP ${meta.status()} for ${FIXTURE_API_URL}`).toBe(true)
-
-  const rawResp = await api.get(FIXTURE_RAW_URL)
-  expect(rawResp.ok(), `raw YAML HTTP ${rawResp.status()}`).toBe(true)
-  const fixtureYaml = await rawResp.text()
+  // 0. Read the vendored fixture YAML (hermetic — #48).
+  const fixtureYaml = readFixtureYaml(FIXTURE_PATH)
   expect(fixtureYaml.length, 'fixture YAML empty').toBeGreaterThan(50)
   expect(
     fixtureYaml.includes(APPROVAL_PROMPT),

@@ -1,0 +1,77 @@
+# failure-recovery.yml — retry-block + failure-recovery stress pipeline.
+#
+# Exercises the design/44 `retry:` policy: a step deliberately fails on the
+# first two attempts, succeeds on the third, must end SUCCESS not FAILED.
+#
+#   Build
+#     └── FlakyTest        (retry: maxAttempts 3, intentionally fails 2x)
+#           └── Report
+#   BackupReport           (sibling — gated to run only if FlakyTest exhausted retries)
+#
+# The FlakyTest step uses an attempt-counter file in the shared workspace to
+# fail-then-succeed deterministically without a real-world flake. Retry
+# behaviour is engine-driven (design/44); the body just exits non-zero until
+# the counter hits 3, then exits 0.
+#
+# ─── BackupReport / onFailure caveat ─────────────────────────────────────────
+# The original brief asked for an `onFailure:` handler that runs only if
+# FlakyTest exceeded its retries. The engine has no `onFailure:` scope today —
+# the grammar has `when:`, `retry:`, `matrix:`, `each:`, `notify:`, `timeout:`,
+# `credentials:`, `sshAgent:`, `image:`, `dependsOn:`, `env:`, `use:` — and no
+# stage-level failure handler.
+#
+# Pragmatic substitution: BackupReport is declared with `when: "false"` and
+# `dependsOn: [Build]` so it never runs in the happy path. The spec marks the
+# "BackupReport runs after retry exhaustion" assertion `test.fixme` with a
+# pointer to the engine follow-up issue (see PR body).
+agent: linux
+failurePolicy: blockOnFailure
+
+stages:
+  - stage: Build
+    steps:
+      - sh: "echo building && date"
+
+  - stage: FlakyTest
+    dependsOn: [Build]
+    steps:
+      # Attempt-counter pattern: fails on attempts 1 + 2, succeeds on attempt 3.
+      # The counter file lives in the per-build workspace so it survives across
+      # step retries within the same build, and is wiped between builds (so a
+      # fresh build always starts the counter at 0). The step is `retry: 3` —
+      # three total attempts including the first; design/44 §2.
+      #
+      # NOTE: do NOT use `$$` (shell PID) in the path — each retry runs a fresh
+      # shell with a different PID, so the counter would reset every attempt and
+      # the step would never succeed. See issue #954.
+      - sh: |
+          set -eu
+          COUNTER="${TITAN_WORKSPACE:-/tmp}/flaky-attempt-counter"
+          # Bootstrap on first attempt; subsequent retries find the file.
+          if [ ! -f "$COUNTER" ]; then echo 0 > "$COUNTER"; fi
+          N=$(cat "$COUNTER")
+          N=$((N + 1))
+          echo "$N" > "$COUNTER"
+          echo "FlakyTest attempt #$N"
+          if [ "$N" -lt 3 ]; then
+            echo "intentionally failing on attempt $N (will retry up to 3)"
+            exit 1
+          fi
+          echo "succeeded on attempt $N"
+          rm -f "$COUNTER"
+        retry: 3
+
+  - stage: Report
+    dependsOn: [FlakyTest]
+    steps:
+      - sh: "echo final-report-after-flaky-recovered && echo ok"
+
+  # Placeholder for onFailure semantics — see file header note.
+  # when=false keeps this SKIPPED in the happy path so the build still ends
+  # SUCCESS. When the engine ships a real `onFailure:` scope, this stage's
+  # `when:` should be replaced with the failure predicate.
+  - stage: BackupReport
+    dependsOn: [Build]
+    when: "false"
+    steps:
+      - sh: "echo would-run-only-on-flaky-exhaustion"

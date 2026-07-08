@@ -1,0 +1,32 @@
+# Per-primitive fixture: gitTag with push:false (closes #785, #812).
+# E2E spec asserts: build SUCCESS; the gitTag step's flow-node result_json carries
+# the resolved tag. push:false keeps the fixture remote clean during repeated
+# E2E runs; specs that need to assert a remote-side ref MUST override
+# push: true at trigger time.
+#
+# #812: gitTag shells out to `git tag` which requires a checked-out git workspace
+# (.git directory present). TaskExecutor only creates an empty workdir, so the
+# fixture MUST perform a checkout before invoking gitTag — otherwise the step
+# fails with `fatal: not a git repository`.
+agent: linux
+
+parameters:
+  - name: TAG
+    type: string
+    required: true
+    description: "Tag to create; must be supplied at trigger time (no default)."
+
+stages:
+  - stage: Checkout
+    steps:
+      - checkout:
+          url: https://github.com/hadamrd/titan-e2e-fixture.git
+          branch: main
+
+  - stage: Tag
+    dependsOn: [Checkout]
+    steps:
+      - gitTag:
+          tag: "${{ params.TAG }}"
+          message: "titan e2e tag"
+          push: false

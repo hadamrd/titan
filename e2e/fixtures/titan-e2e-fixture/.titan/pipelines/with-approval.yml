@@ -1,0 +1,19 @@
+# Per-primitive fixture: approval gate between two stages (closes #785).
+# E2E spec asserts: build parks at 'Approval' in PENDING; after POST /approvals
+# decide=APPROVED the Deploy stage runs and the build completes SUCCESS.
+agent: linux
+
+stages:
+  - stage: Prepare
+    steps:
+      - sh: "echo preparing"
+
+  - stage: Approval
+    dependsOn: [Prepare]
+    steps:
+      - approval: "Promote to prod?"
+
+  - stage: Deploy
+    dependsOn: [Approval]
+    steps:
+      - sh: "echo deployed"

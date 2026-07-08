@@ -27,6 +27,7 @@
 import * as crypto from 'node:crypto'
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken } from '../../fixtures/auth-v3'
+import { readFixtureYaml } from '../../fixtures/fixture-files'
 import { pgClient } from '../../fixtures/seed-v3'
 
 const ENV = authEnv()
@@ -35,8 +36,6 @@ const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
 const FIXTURE_REPO = 'hadamrd/titan-e2e-fixture'
 const FIXTURE_BRANCH = process.env.TITAN_FIXTURE_BRANCH ?? 'main'
 const FIXTURE_PATH = 'failure-recovery.yml'
-const FIXTURE_RAW_URL = `https://raw.githubusercontent.com/${FIXTURE_REPO}/${FIXTURE_BRANCH}/${FIXTURE_PATH}`
-const FIXTURE_API_URL = `https://api.github.com/repos/${FIXTURE_REPO}/contents/${FIXTURE_PATH}?ref=${FIXTURE_BRANCH}`
 
 const STAGE_BUILD = 'Build'
 const STAGE_FLAKY = 'FlakyTest'
@@ -87,18 +86,8 @@ function findNode(nodes: FlowNode[], name: string): FlowNode | null {
 interface Ctx { bearer: string; credId: number; jobId: number }
 
 async function setup(api: APIRequestContext, runTag: string): Promise<Ctx> {
-  const meta = await api.get(FIXTURE_API_URL, {
-    headers: { Accept: 'application/vnd.github.v3+json' },
-  })
-  test.skip(
-    meta.status() === 404,
-    `Fixture ${FIXTURE_PATH} not on ${FIXTURE_REPO}@${FIXTURE_BRANCH} yet — fixture PR not merged.`,
-  )
-  expect(meta.ok()).toBe(true)
-
-  const rawResp = await api.get(FIXTURE_RAW_URL)
-  expect(rawResp.ok()).toBe(true)
-  const yaml = await rawResp.text()
+  // Read the vendored fixture YAML (hermetic — #48).
+  const yaml = readFixtureYaml(FIXTURE_PATH)
   for (const needle of [
     `stage: ${STAGE_FLAKY}`,
     'retry: 3',

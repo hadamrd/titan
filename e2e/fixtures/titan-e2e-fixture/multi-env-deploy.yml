@@ -1,0 +1,53 @@
+# multi-env-deploy.yml — chained-gate stress pipeline.
+#
+# Exercises the engine's ability to park, resume, then park AGAIN at a second
+# gate within the same build. Two approval gates in sequence; a sloppy gate
+# implementation auto-advances past the second one once the first is approved.
+#
+#   Build
+#     └── SmokeTest (parallel-after-Build)
+#           └── DeployStaging Gate (approval)
+#                 └── DeployStaging
+#                       └── IntegrationTest
+#                             └── DeployProd Gate (approval)
+#                                   └── DeployProd
+#
+# Spec asserts: park at gate-1, approve, run staging chain, park at gate-2
+# (NOT auto-advance), approve again, terminal SUCCESS.
+agent: linux
+failurePolicy: blockOnFailure
+
+stages:
+  - stage: Build
+    steps:
+      - sh: "echo building && date"
+
+  - stage: SmokeTest
+    dependsOn: [Build]
+    steps:
+      - sh: "echo smoke-test passing"
+
+  - gate: DeployStaging Gate
+    requiresApproval: true
+    approvers: [admin]
+    dependsOn: [SmokeTest]
+
+  - stage: DeployStaging
+    dependsOn: [DeployStaging Gate]
+    steps:
+      - sh: "echo deploying-to-staging && sleep 1 && echo ok"
+
+  - stage: IntegrationTest
+    dependsOn: [DeployStaging]
+    steps:
+      - sh: "echo integration-test-against-staging && echo ok"
+
+  - gate: DeployProd Gate
+    requiresApproval: true
+    approvers: [admin]
+    dependsOn: [IntegrationTest]
+
+  - stage: DeployProd
+    dependsOn: [DeployProd Gate]
+    steps:
+      - sh: "echo deploying-to-production && echo ok"

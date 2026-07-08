@@ -1,0 +1,15 @@
+# Per-primitive fixture: setBuildName (closes #785).
+# E2E spec asserts: after the build runs, builds.display_name starts with
+# 'deploy-' (default VERSION 'v0.0.0-dev' yields 'deploy-v0.0.0-dev').
+agent: linux
+
+parameters:
+  - name: VERSION
+    type: string
+    default: "v0.0.0-dev"
+    description: "Version tag interpolated into the build display name."
+
+stages:
+  - stage: Stamp
+    steps:
+      - setBuildName: "deploy-${{ params.VERSION }}"

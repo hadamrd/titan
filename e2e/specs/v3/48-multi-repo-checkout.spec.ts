@@ -18,17 +18,15 @@
  */
 import { test, expect, type Page } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
-import {
-  extractAccessToken,
-  fetchFixtureYaml,
-  runFixtureBuildAndFetchArtifact,
-} from '../../fixtures/golden-build'
+import { extractAccessToken, runFixtureBuildAndFetchArtifact } from '../../fixtures/golden-build'
+import { readFixtureYaml } from '../../fixtures/fixture-files'
 
 const ENV = authEnv()
 const FIXTURE_REPO = 'hadamrd/titan-e2e-fixture'
 const FIXTURE_BRANCH = process.env.TITAN_FIXTURE_BRANCH ?? 'main'
+// Read from the vendored mirror (#48) — hermetic; the build itself clones the LIVE
+// second repo (titan-ci-templates), which is this spec's declared network edge.
 const FIXTURE_PATH = '.titan/pipelines/multi-repo-checkout.yml'
-const FIXTURE_RAW_URL = `https://raw.githubusercontent.com/${FIXTURE_REPO}/${FIXTURE_BRANCH}/${FIXTURE_PATH}`
 
 // Composed from BOTH repos: the literal prefix + the SECOND repo's VERSION file content.
 const MULTIREPO_MARKER = 'MULTIREPO_OK_v1'
@@ -45,7 +43,7 @@ test.describe('v3 multi-repo-checkout @golden', () => {
   }) => {
     test.setTimeout(200_000)
 
-    const fixtureYaml = await fetchFixtureYaml(request, FIXTURE_RAW_URL)
+    const fixtureYaml = readFixtureYaml(FIXTURE_PATH)
     // Sanity: the fixture really references two distinct repos.
     expect(fixtureYaml, 'fixture must check out the app repo').toMatch(/titan-e2e-fixture/)
     expect(fixtureYaml, 'fixture must reference the second repo').toMatch(/titan-ci-templates/)

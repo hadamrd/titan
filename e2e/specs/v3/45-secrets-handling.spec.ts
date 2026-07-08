@@ -31,6 +31,7 @@
 import * as crypto from 'node:crypto'
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken } from '../../fixtures/auth-v3'
+import { readFixtureYaml } from '../../fixtures/fixture-files'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -38,8 +39,6 @@ const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
 const FIXTURE_REPO = 'hadamrd/titan-e2e-fixture'
 const FIXTURE_BRANCH = 'main'
 const FIXTURE_PATH = '.titan/pipelines/secrets-handling.yml'
-const FIXTURE_RAW_URL = `https://raw.githubusercontent.com/${FIXTURE_REPO}/${FIXTURE_BRANCH}/${FIXTURE_PATH}`
-const FIXTURE_API_URL = `https://api.github.com/repos/${FIXTURE_REPO}/contents/${FIXTURE_PATH}`
 
 // Per-run suffix: unique job fullName, unique credential scope/key, unique
 // plaintext. Plaintext is created at runtime — never committed to git.
@@ -131,23 +130,8 @@ test.describe('v3 secrets-handling @golden', () => {
   }) => {
     test.setTimeout(180_000)
 
-    // ── 1. Pre-check fixture availability ───────────────────────────────────
-    const fixtureMeta = await request.get(FIXTURE_API_URL, {
-      headers: { Accept: 'application/vnd.github.v3+json' },
-    })
-    test.skip(
-      fixtureMeta.status() === 404,
-      `Fixture file gone — ${FIXTURE_API_URL} returned 404. ` +
-        `The spec hard-depends on ${FIXTURE_REPO}/${FIXTURE_PATH} being reachable.`,
-    )
-    expect(
-      fixtureMeta.ok(),
-      `GitHub API returned HTTP ${fixtureMeta.status()} for ${FIXTURE_API_URL}; fixture unreachable.`,
-    ).toBe(true)
-
-    const rawResp = await request.get(FIXTURE_RAW_URL)
-    expect(rawResp.ok(), `raw YAML fetch HTTP ${rawResp.status()}`).toBe(true)
-    let fixtureYaml = await rawResp.text()
+    // ── 1. Read the vendored fixture YAML (hermetic — #48) ──────────────────
+    let fixtureYaml = readFixtureYaml(FIXTURE_PATH)
     expect(fixtureYaml.length, 'fixture YAML is empty').toBeGreaterThan(50)
     // Sanity-check the fixture shape is what the spec was written against.
     expect(fixtureYaml, 'fixture YAML missing credentials: scope').toMatch(/credentials:/)

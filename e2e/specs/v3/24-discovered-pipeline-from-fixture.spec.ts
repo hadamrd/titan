@@ -6,9 +6,9 @@
  * repo `hadamrd/titan-e2e-fixture` (a real two-stack monorepo with a
  * `titan-pipeline.yml` at root):
  *
- *   1. Pre-check: GET raw.githubusercontent.com/.../titan-pipeline.yml. If the
- *      fixture has gone away (404), `test.skip` with a precise reason — the
- *      spec hard-depends on that fixture being reachable.
+ *   1. Read the fixture YAML from the vendored mirror
+ *      `e2e/fixtures/titan-e2e-fixture/titan-pipeline.yml` (#48 — Layer-1 specs
+ *      are hermetic; no runtime GitHub fetch).
  *   2. Create an HMAC credential for the webhook secret via POST /api/v1/credentials
  *      (scope=`github-webhook`).
  *   3. Create a job via POST /api/v1/jobs whose `pipelineScript` is the fixture
@@ -40,14 +40,14 @@ import * as crypto from 'node:crypto'
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
 import yaml from 'js-yaml'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
+import { readFixtureYaml } from '../../fixtures/fixture-files'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
 
 const FIXTURE_REPO = 'hadamrd/titan-e2e-fixture'
 const FIXTURE_BRANCH = 'main'
-const FIXTURE_RAW_URL = `https://raw.githubusercontent.com/${FIXTURE_REPO}/${FIXTURE_BRANCH}/titan-pipeline.yml`
-const FIXTURE_API_URL = `https://api.github.com/repos/${FIXTURE_REPO}/contents/titan-pipeline.yml`
+const FIXTURE_PATH = 'titan-pipeline.yml'
 
 // Use a per-run suffix so re-runs don't collide on fullName / credential key.
 const RUN_TAG = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`
@@ -150,26 +150,9 @@ test.describe('v3 discovered-pipeline-from-fixture @golden', () => {
   }) => {
     test.setTimeout(120_000)
 
-    // ── 1. Pre-check fixture availability ───────────────────────────────────
-    const fixtureMeta = await request.get(FIXTURE_API_URL, {
-      headers: { Accept: 'application/vnd.github.v3+json' },
-    })
-    test.skip(
-      fixtureMeta.status() === 404,
-      `Fixture repo file gone — ${FIXTURE_API_URL} returned 404. ` +
-        `The spec hard-depends on hadamrd/titan-e2e-fixture being public + carrying titan-pipeline.yml.`,
-    )
-    expect(
-      fixtureMeta.ok(),
-      `GitHub API returned HTTP ${fixtureMeta.status()} for ${FIXTURE_API_URL}; ` +
-        `not 404 so we don't skip, but the fixture is unreachable.`,
-    ).toBe(true)
-
-    // Fetch the raw YAML (we'll persist this as the job's pipelineScript and
-    // use it as the oracle for expected stage names).
-    const rawResp = await request.get(FIXTURE_RAW_URL)
-    expect(rawResp.ok(), `raw YAML fetch HTTP ${rawResp.status()}`).toBe(true)
-    const fixtureYaml = await rawResp.text()
+    // ── 1. Read the vendored fixture YAML (we'll persist this as the job's
+    // pipelineScript and use it as the oracle for expected stage names). ─────
+    const fixtureYaml = readFixtureYaml(FIXTURE_PATH)
     expect(fixtureYaml.length, 'fixture YAML is empty').toBeGreaterThan(100)
 
     const expectedStages = stageNamesFromYaml(fixtureYaml)

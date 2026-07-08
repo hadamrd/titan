@@ -6,7 +6,8 @@
  * Extracted from the spec-26 pattern (webhook → dispatched → build → SUCCESS → artifact bytes),
  * which several specs copy verbatim. Specs 47/48 (#1228) reuse it so the only thing each spec
  * owns is its unique fixture path + the marker it asserts. Each spec still declares its own
- * `FIXTURE_PATH`/`raw.githubusercontent.com` literals so the 00-fixture-guard collector sees them.
+ * `FIXTURE_PATH` literal so the 00-fixture-guard collector sees it; the YAML itself is read
+ * from the vendored mirror via fixture-files.ts (#48 — no network in Layer-1 specs).
  */
 import * as crypto from 'node:crypto'
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
@@ -72,22 +73,6 @@ async function apiGet<T>(
     // leave null
   }
   return { ok: r.ok(), status: r.status(), body, raw }
-}
-
-/** Fetch a fixture pipeline's YAML from raw.githubusercontent; test.skip on 404 (guarded by 00). */
-export async function fetchFixtureYaml(
-  request: APIRequestContext,
-  rawUrl: string,
-): Promise<string> {
-  const rawResp = await request.get(rawUrl)
-  test.skip(
-    rawResp.status() === 404,
-    `Fixture pipeline gone — ${rawUrl} returned 404. The 00-fixture-guard spec hard-fails on this.`,
-  )
-  expect(rawResp.ok(), `raw YAML fetch HTTP ${rawResp.status()} for ${rawUrl}`).toBe(true)
-  const yaml = await rawResp.text()
-  expect(yaml.length, 'fixture YAML is empty').toBeGreaterThan(30)
-  return yaml
 }
 
 export interface BuiltArtifact {

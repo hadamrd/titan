@@ -76,6 +76,7 @@
 import * as crypto from 'node:crypto'
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken, loginViaKeycloak } from '../../fixtures/auth-v3'
+import { readFixtureYaml } from '../../fixtures/fixture-files'
 import { pgClient } from '../../fixtures/seed-v3'
 
 const ENV = authEnv()
@@ -83,8 +84,6 @@ const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
 
 const FIXTURE_REPO = 'hadamrd/titan-e2e-fixture'
 const FIXTURE_PATH = '.titan/pipelines/simple-build.yml'
-const FIXTURE_RAW_URL = `https://raw.githubusercontent.com/${FIXTURE_REPO}/main/${FIXTURE_PATH}`
-const FIXTURE_API_URL = `https://api.github.com/repos/${FIXTURE_REPO}/contents/${FIXTURE_PATH}`
 
 const TERMINAL_STATUSES = new Set(['SUCCESS', 'FAILED', 'ABORTED', 'UNSTABLE', 'ERROR'])
 
@@ -319,20 +318,9 @@ async function setupJobWithTriggers(
   return { credentialId, jobId, fullName, credKey, secret }
 }
 
-async function fetchFixtureYaml(
-  api: APIRequestContext,
-): Promise<string> {
-  const meta = await api.get(FIXTURE_API_URL, {
-    headers: { Accept: 'application/vnd.github.v3+json' },
-  })
-  test.skip(
-    meta.status() === 404,
-    `Fixture ${FIXTURE_API_URL} → 404. Spec hard-depends on the simple-build fixture.`,
-  )
-  expect(meta.ok(), `GitHub API HTTP ${meta.status()} for ${FIXTURE_API_URL}`).toBe(true)
-  const rawResp = await api.get(FIXTURE_RAW_URL)
-  expect(rawResp.ok(), `raw YAML HTTP ${rawResp.status()}`).toBe(true)
-  const yaml = await rawResp.text()
+/** Read the vendored simple-build fixture YAML from disk (hermetic — #48). */
+function loadFixtureYaml(): string {
+  const yaml = readFixtureYaml(FIXTURE_PATH)
   expect(yaml.length, 'fixture YAML empty').toBeGreaterThan(50)
   return yaml
 }
@@ -413,7 +401,7 @@ test.describe('v3 concurrent-push burst @golden', () => {
     let jobId: number | undefined
 
     try {
-      const fixtureYaml = await fetchFixtureYaml(request)
+      const fixtureYaml = loadFixtureYaml()
       bearer = await fetchBearerToken(ENV)
       const branch = `burst-same-${runTag}`
       const setup = await setupJobWithTriggers(request, runTag, bearer, fixtureYaml, [branch])
@@ -534,7 +522,7 @@ test.describe('v3 concurrent-push burst @golden', () => {
     let jobId: number | undefined
 
     try {
-      const fixtureYaml = await fetchFixtureYaml(request)
+      const fixtureYaml = loadFixtureYaml()
       bearer = await fetchBearerToken(ENV)
       const branchA = `burst-a-${runTag}`
       const branchB = `burst-b-${runTag}`
@@ -646,7 +634,7 @@ test.describe('v3 concurrent-push burst @golden', () => {
     let jobId: number | undefined
 
     try {
-      const fixtureYaml = await fetchFixtureYaml(request)
+      const fixtureYaml = loadFixtureYaml()
       bearer = await fetchBearerToken(ENV)
       const branch = `burst-paced-${runTag}`
       const setup = await setupJobWithTriggers(request, runTag, bearer, fixtureYaml, [branch])
@@ -778,7 +766,7 @@ test.describe('v3 concurrent-push burst @golden', () => {
     let jobId: number | undefined
 
     try {
-      const fixtureYaml = await fetchFixtureYaml(request)
+      const fixtureYaml = loadFixtureYaml()
       bearer = await fetchBearerToken(ENV)
       const branch = `burst-dup-${runTag}`
       const setup = await setupJobWithTriggers(request, runTag, bearer, fixtureYaml, [branch])
@@ -864,7 +852,7 @@ test.describe('v3 concurrent-push burst @golden', () => {
     let jobId: number | undefined
 
     try {
-      const fixtureYaml = await fetchFixtureYaml(request)
+      const fixtureYaml = loadFixtureYaml()
       bearer = await fetchBearerToken(ENV)
       const branch = `burst-ui-${runTag}`
       const setup = await setupJobWithTriggers(request, runTag, bearer, fixtureYaml, [branch])
