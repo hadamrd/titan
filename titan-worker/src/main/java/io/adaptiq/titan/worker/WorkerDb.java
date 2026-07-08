@@ -183,20 +183,31 @@ final class WorkerDb implements AutoCloseable {
    * Record a liveness heartbeat, stamping the latest CPU/MEM/DISK sample alongside (#348). Any of
    * {@code cpuPct} / {@code memPct} / {@code diskPct} may be null when the worker could not sample
    * that reading — the column is written as SQL NULL in that case, and the UI renders an em-dash.
+   *
+   * <p><b>Status self-heal (issue #57):</b> a beat also re-asserts {@code status='ONLINE'} (unless
+   * the operator set {@code DRAINING}, which is preserved). The live rig was observed with an
+   * actively-beating worker stuck {@code OFFLINE} — a contradiction that starves every status-gated
+   * consumer ({@code NoWorkerTimeoutSweeper} coverage, scheduling views) even though the task
+   * reaper's heartbeat-based liveness join still worked. An alive worker must read as ONLINE.
+   *
+   * @return {@code true} iff the agent row existed and was stamped — {@code false} means the row is
+   *     GONE and the caller must re-register, because a worker with no {@code titan.agents} row is
+   *     invisible to the reaper's liveness join and its in-flight tasks become reapable.
    */
-  void heartbeat(String agentId, Integer cpuPct, Integer memPct, Integer diskPct)
+  boolean heartbeat(String agentId, Integer cpuPct, Integer memPct, Integer diskPct)
       throws SQLException {
     try (Connection c = open();
         PreparedStatement ps =
             c.prepareStatement(
                 "UPDATE titan.agents SET last_heartbeat=CURRENT_TIMESTAMP, "
+                    + "status=CASE WHEN status='DRAINING' THEN status ELSE 'ONLINE' END, "
                     + "cpu_percent=?, memory_percent=?, disk_percent=? "
                     + "WHERE agent_id=?")) {
       setNullableInt(ps, 1, cpuPct);
       setNullableInt(ps, 2, memPct);
       setNullableInt(ps, 3, diskPct);
       ps.setString(4, agentId);
-      ps.executeUpdate();
+      return ps.executeUpdate() == 1;
     }
   }
 
@@ -341,12 +352,25 @@ final class WorkerDb implements AutoCloseable {
    * Whether the worker should stop executing this task — true if the row has been moved to
    * CANCELLED (the legacy abort/timeout path) <em>or</em> if the controller has stamped a
    * cancel-intent signal on it (#668, the proper in-flight signal that does not race the worker's
-   * own claim-token-guarded completion).
+   * own claim-token-guarded completion), <em>or</em> if the row is gone from the live queue.
    *
    * <p>Honouring both flags is load-bearing: the abort path now stamps {@code cancel_requested_at}
    * <em>before</em> flipping {@code status='CANCELLED'}, so a heartbeat tick that lands between the
    * two writes still gets a "yes, stop" answer. A future cancel-just-the-step API can stamp the
    * intent without touching status and this poll still works.
+   *
+   * <p><b>A vanished row is a stop signal (issue #57).</b> While THIS worker is still executing,
+   * its own row can only leave {@code titan.task_queue} because someone else terminalised it — the
+   * build/job was deleted (cascade drops the task rows), or the lease was reaped, re-claimed and
+   * completed by a peer, then archived. In every one of those cases the running subprocess is
+   * orphaned work whose completion can never be accepted, so the only correct answer is "stop".
+   * Returning {@code false} here (the old behaviour) was observed on the live rig to wedge an
+   * executor slot <em>forever</em>: an e2e teardown deleted a build whose {@code image:} step was
+   * mid-run; the cancel watcher saw "not cancelled" for the deleted row, the container never
+   * exited, and {@code awaitCompletion()} parked the task thread permanently — silently halving the
+   * worker's capacity. The archive sweep cannot race a <em>healthy</em> running step into this
+   * branch: it only moves terminal rows, and a running step's row is non-terminal until this worker
+   * itself completes it.
    */
   boolean isCancelled(long taskId) throws SQLException {
     try (Connection c = open();
@@ -356,11 +380,7 @@ final class WorkerDb implements AutoCloseable {
       ps.setLong(1, taskId);
       try (ResultSet rs = ps.executeQuery()) {
         if (!rs.next()) {
-          // Row no longer in the live queue — task already terminal and archived. Returning
-          // false matches the prior behaviour: the worker's token-guarded complete() will
-          // simply no-op against the missing row, and a healthy short step is never killed by
-          // a race with the per-tick archive sweep.
-          return false;
+          return true;
         }
         return "CANCELLED".equals(rs.getString(1)) || rs.getTimestamp(2) != null;
       }
@@ -575,6 +595,68 @@ final class WorkerDb implements AutoCloseable {
       ps.setLong(3, taskId);
       ps.setObject(4, claimToken);
       return ps.executeUpdate() == 1;
+    }
+  }
+
+  /**
+   * Diagnose WHY a token-guarded {@link #complete} was rejected (0 rows) — issue #57. A rejected
+   * completion has exactly four causes, and only ONE of them is the reaper; the old log line blamed
+   * every rejection on "reaped and re-claimed elsewhere", which sent the #57 investigation down the
+   * wrong path (both smoke-run rejections were an e2e build-abort race and an e2e teardown's
+   * cascade DELETE of the task row — zero reaps had occurred). This reads the row's actual state
+   * and names the real cause so the failure class is diagnosable from the worker log alone:
+   *
+   * <ul>
+   *   <li>row gone from the live queue but present in {@code task_archive} → completed/cancelled
+   *       elsewhere and archived;
+   *   <li>row gone from both → the build/job was deleted out from under the task (FK cascade);
+   *   <li>row present with {@code status='CANCELLED'} → build abort / step timeout cancel;
+   *   <li>row present with a different {@code claim_token} → the lease WAS reaped and re-claimed
+   *       (the only genuinely reaper-shaped cause);
+   *   <li>row present, token matches, status terminal → duplicate completion.
+   * </ul>
+   *
+   * <p>Best-effort: any SQL failure yields a generic cause rather than masking the original WARN.
+   */
+  String completionRejectionCause(long taskId, UUID taskToken, UUID claimToken) {
+    try (Connection c = open()) {
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "SELECT status, claim_token, claimed_by FROM titan.task_queue WHERE id=?")) {
+        ps.setLong(1, taskId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            String status = rs.getString("status");
+            UUID rowToken = rs.getObject("claim_token", UUID.class);
+            String claimedBy = rs.getString("claimed_by");
+            if ("CANCELLED".equals(status)) {
+              return "task was CANCELLED (build abort or step-timeout cancel)";
+            }
+            if (rowToken == null || !rowToken.equals(claimToken)) {
+              return "lease was reaped and re-claimed — claim_token rotated"
+                  + (claimedBy != null ? " (now held by '" + claimedBy + "')" : "")
+                  + ", row status="
+                  + status;
+            }
+            return "task already terminal (status=" + status + ") — duplicate completion";
+          }
+        }
+      }
+      try (PreparedStatement ps =
+          c.prepareStatement("SELECT status FROM titan.task_archive WHERE task_token=?")) {
+        ps.setObject(1, taskToken);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            return "task was terminalised elsewhere and archived (archive status="
+                + rs.getString(1)
+                + ")";
+          }
+        }
+      }
+      return "task row no longer exists in task_queue or task_archive — "
+          + "the build/job was deleted mid-run (FK cascade dropped the task)";
+    } catch (SQLException e) {
+      return "cause lookup failed: " + e.getMessage();
     }
   }
 }

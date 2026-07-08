@@ -156,15 +156,11 @@ public final class TitanWorker {
 
     // Heartbeat on a dedicated scheduler, fully independent of task
     // execution — a long-running step must never block liveness (doc-26 C).
-    ScheduledExecutorService heartbeat =
-        Executors.newSingleThreadScheduledExecutor(
-            r -> {
-              Thread t = new Thread(r, "titan-heartbeat");
-              t.setDaemon(true);
-              return t;
-            });
-    heartbeat.scheduleAtFixedRate(
-        this::beat, cfg.heartbeatIntervalMs(), cfg.heartbeatIntervalMs(), TimeUnit.MILLISECONDS);
+    // Heartbeat self-diagnoses lag (issue #57): a beat later than 2x the
+    // interval is WARN-ed loudly instead of surfacing minutes later as a
+    // controller-side reap of this worker's in-flight task.
+    Heartbeat heartbeat = new Heartbeat(cfg.heartbeatIntervalMs(), this::beat);
+    heartbeat.start();
 
     Runtime.getRuntime().addShutdownHook(new Thread(this::shutdown, "titan-shutdown"));
 
@@ -201,7 +197,7 @@ public final class TitanWorker {
         }
       }
     }
-    heartbeat.shutdownNow();
+    heartbeat.close();
     LOG.info("poll loop stopped");
   }
 
@@ -315,10 +311,14 @@ public final class TitanWorker {
       if (accepted) {
         LOG.info("task {} -> {}", task.id(), status);
       } else {
+        // Diagnose the REAL cause (issue #57): only one of the four rejection causes is
+        // the reaper; blaming them all on "reaped and re-claimed" mis-directed a whole
+        // investigation. Read the row and say what actually happened.
         LOG.warn(
-            "task {} completion REJECTED — claim token stale "
-                + "(task was reaped and re-claimed elsewhere)",
-            task.id());
+            "task {} completion ({}) REJECTED — {}",
+            task.id(),
+            status,
+            db.completionRejectionCause(task.id(), task.taskToken(), task.claimToken()));
       }
     } catch (Exception e) {
       LOG.error("task {} failed mid-flight", task.id(), e);
@@ -349,7 +349,18 @@ public final class TitanWorker {
   private void beat() {
     try {
       WorkerMetricsSampler.Sample s = metrics.sample();
-      db.heartbeat(cfg.agentId(), s.cpuPct(), s.memPct(), s.diskPct());
+      boolean stamped = db.heartbeat(cfg.agentId(), s.cpuPct(), s.memPct(), s.diskPct());
+      if (!stamped) {
+        // The titan.agents row is GONE (external cleanup / manual delete). Without it the
+        // reaper's liveness join can never match this worker and every in-flight task
+        // becomes reapable at the visibility timeout — exactly the #57 failure shape.
+        // Self-heal: re-register on the spot.
+        LOG.warn(
+            "heartbeat found no titan.agents row for '{}' — re-registering "
+                + "(row deleted externally?)",
+            cfg.agentId());
+        db.register(cfg);
+      }
     } catch (Exception e) {
       LOG.warn("heartbeat failed", e);
     }
