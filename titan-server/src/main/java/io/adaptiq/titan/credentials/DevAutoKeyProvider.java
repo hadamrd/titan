@@ -83,7 +83,7 @@ public class DevAutoKeyProvider implements CredentialKeyProvider {
    */
   static final String PROD_REFUSAL_MESSAGE =
       "DevAutoKeyProvider only valid in dev profile; configure a real KEK for prod"
-          + " (see docs/ops/runbooks/kek-config.md).";
+          + " (see docs/operations/runbooks/kek-config.md).";
 
   private static final Logger LOGGER = Logger.getLogger(DevAutoKeyProvider.class.getName());
 

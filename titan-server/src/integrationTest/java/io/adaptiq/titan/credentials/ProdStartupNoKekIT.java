@@ -80,7 +80,7 @@ class ProdStartupNoKekIT {
 
     ConfigException ex = assertThrows(ConfigException.class, producer::credentialKeyProvider);
     assertTrue(
-        ex.getMessage().contains("docs/ops/runbooks/kek-config.md"),
+        ex.getMessage().contains("docs/operations/runbooks/kek-config.md"),
         "operator must see the runbook pointer; got: " + ex.getMessage());
     assertTrue(
         ex.getMessage().contains("titan.profile"),

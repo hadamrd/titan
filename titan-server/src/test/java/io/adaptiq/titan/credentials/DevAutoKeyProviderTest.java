@@ -72,7 +72,7 @@ class DevAutoKeyProviderTest {
         ex.getMessage().contains("configure a real KEK for prod"),
         "must tell the operator what to do instead; got: " + ex.getMessage());
     assertTrue(
-        ex.getMessage().contains("docs/ops/runbooks/kek-config.md"),
+        ex.getMessage().contains("docs/operations/runbooks/kek-config.md"),
         "must point at the runbook; got: " + ex.getMessage());
   }
 
