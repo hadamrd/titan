@@ -76,12 +76,14 @@ final class BakeHandler implements QueueMessageHandler {
       support.enqueueAdvance(daos, buildId, 0);
       support.completeTaskSafely(daos, task);
     } catch (RuntimeException e) {
+      // Issue #36: never persist a bare wrapper message (e.g. TitanDataException's
+      // "Transaction failed") — carry the root cause's class + message into the build's
+      // error_message / failure_summary, and log the FULL stack so an SRE can act on it.
+      String reason = "bake failed: " + QueueHandlerSupport.describeWithCause(e);
       LOGGER.log(
-          Level.WARNING,
-          "[titan] QueueProcessor: bake failed for build {0}: {1}",
-          new Object[] {buildId, e.getMessage()});
-      support.markBuildFailed(daos, buildId, e.getMessage());
-      support.failTaskSafely(daos, task, "bake failed: " + e.getMessage());
+          Level.WARNING, e, () -> "[titan] QueueProcessor: bake failed for build " + buildId);
+      support.markBuildFailed(daos, buildId, reason);
+      support.failTaskSafely(daos, task, reason);
     }
   }
 }

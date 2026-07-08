@@ -33,6 +33,13 @@ stages:
     dependsOn: [unit-test]
     # Only runs if unit-test passed — proves the failure short-circuited
     # downstream work (the SRE story: "don't deploy a red build").
-    when: "steps.unit-test.result == 'success'"
+    #
+    # NOTE (issue #36): expressed via `dependsOn` alone — the engine's default
+    # blockOnFailure policy already SKIPs the descendants of a failed stage.
+    # A stage-level `when:` is evaluated at BAKE time (before any step has
+    # run) against `params.*` only, so the previous
+    # `when: "steps.unit-test.result == 'success'"` was a configuration error
+    # the engine now rejects with a precise message instead of the opaque
+    # "Transaction failed" abort.
     steps:
       - sh: cd e2e/pipelines/node-app-with-failing-test && npm run build

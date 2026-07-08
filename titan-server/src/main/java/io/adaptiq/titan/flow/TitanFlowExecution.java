@@ -201,11 +201,16 @@ public final class TitanFlowExecution {
 
     String effectiveParamsJson = serialize(effectiveParams);
 
+    // Evaluate every stage-level `when:` BEFORE opening the transaction (issue #36). A bad
+    // expression is a pipeline-configuration error, and raising it here keeps it from being
+    // swallowed into an opaque TitanDataException("Transaction failed") wrapper.
+    Map<String, Boolean> stageSkipped = evaluateStageWhens(parsed, effectiveParams);
+
     // Effective params + every flow_nodes row + the RUNNING transition commit together.
     // `when:` is evaluated against the effective (defaults-applied) params.
     daos.withTransaction(
         conn -> {
-          materialise(conn, parsed, effectiveParams);
+          materialise(conn, parsed, stageSkipped);
           TitanStores.onConnection(
               conn,
               BuildDao.class,
@@ -250,11 +255,46 @@ public final class TitanFlowExecution {
     return bake();
   }
 
+  /**
+   * Evaluate every stage-level {@code when:} guard against the effective params, mapping each stage
+   * id to its skip decision. Runs <em>before</em> the bake transaction (issue #36) so an invalid
+   * expression surfaces as a precise pipeline-configuration error instead of being wrapped into an
+   * opaque {@code Transaction failed}.
+   *
+   * @throws IllegalStateException naming the stage, the expression and the underlying evaluator
+   *     error when a {@code when:} cannot be evaluated at bake time (e.g. it references {@code
+   *     steps.*}, which only exists at run time — stage-level {@code when:} sees {@code params.*}).
+   */
+  @NonNull
+  private static Map<String, Boolean> evaluateStageWhens(
+      @NonNull PipelineModel pipeline, @NonNull Map<String, Object> params) {
+    Map<String, Boolean> skipped = new HashMap<>();
+    for (StageModel stage : pipeline.getStages()) {
+      try {
+        skipped.put(stage.getId(), isSkippedByWhen(stage, params));
+      } catch (RuntimeException e) {
+        throw new IllegalStateException(
+            "Stage '"
+                + stage.getName()
+                + "' has an invalid `when:` expression ("
+                + stage.getWhen()
+                + "): "
+                + e.getMessage()
+                + " — a stage-level `when:` is evaluated at bake time, before any step has run,"
+                + " and can only reference `params.*`. To gate a stage on an upstream outcome use"
+                + " a step-level `when:` (e.g. `previous: success`) or rely on `dependsOn` — a"
+                + " failed dependency already skips downstream stages.",
+            e);
+      }
+    }
+    return skipped;
+  }
+
   /** Materialise every DAG node into {@code flow_nodes}, on the bake transaction's connection. */
   private void materialise(
       @NonNull java.sql.Connection conn,
       @NonNull PipelineModel pipeline,
-      @NonNull Map<String, Object> params) {
+      @NonNull Map<String, Boolean> stageSkipped) {
 
     // dependsOn references nodes by name; flow_nodes edges are by id.
     Map<String, String> nameToId = new HashMap<>();
@@ -267,7 +307,7 @@ public final class TitanFlowExecution {
         FlowNodeDao.class,
         flowNodes -> {
           for (StageModel stage : pipeline.getStages()) {
-            boolean skipped = isSkippedByWhen(stage, params);
+            boolean skipped = Boolean.TRUE.equals(stageSkipped.get(stage.getId()));
             // design/68 / #947: a failure-handler stage (non-empty onFailureStages)
             // is NOT a DAG root even though its dependsOn list is empty — it must
             // sit PENDING until the orchestrator's onFailure gate decides
