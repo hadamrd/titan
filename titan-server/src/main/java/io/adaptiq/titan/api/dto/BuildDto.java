@@ -65,7 +65,17 @@ public record BuildDto(
      * when {@code parameters_json} is blank/an empty object, or when the blob is malformed — a
      * malformed blob degrades to omitted + a WARNING log, never a 500.
      */
-    @Nullable Map<String, String> parametersUsed) {
+    @Nullable Map<String, String> parametersUsed,
+    /**
+     * The pipeline YAML this build was synthesized from (issue #61, spec 24) — the per-build
+     * snapshot written at SYNTHESIZE dispatch, so the detail view reflects what THIS build baked
+     * from even after the job's mutable script is edited. Like {@link #parametersUsed}, populated
+     * <em>only</em> on the detail-mapper paths ({@link #from(Build)} / {@link #from(Build,
+     * JobGithubLinkRow)}); the list projection {@link #from(BuildRow)} leaves it {@code null} so
+     * list payloads never ship the script blob. Also {@code null} (stripped by {@code
+     * JsonInclude.NON_NULL}) on pre-snapshot rows and replay builds.
+     */
+    @Nullable String pipelineScript) {
 
   private static final Logger LOGGER = Logger.getLogger(BuildDto.class.getName());
   private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -119,6 +129,8 @@ public record BuildDto(
         row.failureCause,
         row.failureCauseDetail,
         // List projection (#1266): never ship the params blob at list level — stays byte-identical.
+        null,
+        // List projection (issue #61): the script blob is detail-only, never at list level.
         null);
   }
 
@@ -144,7 +156,8 @@ public record BuildDto(
         build.displayName(),
         build.failureCause(),
         build.failureCauseDetail(),
-        parseParametersUsed(build.parametersJson()));
+        parseParametersUsed(build.parametersJson()),
+        blankToNull(build.pipelineScript()));
   }
 
   /**
@@ -195,7 +208,8 @@ public record BuildDto(
         build.displayName(),
         build.failureCause(),
         build.failureCauseDetail(),
-        parseParametersUsed(build.parametersJson()));
+        parseParametersUsed(build.parametersJson()),
+        blankToNull(build.pipelineScript()));
   }
 
   /**
@@ -290,6 +304,12 @@ public record BuildDto(
       LOGGER.log(Level.WARNING, "[titan-api] parameters_json parse failed; treating as absent", e);
       return null;
     }
+  }
+
+  /** Blank-string snapshot degrades to omitted — never ship an empty {@code pipelineScript}. */
+  @Nullable
+  static String blankToNull(@Nullable String s) {
+    return (s == null || s.isBlank()) ? null : s;
   }
 
   @Nullable

@@ -283,7 +283,8 @@ public class BuildServiceImpl implements BuildService {
         row.triggerMetaJson,
         row.displayName,
         row.failureCause,
-        row.failureCauseDetail);
+        row.failureCauseDetail,
+        row.pipelineScript);
   }
 
   // ── Replay-from-node (issue #307) ──────────────────────────────────────────

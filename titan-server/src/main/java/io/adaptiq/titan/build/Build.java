@@ -54,4 +54,10 @@ public record Build(
      */
     @Nullable String failureCause,
     /** The matching log snippet that drove {@link #failureCause} (issue #1105). */
-    @Nullable String failureCauseDetail) {}
+    @Nullable String failureCauseDetail,
+    /**
+     * Snapshot of the pipeline YAML this build was synthesized from (issue #61, spec 24). Written
+     * at SYNTHESIZE dispatch; null on pre-migration rows and on replay builds (which reuse the
+     * parent's model and never re-synthesize).
+     */
+    @Nullable String pipelineScript) {}

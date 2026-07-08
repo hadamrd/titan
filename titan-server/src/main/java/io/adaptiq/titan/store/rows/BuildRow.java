@@ -104,4 +104,14 @@ public class BuildRow {
    * {@code unknown} verdict (no signature matched) and for un-classified builds.
    */
   @Nullable public String failureCauseDetail;
+
+  /**
+   * Snapshot of the pipeline YAML this build was synthesized from (issue #61, spec 24). Written
+   * once by {@code QueueHandlerSupport.enqueueWorkerSynthesis} at SYNTHESIZE dispatch — the moment
+   * the job's {@code pipeline_script} is handed to the worker — so the build-detail API can answer
+   * "what source did THIS build bake from?" even after the job's script is edited. {@code null} on
+   * pre-migration rows and on replay builds (which reuse the parent's model and never
+   * re-synthesize).
+   */
+  @Nullable public String pipelineScript;
 }

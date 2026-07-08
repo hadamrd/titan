@@ -38,7 +38,8 @@ public interface BuildDao extends SqlObject {
           + "deployment_id, queued_at, started_at, finished_at, duration_ms, "
           + "error_message, pipeline_model_json, started_by_instance, failure_summary, "
           + "replayed_from_build_id, replayed_from_node_id, deadline_at, trigger_meta_json, "
-          + "display_name, external_check_run_id, failure_cause, failure_cause_detail";
+          + "display_name, external_check_run_id, failure_cause, failure_cause_detail, "
+          + "pipeline_script";
 
   // ---------------------------------------------------------------
   //  Single-row queries
@@ -587,6 +588,14 @@ public interface BuildDao extends SqlObject {
   @SqlUpdate("UPDATE titan.builds SET pipeline_model_json = :json WHERE id = :id")
   void updatePipelineModelJson(
       @Bind("id") long id, @Bind("json") @NonNull String pipelineModelJson);
+
+  /**
+   * Store the pipeline-YAML snapshot this build is being synthesized from (issue #61, spec 24).
+   * Written by {@code QueueHandlerSupport.enqueueWorkerSynthesis} at SYNTHESIZE dispatch time —
+   * idempotent across the handler's re-dispatch paths (same source, same value).
+   */
+  @SqlUpdate("UPDATE titan.builds SET pipeline_script = :script WHERE id = :id")
+  void updatePipelineScript(@Bind("id") long id, @Bind("script") @NonNull String pipelineScript);
 
   /**
    * Store the build's effective parameters — the declared parameters resolved against the supplied
