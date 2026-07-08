@@ -626,8 +626,19 @@ public interface TaskQueueDao {
 
   /**
    * Reap stale tasks: {@code CLAIMED}/{@code PROCESSING} rows whose {@code claimed_at} is older
-   * than {@code visibilityTimeoutSeconds}. A zombie agent's task is recovered so it can run
-   * elsewhere.
+   * than {@code visibilityTimeoutSeconds} <em>and</em> whose claimant is not demonstrably alive. A
+   * zombie agent's task is recovered so it can run elsewhere.
+   *
+   * <p><b>Liveness guard (issue #49):</b> {@code claimed_at} is stamped once at claim time and
+   * never refreshed, while a healthy worker heartbeats {@code titan.agents.last_heartbeat} every
+   * ~30s for its whole life. Reaping on {@code claimed_at} alone therefore reaped
+   * <em>actively-executing</em> tasks whose runtime outlived the window: the lease token was
+   * cleared mid-run, the task re-claimed and run twice, and the first (real) completion rejected as
+   * "claim token stale". The reaper now spares any row whose {@code claimed_by} agent heartbeated
+   * within {@code workerLivenessSeconds} — the lease lives as long as the executing worker does. A
+   * claimant with no {@code titan.agents} row at all (e.g. a controller draining {@code
+   * ORCHESTRATE} tasks) keeps the plain {@code claimed_at} window, so controller crash recovery is
+   * unchanged, and a worker whose heartbeat genuinely stops is reaped exactly as before.
    *
    * <ul>
    *   <li>If {@code attempts >= max_attempts} the task is terminally {@code FAILED} — retried
@@ -638,15 +649,31 @@ public interface TaskQueueDao {
    *       (zombie) claimant is rejected by {@link #complete} (doc-27 G3).
    * </ul>
    *
-   * <p>The two updates run in one transaction. Returns the counts.
+   * <p>The two updates run in one transaction. Idempotent: a second pass over the same state
+   * matches zero rows (status flipped / lease cleared on the first). Returns the counts.
+   *
+   * @param visibilityTimeoutSeconds how long a claim may sit un-completed before it is reapable.
+   * @param workerLivenessSeconds heartbeat freshness window under which a claimant counts as alive
+   *     — keep aligned with the agent reaper's {@code titan.agent-reaper.stale-seconds} (90s).
    */
   @Transaction
-  default ReapResult reapStale(int visibilityTimeoutSeconds) {
+  default ReapResult reapStale(int visibilityTimeoutSeconds, int workerLivenessSeconds) {
     java.sql.Timestamp cutoff = cutoff(visibilityTimeoutSeconds);
-    int failed = reapExhausted(cutoff);
-    int requeued = reapRequeue(cutoff);
+    java.sql.Timestamp livenessCutoff = cutoff(workerLivenessSeconds);
+    int failed = reapExhausted(cutoff, livenessCutoff);
+    int requeued = reapRequeue(cutoff, livenessCutoff);
     return new ReapResult(requeued, failed);
   }
+
+  /**
+   * SQL fragment shared by {@link #reapExhausted} / {@link #reapRequeue}: true iff the row's {@code
+   * claimed_by} agent has <em>not</em> heartbeated since {@code :livenessCutoff}. Unqualified
+   * {@code claimed_by} correlates to the outer {@code task_queue} row ({@code titan.agents} has no
+   * such column) — portable across PostgreSQL and the H2 unit-test profile.
+   */
+  String CLAIMANT_NOT_LIVE =
+      "NOT EXISTS (SELECT 1 FROM titan.agents a WHERE a.agent_id = claimed_by "
+          + "AND a.last_heartbeat >= :livenessCutoff)";
 
   /**
    * Fail stale tasks that have exhausted their retry budget.
@@ -664,16 +691,27 @@ public interface TaskQueueDao {
           + "result_json = '{\"error\":\"visibility timeout exceeded; retries exhausted\"}', "
           + "completed_at = CURRENT_TIMESTAMP "
           + "WHERE status IN ('CLAIMED','PROCESSING') AND attempts >= max_attempts "
-          + "AND claimed_at < :cutoff")
-  int reapExhausted(@Bind("cutoff") @NonNull java.sql.Timestamp cutoff);
+          + "AND claimed_at < :cutoff "
+          + "AND "
+          + CLAIMANT_NOT_LIVE)
+  int reapExhausted(
+      @Bind("cutoff") @NonNull java.sql.Timestamp cutoff,
+      @Bind("livenessCutoff") @NonNull java.sql.Timestamp livenessCutoff);
 
-  /** Reset stale-but-retryable tasks back to QUEUED, killing the dead lease. */
+  /**
+   * Reset stale-but-retryable tasks back to QUEUED, killing the dead lease — only when the claimant
+   * is not a live, heartbeating worker (issue #49).
+   */
   @SqlUpdate(
       "UPDATE titan.task_queue SET status = 'QUEUED', claim_token = NULL, "
           + "claimed_by = NULL, claimed_at = NULL, available_at = CURRENT_TIMESTAMP "
           + "WHERE status IN ('CLAIMED','PROCESSING') AND attempts < max_attempts "
-          + "AND claimed_at < :cutoff")
-  int reapRequeue(@Bind("cutoff") @NonNull java.sql.Timestamp cutoff);
+          + "AND claimed_at < :cutoff "
+          + "AND "
+          + CLAIMANT_NOT_LIVE)
+  int reapRequeue(
+      @Bind("cutoff") @NonNull java.sql.Timestamp cutoff,
+      @Bind("livenessCutoff") @NonNull java.sql.Timestamp livenessCutoff);
 
   /** Wall-clock timestamp {@code seconds} in the past — the visibility-timeout cutoff. */
   private static java.sql.Timestamp cutoff(int seconds) {
