@@ -60,16 +60,14 @@
  */
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken } from '../../fixtures/auth-v3'
+import { readFixtureYaml } from '../../fixtures/fixture-files'
 import { pgClient } from '../../fixtures/seed-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
 
-const FIXTURE_REPO = 'hadamrd/titan-e2e-fixture'
-const FIXTURE_BRANCH = 'main'
+// Vendored mirror of hadamrd/titan-e2e-fixture — read from disk, never fetched (#48).
 const FIXTURE_PATH = '.titan/pipelines/with-gitTag.yml'
-const FIXTURE_RAW_URL = `https://raw.githubusercontent.com/${FIXTURE_REPO}/${FIXTURE_BRANCH}/${FIXTURE_PATH}`
-const FIXTURE_API_URL = `https://api.github.com/repos/${FIXTURE_REPO}/contents/${FIXTURE_PATH}`
 
 const RUN_TAG = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`
 const TAG_VALUE = `e2e-${RUN_TAG}`
@@ -155,23 +153,8 @@ test.describe('v3 fixture-with-gitTag @golden', () => {
   }) => {
     test.setTimeout(120_000)
 
-    // ── 1. Pre-check fixture availability ───────────────────────────────────
-    const fixtureMeta = await request.get(FIXTURE_API_URL, {
-      headers: { Accept: 'application/vnd.github.v3+json' },
-    })
-    test.skip(
-      fixtureMeta.status() === 404,
-      `Fixture file gone — ${FIXTURE_API_URL} returned 404. ` +
-        `Spec hard-depends on hadamrd/titan-e2e-fixture carrying ${FIXTURE_PATH}.`,
-    )
-    expect(
-      fixtureMeta.ok(),
-      `GitHub API HTTP ${fixtureMeta.status()} for ${FIXTURE_API_URL}`,
-    ).toBe(true)
-
-    const rawResp = await request.get(FIXTURE_RAW_URL)
-    expect(rawResp.ok(), `raw YAML fetch HTTP ${rawResp.status()}`).toBe(true)
-    const fixtureYaml = await rawResp.text()
+    // ── 1. Read the vendored fixture YAML (hermetic — #48) ──────────────────
+    const fixtureYaml = readFixtureYaml(FIXTURE_PATH)
     expect(fixtureYaml.length, 'fixture YAML is empty').toBeGreaterThan(50)
 
     // Shape guard — if the fixture is mutated upstream so it no longer

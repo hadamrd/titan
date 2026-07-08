@@ -1,0 +1,31 @@
+# matrix-aggregate.yml — matrix fan-out + downstream aggregator.
+#
+# Exercises the design/54 `matrix:` scope (Cartesian product of axes) plus the
+# downstream-aggregator pattern: a single stage that dependsOn the matrix
+# prototype stage id and only runs once ALL cells reach SUCCESS.
+#
+#   Matrix (java=[17,21] x os=[ubuntu,alpine])  — 4 parallel cells
+#     └── Aggregate
+#
+# Spec asserts:
+#   - 4 distinct flow_nodes for the matrix cells (one per [java,os] pair)
+#   - every cell SUCCESS
+#   - Aggregate is SUCCESS strictly after all 4 cells terminate
+#   - the cell's `${matrix.<axis>}` substitution actually produced cell-distinct
+#     command lines (echoed and visible in logs)
+agent: linux
+failurePolicy: blockOnFailure
+
+stages:
+  - stage: Matrix
+    matrix:
+      axes:
+        java: [17, 21]
+        os: [ubuntu, alpine]
+    steps:
+      - sh: "echo cell java=${matrix.java} os=${matrix.os} && echo ok"
+
+  - stage: Aggregate
+    dependsOn: [Matrix]
+    steps:
+      - sh: "echo aggregating-all-matrix-results && echo done"

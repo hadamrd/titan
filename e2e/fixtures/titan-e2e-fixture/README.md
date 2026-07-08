@@ -1,93 +1,73 @@
-# `titan-e2e-fixture` — restored fixtures (mirror + contract)
+# `titan-e2e-fixture` — vendored fixture mirror (source of truth for Layer-1 specs)
 
-This directory is the **version-controlled source of truth** for the two
-fixture files in the external repo [`hadamrd/titan-e2e-fixture`](https://github.com/hadamrd/titan-e2e-fixture)
-that the v3 e2e specs hard-depend on. The specs `fetch()` them from GitHub at
-run time; keeping a mirror here makes the fixture **shape reviewable in PRs**
-and lets us re-sync / detect drift instead of discovering a silent `test.skip`
-weeks later.
+This directory is the **version-controlled, byte-identical mirror** of the fixture
+pipelines in the external repo
+[`hadamrd/titan-e2e-fixture`](https://github.com/hadamrd/titan-e2e-fixture) that the
+v3 e2e specs depend on.
 
-## Why this exists (issue #1246)
+**Since #48 the Layer-1 (@golden) specs read these files from disk** (via
+`e2e/fixtures/fixture-files.ts#readFixtureYaml`) instead of fetching them from
+`raw.githubusercontent.com` at runtime. The synthesized-webhook flow never needed the
+network for the YAML; the runtime fetches were a structural flake source — GitHub
+429-throttled the unauthenticated raw fetches under repeated smoke runs.
 
-`e2e/specs/v3/40-fullstack-pipeline.spec.ts` and
-`e2e/specs/v3/45-secrets-handling.spec.ts` were **dormant**: each opens with a
-fixture-availability pre-check —
+Only Layer-2 (`@real-commit`) specs still talk to the live repo — that layer declares
+the network dependency (real clones, real commits).
 
-```ts
-const meta = await api.get(FIXTURE_API_URL, { headers: { Accept: '…' } })
-test.skip(meta.status() === 404, 'Fixture file gone — … returned 404 …')
-```
+## Pinned source
 
-Both fixture files **404-ed**, so every run skipped silently while asserting
-nothing. The green sibling `26-fixture-simple-build.spec.ts` uses the same repo
-and ran fine — proving the repo was reachable and only these two specific files
-were missing.
+All files below were fetched byte-identical from
+`hadamrd/titan-e2e-fixture` at commit **`116b581de1b01f7e79bd9dc1005ad8476d66c0f7`**
+(branch `main`, 2026-07-08, issue #48). No header comments were added — byte-identity
+with the remote is the invariant, so the source ref is recorded here instead of
+inside the YAML files.
 
-### Root cause per spec (diagnosed by probing the live GitHub contents API)
+| Vendored file | Consumed by spec(s) |
+|---|---|
+| `titan-pipeline.yml` | 24, 40 |
+| `multi-env-deploy.yml` | 42 |
+| `matrix-aggregate.yml` | 43 |
+| `failure-recovery.yml` | 44 |
+| `.titan/pipelines/simple-build.yml` | 26, 52 |
+| `.titan/pipelines/with-params.yml` | 27 |
+| `.titan/pipelines/with-approval.yml` | 28 |
+| `.titan/pipelines/with-retry.yml` | 29 |
+| `.titan/pipelines/with-setBuildName.yml` | 30 |
+| `.titan/pipelines/with-gitTag.yml` | 31 |
+| `.titan/pipelines/with-httpRequest.yml` | 32 |
+| `.titan/pipelines/secrets-handling.yml` | 45 |
+| `.titan/pipelines/shared-library-build.yml` | 47 |
+| `.titan/pipelines/multi-repo-checkout.yml` | 48 |
 
-| Spec | Fixture path the spec needs | Before | Cause |
-|------|-----------------------------|--------|-------|
-| #40  | `titan-pipeline.yml` (repo **root**) | `404` | **Missing / wrong path.** The equivalent pipeline existed only at `.titan/pipelines/full-pipeline.yml`; the spec fetches the **root** path. |
-| #45  | `.titan/pipelines/secrets-handling.yml` | `404` | **Missing file.** The adversarial secrets fixture had never been committed to the repo. |
+`00-fixture-guard.spec.ts` hard-fails the run if any spec's `FIXTURE_PATH` has no
+vendored file here (dangling-reference prevention — the successor of the #955
+silent-skip guard).
 
-After restoring both files the contents API returns `200` and the
-`test.skip(…404…)` path no longer triggers — the specs proceed into their real
-assertions.
+## History
 
-## The two fixtures
+- **#1246** — specs 40/45 were dormant because their fixture files 404-ed upstream;
+  the first two mirror files (`titan-pipeline.yml`, `.titan/pipelines/secrets-handling.yml`)
+  were restored here and pushed upstream. `45-secrets-handling` also switched from
+  browser-PKCE to `fetchBearerToken` (direct-access-grant) at that point.
+- **#48** — the mirror was extended to every Layer-1 fixture and the specs switched
+  from runtime raw fetches to disk reads.
 
-### `titan-pipeline.yml` (spec #40)
-Root-level copy of the existing `.titan/pipelines/full-pipeline.yml`. It already
-matches every drift-guard the spec asserts: `Checkout` → parallel
-`Backend Build` / `Frontend Build` chains → `gate: Publish Approval` → `Report`
-(`setOutput`) → `Notify` (`when:` ⇒ SKIPPED), with `archiveArtifacts` + `junit:`
-on both stacks.
+## Re-syncing
 
-### `.titan/pipelines/secrets-handling.yml` (spec #45)
-Binds a STRING credential `e2e-secrets/__KEY__` into `$SECRET_TOKEN` (design/39
-`credentials:` grammar), prints `consume ok: len=<n>` (length, never the value),
-then deliberately writes the secret to `leaked.txt` and archives it — the
-adversarial leak probe behind the spec's assertions A–D. `__KEY__` is a
-per-run placeholder the spec rewrites to `token-<RUN_TAG>` to avoid credential
-store collisions.
-
-## Run results (local rig, `task e2e`)
-
-After restoring both fixtures, both specs **run** (the `test.skip(…404…)` path is
-dead) and execute their real assertions:
-
-| Spec | Before | After | Notes |
-|------|--------|-------|-------|
-| #45 secrets-handling | skipped (404) | **PASS** | Assertions A–D all hold: build SUCCESS (credential bound), plaintext absent from `pipelineScript`, from the SSE log stream (`consume ok: len=` present), and from the archived `leaked.txt`. |
-| #40 fullstack | skipped (404) | **RUNS → FAILS** at a real engine defect | The DAG executes (`Checkout=SUCCESS`), then the container lint stages fail because the Checkout workspace is not propagated to dependent stages (`POM file backend/pom.xml … does not exist`; the cloned repo genuinely contains `backend/`+`frontend/`). Filed as **#1273**; the adversarial assertion is kept RED, not masked — exactly the behaviour the spec was designed for. |
-
-### #45 auth: browser-PKCE → direct-grant
-`45-secrets-handling.spec.ts` originally logged in via the browser OIDC flow
-(`loginViaKeycloak`). On the rig that flow stalled on the Keycloak `#kc-form-login`
-form (SPA landing-page / OIDC runtime-config drift), preventing the spec from
-running to completion. It now obtains its bearer via `fetchBearerToken`
-(direct-access-grant) — the **same** auth path the sibling fixture specs #27 and
-#40 already use. This is a pure auth-acquisition swap; the spec's testing
-architecture (synthetic HMAC-signed push, inline `pipelineScript`, SSE log drain,
-adversarial assertions A–D) is unchanged.
-
-### Rig note
-`task dev:titan` currently crash-loops `titan-server` on a dev-KEK boot-check vs.
-`QUARKUS_PROFILE=prod` mismatch — filed as **#1274**. Worked around locally
-(uncommitted override) to obtain the run above; not part of this PR.
-
-## Re-syncing to the external repo
-
-The external repo has no CI in this monorepo, so changes are pushed directly:
+The remote repo remains the fixture the *worker* clones in specs whose pipelines do a
+real checkout, so intentional changes must land BOTH here and upstream. To push a
+local edit upstream:
 
 ```sh
-gh api -X PUT repos/hadamrd/titan-e2e-fixture/contents/titan-pipeline.yml \
-  -f message="sync root pipeline" \
-  -f content="$(base64 -w0 e2e/fixtures/titan-e2e-fixture/titan-pipeline.yml)" \
-  -f sha="$(gh api repos/hadamrd/titan-e2e-fixture/contents/titan-pipeline.yml --jq .sha)"
+gh api -X PUT repos/hadamrd/titan-e2e-fixture/contents/<path> \
+  -f message="sync <path>" \
+  -f content="$(base64 -w0 e2e/fixtures/titan-e2e-fixture/<path>)" \
+  -f sha="$(gh api repos/hadamrd/titan-e2e-fixture/contents/<path> --jq .sha)"
+```
 
-gh api -X PUT repos/hadamrd/titan-e2e-fixture/contents/.titan/pipelines/secrets-handling.yml \
-  -f message="sync secrets fixture" \
-  -f content="$(base64 -w0 e2e/fixtures/titan-e2e-fixture/.titan/pipelines/secrets-handling.yml)" \
-  -f sha="$(gh api repos/hadamrd/titan-e2e-fixture/contents/.titan/pipelines/secrets-handling.yml --jq .sha)"
+To re-import from upstream (update the pinned SHA above when you do):
+
+```sh
+gh api "repos/hadamrd/titan-e2e-fixture/contents/<path>?ref=main" --jq .content \
+  | base64 -d > e2e/fixtures/titan-e2e-fixture/<path>
 ```

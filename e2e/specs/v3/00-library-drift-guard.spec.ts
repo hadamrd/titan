@@ -19,23 +19,30 @@
  * silently.
  *
  * Mechanism: extract each spec's marker constant FROM ITS SOURCE (not a copy — so the spec is
- * the single source of truth), fetch the live library repo files, and assert they reconcile.
- * Tag @golden so it runs in the same e2e profile as 47/48.
+ * the single source of truth), read the vendored library contract files
+ * (`e2e/fixtures/titan-ci-templates/`, a byte-identical mirror of `@v1` — see its README.md),
+ * and assert they reconcile. Tag @golden so it runs in the same e2e profile as 47/48.
+ *
+ * Hermeticity (#48): this guard used to fetch the library files from raw.githubusercontent.com
+ * on every run, which GitHub 429-throttled under repeated smoke runs. It now reconciles against
+ * the vendored mirror. LIVE-repo drift is still detected every smoke run — the golden 47/48
+ * builds clone the live `titan-ci-templates@v1` on the worker and fail if the markers moved;
+ * this guard's job is the fast, precise, in-repo reconciliation of spec constants vs contract.
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { test, expect, type APIRequestContext } from '@playwright/test'
+import { test, expect } from '@playwright/test'
+import { readLibraryFile } from '../../fixtures/fixture-files'
 
 // ESM scope (package.json "type": "module") — `__dirname` is undefined under the pinned
 // Playwright 1.60 loader; derive it from import.meta.url like the other v3 specs.
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url))
 
-// The library repo + tag the consumer pipelines pin via `...titan-ci-templates.git@v1`.
+// The library repo + tag the consumer pipelines pin via `...titan-ci-templates.git@v1`;
+// mirrored in-repo under e2e/fixtures/titan-ci-templates/.
 const LIB_REPO = 'hadamrd/titan-ci-templates'
 const LIB_REF = 'v1'
-const rawUrl = (file: string) =>
-  `https://raw.githubusercontent.com/${LIB_REPO}/${LIB_REF}/${file}`
 
 /** Read a sibling spec's source so we assert against the SPEC's own constant, never a copy. */
 function readSpec(name: string): string {
@@ -70,49 +77,32 @@ export function expectedMultiRepoMarker(versionFileContent: string): string {
   return `MULTIREPO_OK_${versionFileContent.trim()}`
 }
 
-async function fetchText(request: APIRequestContext, url: string): Promise<string> {
-  const r = await request.get(url, { headers: { 'Cache-Control': 'no-cache' } })
-  // 404 = library file moved/renamed; any non-200 (403 throttle, 5xx) = probe failure. Both are
-  // surfaced as a precise failure, never a silent pass.
-  expect(
-    r.status(),
-    `drift-guard: GET ${url} returned HTTP ${r.status()} (expected 200). ` +
-      `Either the library repo file moved, the @${LIB_REF} tag was deleted, or GitHub throttled us.`,
-  ).toBe(200)
-  return r.text()
-}
-
 test.describe('shared-library drift-guard @golden', () => {
   // 47: the library-only marker the spec asserts MUST exist verbatim in the library's groovy.
-  test('spec-47 library marker still lives in titan-ci-templates vars/ci.groovy', async ({
-    request,
-  }) => {
-    test.setTimeout(30_000)
+  test('spec-47 library marker still lives in titan-ci-templates vars/ci.groovy', () => {
     const marker = specConst(
       readSpec('47-shared-library-pipeline.spec.ts'),
       'LIBRARY_ONLY_MARKER',
       '47-shared-library-pipeline.spec.ts',
     )
-    const groovy = await fetchText(request, rawUrl('vars/ci.groovy'))
+    const groovy = readLibraryFile('vars/ci.groovy')
     expect(
       libraryMarkerPresent(groovy, marker),
-      `drift-guard: spec-47 asserts marker "${marker}" but it is NOT in ` +
-        `${LIB_REPO}@${LIB_REF}/vars/ci.groovy. The library was edited or the spec constant drifted; ` +
-        `the live 47 build would FAIL with "marker not in lib-out.txt". Reconcile both sides.`,
+      `drift-guard: spec-47 asserts marker "${marker}" but it is NOT in the vendored mirror of ` +
+        `${LIB_REPO}@${LIB_REF}/vars/ci.groovy. The library contract or the spec constant drifted; ` +
+        `the live 47 build would FAIL with "marker not in lib-out.txt". Reconcile both sides ` +
+        `(and re-sync e2e/fixtures/titan-ci-templates/ if the upstream tag legitimately moved).`,
     ).toBe(true)
   })
 
   // 48: the multi-repo marker is `MULTIREPO_OK_<VERSION>`; VERSION is the literal in the lib repo.
-  test('spec-48 multi-repo marker version still matches titan-ci-templates VERSION', async ({
-    request,
-  }) => {
-    test.setTimeout(30_000)
+  test('spec-48 multi-repo marker version still matches titan-ci-templates VERSION', () => {
     const marker = specConst(
       readSpec('48-multi-repo-checkout.spec.ts'),
       'MULTIREPO_MARKER',
       '48-multi-repo-checkout.spec.ts',
     )
-    const versionRaw = await fetchText(request, rawUrl('VERSION'))
+    const versionRaw = readLibraryFile('VERSION')
     expect(versionRaw.trim().length, `drift-guard: ${LIB_REPO}@${LIB_REF}/VERSION is empty`).toBeGreaterThan(
       0,
     )

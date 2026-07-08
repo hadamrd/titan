@@ -1,0 +1,26 @@
+# Per-primitive fixture: parameters (string + choice + boolean) + when (closes #785).
+# E2E spec asserts: params resolve into the rendered sh command; the verbose-only
+# echo runs iff VERBOSE=true at trigger time.
+agent: linux
+
+parameters:
+  - name: GREETING
+    type: string
+    default: "hello"
+    description: "Free-form greeting injected into the echo."
+  - name: MODE
+    type: choice
+    default: "dev"
+    choices: ["dev", "prod"]
+    description: "Target mode; choice param drives bake-time validation."
+  - name: VERBOSE
+    type: boolean
+    default: false
+    description: "When true, the verbose-only echo step runs."
+
+stages:
+  - stage: Greet
+    steps:
+      - sh: "echo ${{ params.GREETING }} ${{ params.MODE }}"
+      - sh: "echo verbose"
+        when: "params.VERBOSE"

@@ -1,0 +1,20 @@
+# Multi-repo-checkout fixture (#1228): one build spanning TWO source repos — the app repo (this
+# fixture, via checkout:) plus a second repo (titan-ci-templates). A build step reads a file from
+# each, then writes a combined marker. E2E spec asserts: build SUCCESS; archived multi-out.txt
+# contains MULTIREPO_OK_v1 (the version comes from the *second* repo, proving it was read).
+#
+# NOTE: the checkout: step clones into the workspace root (one repo per workspace today), so the
+# second repo is brought in with `git clone` into a sub-dir. A first-class `checkout: { dir: ... }`
+# for >1 named checkout in one workspace is filed as a #1228 follow-up.
+agent: linux
+
+stages:
+  - stage: Build
+    steps:
+      - checkout:
+          url: "https://github.com/hadamrd/titan-e2e-fixture.git"
+          branch: main
+      - sh: "git clone --depth 1 https://github.com/hadamrd/titan-ci-templates.git _ci_templates"
+      - sh: "test -f .titan/pipelines/multi-repo-checkout.yml && test -f _ci_templates/vars/ci.groovy && echo MULTIREPO_OK_$(cat _ci_templates/VERSION) > multi-out.txt"
+      - archiveArtifacts:
+          artifacts: "multi-out.txt"

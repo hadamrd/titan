@@ -1,0 +1,18 @@
+# Shared-library fixture (#1228): pull reusable steps from titan-ci-templates via `libraries:`.
+#
+# The `libraries:` block fetches a real remote shared-CI repo; `ci.buildAndTest:` rewrites into a
+# libraryCall that loads vars/ci.groovy::buildAndTest(Map) on the worker (LibraryFetcher + design/53).
+# E2E spec asserts: build SUCCESS; archived lib-out.txt contains TITAN_LIB_MARKER_buildAndTest_v1 —
+# a marker that lives ONLY in the library repo, proving libraries: fetched + executed remote code.
+agent: linux
+
+libraries:
+  ci: "https://github.com/hadamrd/titan-ci-templates.git@v1"
+
+stages:
+  - stage: Build
+    steps:
+      - ci.buildAndTest:
+          profile: fast
+      - archiveArtifacts:
+          artifacts: "lib-out.txt"

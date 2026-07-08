@@ -1,0 +1,10 @@
+# Per-primitive fixture: minimal sh + archiveArtifacts (closes #785).
+# E2E spec asserts: build SUCCESS; one artifact named 'out.txt' attached to the build.
+agent: linux
+
+stages:
+  - stage: Build
+    steps:
+      - sh: "echo hello > out.txt"
+      - archiveArtifacts:
+          artifacts: "out.txt"

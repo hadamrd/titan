@@ -1,0 +1,19 @@
+# Per-primitive fixture: httpRequest (closes #785).
+# Defaults to httpbin.org which echoes the body, so the step's response is
+# assertable. E2E spec asserts: build SUCCESS; the httpRequest flow-node
+# result_json carries status: 200.
+agent: linux
+
+parameters:
+  - name: TARGET_URL
+    type: string
+    default: "https://httpbin.org/post"
+    description: "Override at trigger to point at a controlled mock for hermetic runs."
+
+stages:
+  - stage: Call
+    steps:
+      - httpRequest:
+          url: "${{ params.TARGET_URL }}"
+          method: POST
+          body: '{"e2e":true}'

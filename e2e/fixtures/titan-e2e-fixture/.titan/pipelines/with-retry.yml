@@ -1,0 +1,19 @@
+# Per-primitive fixture: per-step retry policy (closes #785).
+# Body fails on the first attempt and succeeds on the second by toggling a
+# filesystem marker. E2E spec asserts: build SUCCESS, with attempt count == 2
+# on the flow node.
+#
+# NOTE: the marker file lives at /tmp/titan-retry-marker on the worker. A fresh
+# worker container makes this idempotent across triggers; a worker reused across
+# multiple builds will see the marker survive and EVERY attempt of the next
+# build will pass on attempt #1. Specs that need clean retry behaviour MUST
+# either run on a fresh worker or call `sh: 'rm -f /tmp/titan-retry-marker'`
+# in a precondition stage.
+agent: linux
+
+stages:
+  - stage: FlakyTask
+    steps:
+      - sh: "test -f /tmp/titan-retry-marker || (touch /tmp/titan-retry-marker && exit 1)"
+        retry:
+          maxAttempts: 3
