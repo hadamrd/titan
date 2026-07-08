@@ -36,7 +36,7 @@ import { Route as BuildsBuildIdRouteImport } from './routes/builds/$buildId'
 import { Route as IntegrationsPulsarIndexRouteImport } from './routes/integrations.pulsar.index'
 import { Route as IntegrationsGithubIndexRouteImport } from './routes/integrations.github.index'
 import { Route as IntegrationsGithubInstallIdRouteImport } from './routes/integrations.github.$installId'
-import { Route as BuildsBuildIdCompareOtherRouteImport } from './routes/builds/$buildId.compare.$other'
+import { Route as BuildsBuildIdCompareOtherRouteImport } from './routes/builds/$buildId_.compare.$other'
 
 const WorkersRoute = WorkersRouteImport.update({
   id: '/workers',
@@ -176,9 +176,9 @@ const IntegrationsGithubInstallIdRoute =
   } as any)
 const BuildsBuildIdCompareOtherRoute =
   BuildsBuildIdCompareOtherRouteImport.update({
-    id: '/compare/$other',
-    path: '/compare/$other',
-    getParentRoute: () => BuildsBuildIdRoute,
+    id: '/builds/$buildId_/compare/$other',
+    path: '/builds/$buildId/compare/$other',
+    getParentRoute: () => rootRouteImport,
   } as any)
 
 export interface FileRoutesByFullPath {
@@ -192,7 +192,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRoute
   '/users': typeof UsersRoute
   '/workers': typeof WorkersRouteWithChildren
-  '/builds/$buildId': typeof BuildsBuildIdRouteWithChildren
+  '/builds/$buildId': typeof BuildsBuildIdRoute
   '/builds/compare': typeof BuildsCompareRoute
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/login/callback': typeof LoginCallbackRoute
@@ -222,7 +222,7 @@ export interface FileRoutesByTo {
   '/settings': typeof SettingsRoute
   '/users': typeof UsersRoute
   '/workers': typeof WorkersRouteWithChildren
-  '/builds/$buildId': typeof BuildsBuildIdRouteWithChildren
+  '/builds/$buildId': typeof BuildsBuildIdRoute
   '/builds/compare': typeof BuildsCompareRoute
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/login/callback': typeof LoginCallbackRoute
@@ -253,7 +253,7 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRoute
   '/users': typeof UsersRoute
   '/workers': typeof WorkersRouteWithChildren
-  '/builds/$buildId': typeof BuildsBuildIdRouteWithChildren
+  '/builds/$buildId': typeof BuildsBuildIdRoute
   '/builds/compare': typeof BuildsCompareRoute
   '/jobs/$jobId': typeof JobsJobIdRoute
   '/login/callback': typeof LoginCallbackRoute
@@ -270,7 +270,7 @@ export interface FileRoutesById {
   '/integrations/github/$installId': typeof IntegrationsGithubInstallIdRoute
   '/integrations/github/': typeof IntegrationsGithubIndexRoute
   '/integrations/pulsar/': typeof IntegrationsPulsarIndexRoute
-  '/builds/$buildId/compare/$other': typeof BuildsBuildIdCompareOtherRoute
+  '/builds/$buildId_/compare/$other': typeof BuildsBuildIdCompareOtherRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -362,7 +362,7 @@ export interface FileRouteTypes {
     | '/integrations/github/$installId'
     | '/integrations/github/'
     | '/integrations/pulsar/'
-    | '/builds/$buildId/compare/$other'
+    | '/builds/$buildId_/compare/$other'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -376,7 +376,7 @@ export interface RootRouteChildren {
   SettingsRoute: typeof SettingsRoute
   UsersRoute: typeof UsersRoute
   WorkersRoute: typeof WorkersRouteWithChildren
-  BuildsBuildIdRoute: typeof BuildsBuildIdRouteWithChildren
+  BuildsBuildIdRoute: typeof BuildsBuildIdRoute
   BuildsCompareRoute: typeof BuildsCompareRoute
   JobsJobIdRoute: typeof JobsJobIdRoute
   OnboardingManualRoute: typeof OnboardingManualRoute
@@ -391,6 +391,7 @@ export interface RootRouteChildren {
   IntegrationsGithubInstallIdRoute: typeof IntegrationsGithubInstallIdRoute
   IntegrationsGithubIndexRoute: typeof IntegrationsGithubIndexRoute
   IntegrationsPulsarIndexRoute: typeof IntegrationsPulsarIndexRoute
+  BuildsBuildIdCompareOtherRoute: typeof BuildsBuildIdCompareOtherRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -584,12 +585,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IntegrationsGithubInstallIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/builds/$buildId/compare/$other': {
-      id: '/builds/$buildId/compare/$other'
-      path: '/compare/$other'
+    '/builds/$buildId_/compare/$other': {
+      id: '/builds/$buildId_/compare/$other'
+      path: '/builds/$buildId/compare/$other'
       fullPath: '/builds/$buildId/compare/$other'
       preLoaderRoute: typeof BuildsBuildIdCompareOtherRouteImport
-      parentRoute: typeof BuildsBuildIdRoute
+      parentRoute: typeof rootRouteImport
     }
   }
 }
@@ -615,18 +616,6 @@ const WorkersRouteChildren: WorkersRouteChildren = {
 const WorkersRouteWithChildren =
   WorkersRoute._addFileChildren(WorkersRouteChildren)
 
-interface BuildsBuildIdRouteChildren {
-  BuildsBuildIdCompareOtherRoute: typeof BuildsBuildIdCompareOtherRoute
-}
-
-const BuildsBuildIdRouteChildren: BuildsBuildIdRouteChildren = {
-  BuildsBuildIdCompareOtherRoute: BuildsBuildIdCompareOtherRoute,
-}
-
-const BuildsBuildIdRouteWithChildren = BuildsBuildIdRoute._addFileChildren(
-  BuildsBuildIdRouteChildren,
-)
-
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuditRoute: AuditRoute,
@@ -638,7 +627,7 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsRoute: SettingsRoute,
   UsersRoute: UsersRoute,
   WorkersRoute: WorkersRouteWithChildren,
-  BuildsBuildIdRoute: BuildsBuildIdRouteWithChildren,
+  BuildsBuildIdRoute: BuildsBuildIdRoute,
   BuildsCompareRoute: BuildsCompareRoute,
   JobsJobIdRoute: JobsJobIdRoute,
   OnboardingManualRoute: OnboardingManualRoute,
@@ -653,6 +642,7 @@ const rootRouteChildren: RootRouteChildren = {
   IntegrationsGithubInstallIdRoute: IntegrationsGithubInstallIdRoute,
   IntegrationsGithubIndexRoute: IntegrationsGithubIndexRoute,
   IntegrationsPulsarIndexRoute: IntegrationsPulsarIndexRoute,
+  BuildsBuildIdCompareOtherRoute: BuildsBuildIdCompareOtherRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

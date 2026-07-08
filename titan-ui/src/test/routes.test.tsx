@@ -28,8 +28,10 @@ import { setAccessToken } from '../auth/tokenStore'
 import {
   setupFetchMock,
   resetFetchMock,
+  defaultHandlers,
   SEED_JOB,
   SEED_BUILD,
+  SEED_RUNNING_BUILD,
   SEED_JOBS_PAGE,
   SEED_QUEUE_ENTRY,
   SEED_WORKER_NULL_METRICS,
@@ -438,6 +440,68 @@ describe('Build detail route /builds/:buildId', () => {
     renderAt('/builds/9999')
     await waitFor(() =>
       expect(screen.getByText(/build not found/i)).toBeInTheDocument(),
+    )
+  })
+})
+
+// ── Build compare (path form) ────────────────────────────────────────────────
+// Regression guard for GH #51: builds/$buildId.compare.$other was a NESTED
+// child of builds/$buildId.tsx, which never renders an <Outlet/> — so the
+// compare route matched but rendered nothing (build-detail-or-blank instead
+// of the comparison / 404 message). The route file is now un-nested
+// ($buildId_.compare.$other.tsx). These tests mount the REAL generated
+// routeTree, so a future re-nesting regression fails here, not only on the
+// live rig. Same bug class as the /login/callback guard above (PR #343).
+
+describe('Build compare route /builds/$buildId/compare/$other (#51)', () => {
+  /** Default handlers + an empty artifacts page (the compare page fetches
+   *  /builds/:id/artifacts, which the default mock set does not cover). */
+  function withArtifactsHandlers() {
+    resetFetchMock()
+    setupFetchMock([
+      (url, method) => {
+        if (method !== 'GET') return null
+        if (!url.pathname.match(/^\/api\/v1\/builds\/\d+\/artifacts$/)) return null
+        return { status: 200, body: { items: [], total: 0 } }
+      },
+      ...defaultHandlers(),
+    ])
+    setAccessToken('fake')
+  }
+
+  it('renders the side-by-side comparison view, not the build-detail page', async () => {
+    withArtifactsHandlers()
+    renderAt(`/builds/${SEED_BUILD.id}/compare/${SEED_RUNNING_BUILD.id}`)
+    await waitFor(() =>
+      expect(screen.getByTestId('build-compare-view')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('compare-summary-a')).toBeInTheDocument()
+    expect(screen.getByTestId('compare-summary-b')).toBeInTheDocument()
+    // The artifacts section renders (empty-state flavour with the mock above).
+    expect(screen.getByTestId('compare-artifacts-disclosure')).toBeInTheDocument()
+  })
+
+  it('surfaces the "comparing with itself" notice on the same-build URL', async () => {
+    withArtifactsHandlers()
+    renderAt(`/builds/${SEED_BUILD.id}/compare/${SEED_BUILD.id}`)
+    await waitFor(() =>
+      expect(screen.getByTestId('compare-same-build-notice')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('compare-same-build-notice').textContent).toMatch(/itself/i)
+  })
+
+  it('renders the 404 message (never a blank page) for garbage ids', async () => {
+    renderAt('/builds/not-a-number/compare/also-not')
+    await waitFor(() =>
+      expect(screen.getByTestId('compare-invalid-id')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('compare-invalid-id').textContent).toMatch(/build not found/i)
+  })
+
+  it('renders the 404 message for negative / non-integer ids too', async () => {
+    renderAt('/builds/-1/compare/2.5')
+    await waitFor(() =>
+      expect(screen.getByTestId('compare-invalid-id')).toBeInTheDocument(),
     )
   })
 })

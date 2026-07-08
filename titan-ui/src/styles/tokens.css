@@ -293,6 +293,12 @@ textarea::placeholder {
 .main-col {
   display: grid;
   grid-template-rows: var(--topbar-h) 1fr;
+  /* GH #51 — pin the single column to the container width. Without this the
+     implicit `auto` column takes the topbar's min-content contribution
+     (~670px), so at 768px the shell rendered 902px wide and the whole app
+     scrolled horizontally by 134px. minmax(0, 1fr) = "exactly the free
+     space", regardless of what the topbar would prefer. */
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
 }
@@ -506,6 +512,17 @@ textarea::placeholder {
   position: sticky;
   top: 0;
   z-index: 10;
+  /* GH #51 — the topbar must accept the column width, not dictate it. */
+  min-width: 0;
+}
+/* GH #51 — at narrow widths the flexible regions (crumbs, search) absorb the
+   shrink; the fixed controls (icon buttons, live chip, theme seg, avatar)
+   keep their designed size instead of squishing. */
+.topbar .icon-btn,
+.topbar .live-chip,
+.topbar .seg,
+.topbar .avatar {
+  flex-shrink: 0;
 }
 .crumbs {
   display: flex;
@@ -514,6 +531,8 @@ textarea::placeholder {
   font-size: 13px;
   color: var(--fg-muted);
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 .crumb-sep {
   color: var(--fg-faint);
@@ -525,6 +544,9 @@ textarea::placeholder {
 
 .search {
   flex: 1;
+  min-width: 0; /* GH #51 — shrinkable below its label at narrow widths */
+  overflow: hidden;
+  white-space: nowrap;
   max-width: 420px;
   margin-left: auto;
   display: flex;
