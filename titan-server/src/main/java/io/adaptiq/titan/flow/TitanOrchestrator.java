@@ -226,6 +226,17 @@ public final class TitanOrchestrator {
     wakeSleepingNodes(flowNodes);
     timeoutEnforcer.enforceTimeouts(flowNodes, tasks);
 
+    // #824: any EXECUTE_COMMAND that has sat QUEUED + unclaimed past the grace window AND
+    // targets a queue NO live worker subscribes to is structurally unschedulable — fail it
+    // fast with a clear customer-facing reason rather than letting the orchestrator tight-loop
+    // forever. Runs BEFORE the node snapshot below (#133): the stage walk in this same pass then
+    // observes the guard-failed step, folds its stage FAILED, and finishIfDone closes the build —
+    // true fail-fast, no extra tick needed. Just-enqueued tasks need no ordering protection: the
+    // guard's grace window (created_at < now - GRACE_SECONDS) can never match a task created this
+    // pass, and the `tasks` snapshot predates dispatch anyway. Extracted to UnschedulableStepGuard
+    // (#125 size-cap follow-through).
+    new UnschedulableStepGuard(daos, buildId).failUnschedulableSteps(flowNodes, tasks);
+
     Map<String, FlowNodeRow> nodes = PipelineNodes.byId(flowNodes.listByBuild(buildId));
     Map<String, String> nameToId = PipelineNodes.nameToId(model);
     // The ${{ steps[...].outputs }} resolution context — built from the outputs published by
@@ -285,13 +296,6 @@ public final class TitanOrchestrator {
 
     gateEvaluator.evaluateGates(flowNodes, model, nameToId, nodes);
     gateEvaluator.evaluatePreconditions(flowNodes, model, nameToId, nodes, ctx);
-
-    // #824: any EXECUTE_COMMAND that has sat QUEUED + unclaimed past the grace window AND
-    // targets a queue NO live worker subscribes to is structurally unschedulable — fail it
-    // fast with a clear customer-facing reason rather than letting the orchestrator tight-loop
-    // forever. Runs after dispatch so a JUST-enqueued task has a tick to be claimed before we
-    // even look at it. Extracted to UnschedulableStepGuard (#125 size-cap follow-through).
-    new UnschedulableStepGuard(daos, buildId).failUnschedulableSteps(flowNodes, tasks);
 
     return finishIfDone(flowNodes, model, dispatched, reconciled);
   }
