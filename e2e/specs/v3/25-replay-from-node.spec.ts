@@ -21,7 +21,7 @@
  * Strategy:
  *   1. PKCE login + extract bearer.
  *   2. POST /api/v1/jobs to create a *purpose-built* job
- *      `replay-from-node-e2e` whose pipeline has 3 sequential stages:
+ *      `e2e-replay-node-<runTag>` whose pipeline has 3 sequential stages:
  *        - `prep`   — `sh: echo prep ok`        (will SUCCEED)
  *        - `build`  — `sh: echo build ok`       (will SUCCEED)
  *        - `it`     — `sh: ./gradlew integrationTest`  (will FAIL —
@@ -52,12 +52,17 @@
  * Hard rules from CONSTITUTION §6 / brief:
  *   - NO test.skip / test.fixme (the whole point of #321 is to remove that).
  *   - Deterministic waits only (poll loops + expect.poll, never sleep).
- *   - Test cleanup: the per-test job is created with a unique suffix so
- *     concurrent runs do not collide on `fullName`; a 409 on create is
- *     treated as the seed-already-exists idempotent skip (we just reuse it).
+ *   - Ownership + teardown (#135 promotion audit): the job is created with a
+ *     unique-per-run fullName (`e2e-replay-node-<runTag>`) so concurrent runs
+ *     never collide, and `finally{}` tears it (+ parent AND replay builds)
+ *     down via `safeDeleteJobCascade` — zero litter. The previous revision
+ *     reused a fixed `replay-from-node-e2e-v2` job across runs and never
+ *     deleted it, which violated the e2e/README spec-ownership rule and
+ *     accumulated FAILED builds on the rig.
  */
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -183,46 +188,21 @@ async function pollBuildUntilTerminal(
   )
 }
 
-async function ensureJobId(
+async function createJob(
   request: APIRequestContext,
   bearer: string,
   fullName: string,
 ): Promise<number> {
-  // GET first — if it already exists, reuse it (idempotent across re-runs of
-  // this spec). The /jobs index supports filtering by name via search.
-  const list = await apiJson<{ items: Array<{ id: number; fullName: string }> }>(
-    request,
-    bearer,
-    'GET',
-    `/api/v1/jobs?offset=0&limit=500`,
-  )
-  if (list.ok && list.body) {
-    const hit = list.body.items.find((j) => j.fullName === fullName)
-    if (hit) return hit.id
-  }
-  // Create.
+  // Plain create — the fullName carries a per-run unique runTag (#135
+  // promotion audit), so there is nothing to reuse and a 409 is a real error.
+  // The pre-promotion GET-or-create against a FIXED name violated the
+  // spec-ownership rule (the job outlived every run and was never deleted).
   const created = await apiJson<{ id: number }>(request, bearer, 'POST', `/api/v1/jobs`, {
     fullName,
     displayName: 'Replay-from-node E2E',
     pipelineScript: JOB_PIPELINE,
     enabled: true,
   })
-  if (created.status === 409) {
-    // Race: someone else created it between our GET and POST. Re-query.
-    const second = await apiJson<{ items: Array<{ id: number; fullName: string }> }>(
-      request,
-      bearer,
-      'GET',
-      `/api/v1/jobs?offset=0&limit=500`,
-    )
-    const hit = second.body?.items.find((j) => j.fullName === fullName)
-    if (!hit) {
-      throw new Error(
-        `POST /api/v1/jobs returned 409 but follow-up GET cannot find '${fullName}'`,
-      )
-    }
-    return hit.id
-  }
   if (!created.ok || !created.body) {
     throw new Error(
       `POST /api/v1/jobs failed: HTTP ${created.status} body=${created.raw.slice(0, 500)}`,
@@ -256,13 +236,17 @@ function upstreamOf(nodes: FlowNodeDto[], anchorNodeId: string): Set<string> {
   return upstream
 }
 
-test.describe('v3 replay-from-node (closes #321)', () => {
+// @golden sits BEFORE the parenthetical: dev/rig-smoke/golden-count.sh greps
+// `describe\([^)]*@golden`, so a `)` ahead of the tag would drop this spec
+// from the golden floor.
+test.describe('v3 replay-from-node @golden (closes #321)', () => {
   test('replays a FAILED build from the failing step — upstream SKIPPED, anchor RAN fresh', async ({
     page,
     request,
   }) => {
-    test.setTimeout(180_000)
+    test.setTimeout(240_000)
     let attachedDiagnostics = false
+    let jobId: number | undefined
     let parentBuildId: number | undefined
     let replayBuildId: number | undefined
     let bearer: string | undefined
@@ -313,13 +297,12 @@ test.describe('v3 replay-from-node (closes #321)', () => {
       await loginViaKeycloak(page, ENV)
       bearer = await extractAccessToken(page)
 
-      // 2. Ensure the purpose-built job exists.
-      // v2 suffix: the pipeline shape changed (added explicit dependsOn) — a
-      // new fullName ensures we don't reuse an old job whose stored pipeline
-      // model has no dependsOn edges. Idempotent on subsequent runs (ensureJobId
-      // GET-or-create).
-      const jobName = 'replay-from-node-e2e-v2'
-      const jobId = await ensureJobId(request, bearer, jobName)
+      // 2. Create the purpose-built job with a unique-per-run name (#135
+      // promotion audit) — this spec OWNS every row it asserts on, and the
+      // finally{} below deletes them all. No cross-run reuse.
+      const runTag = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`
+      const jobName = `e2e-replay-node-${runTag}`
+      jobId = await createJob(request, bearer, jobName)
       expect(jobId, `failed to resolve jobId for '${jobName}'`).toBeGreaterThan(0)
 
       // 3. Trigger a parent build via the public API.
@@ -491,6 +474,14 @@ test.describe('v3 replay-from-node (closes #321)', () => {
     } catch (err) {
       await dumpDiagnostics('failure')
       throw err
+    } finally {
+      // Ownership teardown (#135): cancel-wait-delete the job + parent AND
+      // replay builds this run created. safeDeleteJobCascade never yanks a
+      // leased task_queue row; both builds are terminal by the time the happy
+      // path lands here, and on early failure it drives them terminal first.
+      if (jobId !== undefined) {
+        await safeDeleteJobCascade(request, jobId)
+      }
     }
   })
 })
