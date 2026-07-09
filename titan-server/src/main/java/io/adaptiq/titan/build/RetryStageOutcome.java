@@ -23,12 +23,13 @@ public sealed interface RetryStageOutcome {
 
   /**
    * Successful retry — the stage and {@code resetNodeIds} (its DAG descendants, inclusive of the
-   * stage itself) were reset to {@code QUEUED} and the build was flipped back to {@code RUNNING}.
+   * stage itself) were reset (stages → {@code QUEUED}, steps → {@code PENDING} with a bumped
+   * dispatch generation, #125) and the build was flipped back to {@code RUNNING}.
    *
    * @param buildId the build that was retried
    * @param stageId the failed stage that was retried
-   * @param resetNodeIds the flow-node ids reset to {@code QUEUED} (stage + descendants); included
-   *     in the response so the UI can update its DAG view without a re-fetch
+   * @param resetNodeIds the flow-node ids reset (stage + descendants); included in the response so
+   *     the UI can update its DAG view without a re-fetch
    * @param taskId the id of the enqueued {@code ORCHESTRATE/ADVANCE} task; the worker will pick it
    *     up on the next tick and dispatch the first step
    */

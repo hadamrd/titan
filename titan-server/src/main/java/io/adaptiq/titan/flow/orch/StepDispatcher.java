@@ -201,9 +201,23 @@ public final class StepDispatcher {
     String payload;
     long taskId;
     try {
+      // #125: read the node's CURRENT attempt so stepPayload can stamp the dispatch generation.
+      // Inside this try on purpose — a failed read must fail the step at dispatch rather than
+      // silently stamp attempt=1, which would make a retried node's completion unfoldable (the
+      // reconciler would treat it as superseded) and the self-heal would re-dispatch forever.
+      int attempt =
+          daos.flowNodes().findByBuildAndNode(buildId, step.getId()).map(n -> n.attempt).orElse(1);
       payload =
           stepPayload(
-              step, resolvedArgs, model, stepContext, image, credentials, credentialKey, stepEnv);
+              step,
+              resolvedArgs,
+              model,
+              stepContext,
+              image,
+              credentials,
+              credentialKey,
+              stepEnv,
+              attempt);
     } catch (RuntimeException e) {
       // Building the EXECUTE_COMMAND payload threw — a malformed step, an un-serialisable
       // argument, a sealing failure. The worker has no path to recover this, so the step is
@@ -311,6 +325,11 @@ public final class StepDispatcher {
    * goes into {@code secretFiles}; any {@code sshAgent:} key goes into {@code sshAgentKeys}
    * (design/41). All fields are additive — a step with no {@code credentials:} and no {@code
    * sshAgent:} produces none of them and an older worker simply ignores them.
+   *
+   * <p>{@code attempt} is the node's {@code flow_nodes.attempt} at dispatch time — the task's
+   * <em>dispatch generation</em> (#125). The reconciler compares it against the node's current
+   * attempt so a terminal task from a previous generation (superseded by an in-place stage retry)
+   * is never folded back onto the reset node. The worker ignores the field.
    */
   @NonNull
   public String stepPayload(
@@ -321,11 +340,13 @@ public final class StepDispatcher {
       @Nullable String image,
       @NonNull CredentialsPort.Resolved credentials,
       @Nullable byte[] credentialKey,
-      @NonNull Map<String, String> stepEnv) {
+      @NonNull Map<String, String> stepEnv,
+      int attempt) {
     ObjectNode payload = JSON.createObjectNode();
     payload.put("buildId", buildId);
     payload.put("nodeId", step.getId());
     payload.put("stepDescriptor", step.getDescriptorId());
+    payload.put("attempt", Math.max(1, attempt));
     // The container image (design/31 §6G) — the worker runs the step inside it; absent → local.
     if (image != null && !image.isBlank()) {
       payload.put("image", image);
