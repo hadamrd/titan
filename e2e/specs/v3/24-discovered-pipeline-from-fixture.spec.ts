@@ -400,10 +400,21 @@ test.describe('v3 discovered-pipeline-from-fixture @golden', () => {
       ).toBe(fixtureYaml.trim())
 
       // ── 9. UI assert: open /builds/{id}, assert each stage label is in DOM.
+      //     The old "Builds … #n" heading is now a breadcrumb nav
+      //     (BuildDetailHeader.tsx, aria-label="Breadcrumb") — assert it
+      //     carries the trail root, the job name and the #n build label (#77).
       await page.goto(`${ENV.uiBaseUrl}/builds/${buildId}`)
-      await expect(page.getByRole('heading', { name: /builds.*#/i })).toBeVisible({
-        timeout: 15_000,
-      })
+      const crumbs = page.getByRole('navigation', { name: /breadcrumb/i })
+      await expect(crumbs).toBeVisible({ timeout: 15_000 })
+      await expect(crumbs, 'breadcrumb lost its Builds root link').toContainText('Builds')
+      await expect(
+        crumbs,
+        'breadcrumb does not carry the job display name',
+      ).toContainText('E2E discovered from fixture')
+      await expect(
+        crumbs.getByTestId('bd-build-label'),
+        'breadcrumb build label is not the #n chip',
+      ).toHaveText(/^#\d+$/)
       // Wait for the DAG region to render: pipeline node count text or DagView.
       const dagBar = page.getByTestId('dag-collapsed-bar')
       const dagWrap = page.locator('.bd-dag-wrap')

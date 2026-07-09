@@ -291,8 +291,15 @@ test.describe('v3 operator-golden-path-params @golden', () => {
       const modeInput = page.getByTestId('trigger-param-MODE-input')
       await expect(greetingInput).toBeVisible()
       await expect(modeInput).toBeVisible()
-      await expect(modal.getByText('GREETING', { exact: false })).toBeVisible()
-      await expect(modal.getByText('MODE', { exact: false })).toBeVisible()
+      // exact:true — the param hint ("greeting word echoed by the build",
+      // #trigger-param-GREETING-hint) also substring-matches 'GREETING'
+      // case-insensitively, tripping strict mode (#77).
+      await expect(modal.getByText('GREETING', { exact: true })).toBeVisible()
+      await expect(modal.getByText('MODE', { exact: true })).toBeVisible()
+      // Bonus oracle: the declared description renders as the field hint.
+      await expect(modal.locator('#trigger-param-GREETING-hint')).toHaveText(
+        'greeting word echoed by the build',
+      )
 
       // 5. MODAL-TRAP GUARD (AC#4, adversarial): Escape dismisses the modal AND
       //    the page is interactive again. This is the exact bug #1263 fixed.
