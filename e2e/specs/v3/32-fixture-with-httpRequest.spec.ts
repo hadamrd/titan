@@ -1,14 +1,14 @@
 /**
  * 32-fixture-with-httpRequest — discovery → webhook trigger → httpRequest step
- * round-trips end-to-end (closes #786).
+ * round-trips end-to-end (closes #786; de-externalized in #119).
  *
- * Drives the worker-side `httpRequest` step against the public fixture
+ * Drives the worker-side `httpRequest` step against the vendored fixture
  * `hadamrd/titan-e2e-fixture/.titan/pipelines/with-httpRequest.yml`:
  *
  *     parameters:
  *       - name: TARGET_URL
  *         type: string
- *         default: "https://httpbin.org/post"
+ *         default: "http://host.docker.internal:18099/post"
  *     stages:
  *       - stage: Call
  *         steps:
@@ -20,45 +20,52 @@
  * The fixture's own comment says the spec contract is: build SUCCESS AND the
  * httpRequest flow-node result_json carries `status: 200`. We follow that.
  *
+ * Hermetic since #119: the fixture used to default to https://httpbin.org —
+ * the last external-internet dependency in the golden set (build 1225 of the
+ * 2026-07-09 smoke died to an httpbin 503). The spec now binds a LOCAL fake
+ * target on the host (fixtures/http-target.ts, port 18099) and substitutes
+ * the address the worker container can actually dial (the compose network's
+ * gateway IP — the local rig's worker service has NO extra_hosts entry, so
+ * host.docker.internal does not resolve there; see workerReachableHostAddr)
+ * into the fixture YAML at job creation. Same 200 + result_json oracle as
+ * before, PLUS the fake target's request recording proves the step hit OUR
+ * endpoint and carried the fixture's body — not some external host.
+ *
  * Workflow (matches spec #26's discipline):
- *   1. Pre-check the fixture YAML is reachable + shape sanity-check
- *      (httpRequest + TARGET_URL still present).
+ *   1. Read the vendored fixture YAML + shape sanity-check (httpRequest +
+ *      TARGET_URL still present), start the local http target, substitute the
+ *      worker-reachable host into the YAML.
  *   2. Login (PKCE) + extract bearer.
  *   3. Create an HMAC credential (kind=STRING, scope=github-webhook).
- *   4. Create the job: pipelineScript=fixtureYaml, configJson carries the
- *      github trigger pointing at the credential.
+ *   4. Create the job: pipelineScript=substituted fixtureYaml, configJson
+ *      carries the github trigger pointing at the credential.
  *   5. Synthesise + HMAC-sign a `push` payload; POST /api/v1/triggers/github.
  *      HARD assert dispatched=true (real webhook path, not inline trigger).
  *   6. Poll /jobs/{id}/builds until the build appears (≤ 30s).
- *   7. Poll /builds/{id} until terminal (≤ 120s — outbound HTTP to httpbin
- *      can be slow on cold worker).
+ *   7. Poll /builds/{id} until terminal (≤ 120s).
  *   8. HARD assert build.status === SUCCESS.
  *   9. HARD assert that some flow_node in the build carries the http response
  *      status code 200 (the worker step persists `{status: 200, ...}` in
- *      result_json when httpbin responds; we accept either explicit
- *      result_json scrape OR a log oracle containing "200"). The log oracle
- *      reads the REAL per-step log endpoint
- *      `GET /api/v1/builds/{buildId}/logs?taskId={logTaskId}` (SSE; the
- *      stream self-terminates once the build is terminal and logs are
+ *      result_json; we accept either explicit result_json scrape OR a log
+ *      oracle containing "200"). The log oracle reads the REAL per-step log
+ *      endpoint `GET /api/v1/builds/{buildId}/logs?taskId={logTaskId}` (SSE;
+ *      the stream self-terminates once the build is terminal and logs are
  *      drained — issue #66: an earlier revision hit a nonexistent
- *      `/api/v1/logs/{taskId}` route).
- *  10. finally{}: delete credential + job (safeDeleteJobCascade, #116 — this
- *      spec used to leak one e2e-with-httpRequest-* job per run).
+ *      `/api/v1/logs/{taskId}` route). PLUS: assert the local target received
+ *      the fixture's POST body (hermeticity oracle, #119).
+ *  10. finally{}: close the local target + delete credential + job
+ *      (safeDeleteJobCascade, #116 — this spec used to leak one
+ *      e2e-with-httpRequest-* job per run).
  *
  * Sad-path note: the matrix issue (#786) calls for a sad-path on one of the
  * specs. Specs 28-approval (REJECT path) and 29-retry (attempt counter) already
  * cover that; this spec stays focused on the happy webhook + httpRequest path.
- *
- * Out-of-rig dependency: this spec talks to https://httpbin.org through the
- * worker container. If the rig has no egress, the spec will hit a terminal
- * FAILED — that's a rig story, not a product regression — but the assertion
- * failure mode is clearly observable from the attached diagnostics (build
- * status + flow-node JSON).
  */
 import * as crypto from 'node:crypto'
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
 import { readFixtureYaml } from '../../fixtures/fixture-files'
+import { startFakeHttpTarget, workerReachableHostAddr } from '../../fixtures/http-target'
 import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
@@ -67,6 +74,11 @@ const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
 const FIXTURE_REPO = 'hadamrd/titan-e2e-fixture'
 const FIXTURE_BRANCH = 'main'
 const FIXTURE_PATH = '.titan/pipelines/with-httpRequest.yml'
+
+// Pinned local-target port; must match the fixture YAML's TARGET_URL default
+// (`http://host.docker.internal:18099/post`). 18099 sits next to the pulsar
+// fixture's 18098 — both are host-bound spec-owned servers the rig dials into.
+const HTTP_TARGET_PORT = 18099
 
 const RUN_TAG = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`
 const JOB_FULL_NAME = `e2e-with-httpRequest-${RUN_TAG}`
@@ -162,6 +174,26 @@ test.describe('v3 fixture-with-httpRequest @golden', () => {
       'fixture YAML drift — expected httpRequest step',
     ).toMatch(/httpRequest/)
     expect(fixtureYaml, 'fixture YAML drift — expected TARGET_URL param').toMatch(/TARGET_URL/)
+    expect(
+      fixtureYaml,
+      `fixture YAML drift — TARGET_URL default must be the LOCAL fake target ` +
+        `http://host.docker.internal:${HTTP_TARGET_PORT}/post (#119: no external hosts in Layer-1 fixtures)`,
+    ).toContain(`http://host.docker.internal:${HTTP_TARGET_PORT}/post`)
+
+    // Start the spec-owned local target, then bake the address the WORKER
+    // container can actually dial into the pipeline (the local rig's worker
+    // has no extra_hosts, so host.docker.internal only resolves there on
+    // Docker Desktop — workerReachableHostAddr falls back to the compose
+    // network's gateway IP). The substitution is a no-op when the resolved
+    // address IS host.docker.internal.
+    const target = await startFakeHttpTarget(HTTP_TARGET_PORT)
+    const hostAddr = workerReachableHostAddr()
+    const targetUrl = `http://${hostAddr}:${HTTP_TARGET_PORT}/post`
+    const pipelineYaml = fixtureYaml.replaceAll('host.docker.internal', hostAddr)
+    expect(
+      pipelineYaml,
+      'host substitution failed — instantiated pipeline does not carry the local target URL',
+    ).toContain(targetUrl)
 
     let attached = false
     let bearer: string | undefined
@@ -256,7 +288,7 @@ test.describe('v3 fixture-with-httpRequest @golden', () => {
         data: {
           fullName: JOB_FULL_NAME,
           displayName: 'E2E with-httpRequest from fixture',
-          pipelineScript: fixtureYaml,
+          pipelineScript: pipelineYaml,
           configJson: JSON.stringify(triggersConfig),
           enabled: true,
         },
@@ -355,7 +387,9 @@ test.describe('v3 fixture-with-httpRequest @golden', () => {
         finalStatus,
         `build ${buildId} terminal status was "${finalStatus}", expected SUCCESS — ` +
           `httpRequest fixture is the worker-step golden path. Any non-SUCCESS is a regression. ` +
-          `If diagnostics show 'no route to host' for httpbin.org, the rig has no egress (rig issue, not product).`,
+          `If diagnostics show a connect error for ${targetUrl}, the worker could not reach the ` +
+          `spec's local http target — check TITAN_E2E_HOST_ADDR / the docker network gateway ` +
+          `(workerReachableHostAddr resolved "${hostAddr}").`,
       ).toBe('SUCCESS')
 
       // ── 9. HARD assert a flow_node carries the response status 200. ──────
@@ -411,16 +445,36 @@ test.describe('v3 fixture-with-httpRequest @golden', () => {
         found200,
         `no flow_node carries http status 200 in result_json or step log on build ${buildId}. ` +
           `Either the httpRequest step did not run, the response status was not persisted, ` +
-          `or the endpoint returned a non-200 (rig egress / httpbin down). ` +
+          `or the local target answered non-200. ` +
           `Observed nodes: ${JSON.stringify(nodeArray.map((n) => n.nodeType ?? n.displayName))}`,
       ).toBe(true)
+
+      // Hermeticity oracle (#119): the 200 above must have come from OUR
+      // local target — assert it physically received the fixture's POST with
+      // the pipeline's body. This is what proves the step no longer depends
+      // on any external host.
+      expect(
+        target.requests.length,
+        `the local http target on :${HTTP_TARGET_PORT} received no request — the 200 the ` +
+          `flow_node carries did not come from the spec-owned target (URL substitution drift?)`,
+      ).toBeGreaterThan(0)
+      const hit = target.requests.find((r) => r.method === 'POST' && r.body.includes('"e2e"'))
+      expect(
+        hit,
+        `no POST with the fixture body {"e2e":true} reached the local target. ` +
+          `Received: ${JSON.stringify(target.requests.map((r) => ({ m: r.method, p: r.path, b: r.body.slice(0, 100) })))}`,
+      ).toBeDefined()
     } catch (err) {
       await dump('assertion-failure')
       throw err
     } finally {
-      // ── 10. Cleanup credential + job (#116 — used to leak one
+      // ── 10. Close the spec-owned local target (never leaks a listener),
+      // then cleanup credential + job (#116 — used to leak one
       // e2e-with-httpRequest-* job per run). safeDeleteJobCascade cancels any
       // live build first and never deletes under a worker lease (#59).
+      await target.close().catch(() => {
+        /* best-effort */
+      })
       if (bearer && credentialId) {
         await request
           .delete(`${API_BASE}/api/v1/credentials/${credentialId}`, {

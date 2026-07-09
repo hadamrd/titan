@@ -1,14 +1,17 @@
-# Per-primitive fixture: httpRequest (closes #785).
-# Defaults to httpbin.org which echoes the body, so the step's response is
-# assertable. E2E spec asserts: build SUCCESS; the httpRequest flow-node
-# result_json carries status: 200.
+# Per-primitive fixture: httpRequest (closes #785; de-externalized in #119).
+# The default targets a LOCAL fake http target the e2e spec binds on the host
+# (e2e/fixtures/http-target.ts, port 18099) — no external internet. The spec
+# substitutes `host.docker.internal` with the address the worker container can
+# actually reach (the rig network's gateway IP; the local rig's worker has no
+# extra_hosts entry) at job creation. E2E spec asserts: build SUCCESS; the
+# httpRequest flow-node result_json carries status: 200.
 agent: linux
 
 parameters:
   - name: TARGET_URL
     type: string
-    default: "https://httpbin.org/post"
-    description: "Override at trigger to point at a controlled mock for hermetic runs."
+    default: "http://host.docker.internal:18099/post"
+    description: "Local e2e fake target; the spec rewrites the host at job creation. Override at trigger to point elsewhere."
 
 stages:
   - stage: Call

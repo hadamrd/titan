@@ -45,6 +45,12 @@ silent-skip guard).
 
 ## History
 
+- **#119** — `.titan/pipelines/with-httpRequest.yml`: `TARGET_URL` default changed from
+  `https://httpbin.org/post` (last external-internet dependency in the golden set; an
+  httpbin 503 killed build 1225 on the 2026-07-09 smoke) to the spec-owned local target
+  `http://host.docker.internal:18099/post` (see `e2e/fixtures/http-target.ts`; spec 32
+  substitutes the worker-reachable host at job creation). Synced upstream (commit
+  `ff3f3d1c7688eb74bbefaebba241020f3770a012`) — byte-identity holds.
 - **#1246** — specs 40/45 were dormant because their fixture files 404-ed upstream;
   the first two mirror files (`titan-pipeline.yml`, `.titan/pipelines/secrets-handling.yml`)
   were restored here and pushed upstream. `45-secrets-handling` also switched from
