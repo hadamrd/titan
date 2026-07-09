@@ -658,6 +658,11 @@ tasks:
           # intentional drift is legitimate mid-bisect. run-golden.sh repeats
           # the probe and records the result in the telemetry line.
           bash dev/rig-smoke/check-rig-freshness.sh > /dev/null || true
+          # Bind-mount guard (#149): a reused rig composed from a since-deleted
+          # worktree serves EMPTY fixture dirs while the image SHA still looks
+          # fresh (the #147 phantom P1). Same warning-only contract; run-golden.sh
+          # repeats the probe into the additive rigMountIssue telemetry field.
+          bash dev/rig-smoke/check-rig-mounts.sh > /dev/null || true
         fi
       - |
         set -euo pipefail

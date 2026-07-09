@@ -170,5 +170,42 @@ if echo "$OUT" | grep -q '"passed":999'; then
 fi
 echo "ok: ADVERSARIAL — non-boolean env sanitized (no JSON injection)"
 
+# ── Case 11: #149 — rigMountIssue defaults to false when env unset ─────────
+OUT=$(bash "$SCRIPT" "$TMP/green.txt" 0 12345)
+if ! echo "$OUT" | grep -q '"rigMountIssue":false'; then
+  echo "FAIL: unset RIG_SMOKE_RIG_MOUNT_ISSUE should record rigMountIssue=false: $OUT" >&2
+  exit 1
+fi
+echo "ok: rigMountIssue defaults to false"
+
+# ── Case 12: #149 — env 'true' records the mount flag in the telemetry ─────
+OUT=$(RIG_SMOKE_RIG_MOUNT_ISSUE=true bash "$SCRIPT" "$TMP/green.txt" 0 12345 "$TMP/jsonl")
+if ! echo "$OUT" | grep -q '"rigMountIssue":true'; then
+  echo "FAIL: RIG_SMOKE_RIG_MOUNT_ISSUE=true not recorded: $OUT" >&2
+  exit 1
+fi
+if ! tail -n 1 "$TMP/jsonl" | grep -q '"rigMountIssue":true'; then
+  echo "FAIL: appended jsonl line lost rigMountIssue: $(tail -n1 "$TMP/jsonl")" >&2
+  exit 1
+fi
+# Additive only: the #44 field must ride along untouched.
+if ! echo "$OUT" | grep -q '"rigShaMismatch":false'; then
+  echo "FAIL: rigMountIssue must not disturb rigShaMismatch: $OUT" >&2
+  exit 1
+fi
+echo "ok: mount flag (rigMountIssue=true) recorded in output + jsonl, rigShaMismatch untouched"
+
+# ── Case 13: ADVERSARIAL — garbage mount env can never inject JSON ─────────
+OUT=$(RIG_SMOKE_RIG_MOUNT_ISSUE='},"failed":0,"y":{' bash "$SCRIPT" "$TMP/red.txt" 1 1 2>/dev/null || true)
+if ! echo "$OUT" | grep -q '"rigMountIssue":false'; then
+  echo "FAIL: garbage RIG_SMOKE_RIG_MOUNT_ISSUE must sanitize to false: $OUT" >&2
+  exit 1
+fi
+if ! echo "$OUT" | grep -q '"failed":1'; then
+  echo "FAIL: env value injected JSON into the telemetry line: $OUT" >&2
+  exit 1
+fi
+echo "ok: ADVERSARIAL — non-boolean mount env sanitized (no JSON injection)"
+
 echo ""
 echo "PASS: all rig-smoke-parse.sh cases (including adversarial breakage guard)"
