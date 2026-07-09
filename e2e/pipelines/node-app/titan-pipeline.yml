@@ -1,17 +1,35 @@
-# Real-shaped Node.js service pipeline (issue #1119).
+# Real-shaped Node.js service pipeline (issue #1119, guards reworked in #43).
 #
-# Exercises the PDL features being landed in #1094 (top-level `env:` + per-step
-# overrides + secret refs) and #1093 (`when:` evaluation). Mirrors a typical
-# Node service migration off GitHub Actions:
+# Exercises top-level `env:` + per-step overrides (#1094) and a bake-legal
+# stage-level `when:` guard (#1093). Mirrors a typical Node service migration
+# off GitHub Actions:
 #   install -> lint -> unit-test -> build -> deploy-staging -> smoke-test
 #
-# Invariants the e2e specs assert:
+# Invariants (verified against the live rig in the #43 PR):
 #   * Top-level env reaches every step unless overridden per-step.
-#   * deploy-staging runs ONLY on branch == 'main'; otherwise SKIPPED.
-#   * smoke-test runs ONLY if deploy-staging succeeded; otherwise SKIPPED.
-#   * The literal value of NPM_TOKEN never appears in any captured log line.
+#   * deploy-staging runs ONLY when params.deployEnv == 'staging' (the
+#     default); a build triggered with deployEnv=none SKIPs it at bake time.
+#   * smoke-test is guarded by `dependsOn` alone — the engine's default
+#     blockOnFailure policy skips it if deploy-staging FAILS. A bake-time
+#     SKIP of deploy-staging does NOT block it (a skipped stage is a clean
+#     no-op, not a failure): with deployEnv=none, deploy-staging=SKIPPED and
+#     smoke-test still runs SUCCESS (observed live, builds 916/917).
 #
-# Out of scope: no real `npm publish` — the deploy step shims to echo.
+# NOTE (issue #43): stage-level `when:` is evaluated at BAKE time, before any
+# step has run, against `params.*` and the build context only. The previous
+# guards — `when: "branch == 'main'"` and
+# `when: "steps.deploy-staging.result == 'success'"` — were runtime-only
+# expressions the engine now rejects with a precise error (issue #36 / PR #42
+# made that rejection loud). Branch-conditional behaviour belongs on a STEP
+# `when:` (structured `branch:` glob — see specs/v3/when-skipped.golden.spec.ts);
+# result-conditional behaviour is what `dependsOn` + blockOnFailure already
+# give you (see the node-app-with-failing-test sibling).
+#
+# Out of scope: no real `npm publish` — the deploy step shims to echo. The
+# secret-injection + log-redaction contract is documented by the dedicated
+# pipelines/secret-redaction fixture (env `secret:<id>` refs / `credentials:`
+# bindings), not here — the previous `${{ secrets.NPM_TOKEN }}` spelling was
+# never part of the PDL grammar.
 
 # Source location: the local rig bind-mounts the repo's e2e/pipelines/ at
 # /titan/fixtures inside the worker (rig/local/docker-compose.yml); see the
@@ -21,6 +39,17 @@ agent: linux
 env:
   NODE_ENV: production
   REGISTRY_URL: https://registry.npmjs.org
+
+parameters:
+  - name: deployEnv
+    type: choice
+    choices: [staging, none]
+    default: staging
+    description: >
+      Where to deploy after a green build. 'staging' (default) runs
+      deploy-staging; 'none' skips it at bake time (the stage-level
+      when: below sees params.* only). smoke-test runs either way —
+      a skipped dependency does not block it.
 
 stages:
   - stage: install
@@ -47,14 +76,15 @@ stages:
 
   - stage: deploy-staging
     dependsOn: [build]
-    when: "branch == 'main'"
+    # Bake-time guard: stage-level when: reads params.* only (docs/reference/pdl.md).
+    when: "params.deployEnv == 'staging'"
     steps:
       - sh: cd /titan/fixtures/node-app && echo "would publish to $REGISTRY_URL"
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   - stage: smoke-test
+    # No `when:` needed — default blockOnFailure skips this stage if
+    # deploy-staging FAILS (same repair as node-app-with-failing-test). A
+    # bake-time SKIP of deploy-staging does not block it — see header note.
     dependsOn: [deploy-staging]
-    when: "steps.deploy-staging.result == 'success'"
     steps:
       - sh: cd /titan/fixtures/node-app && node -e "console.log('smoke OK')"

@@ -16,8 +16,11 @@
  * same connection string `seed-v3.ts` uses, plus a cleanup helper that
  * removes anything created by a given test run (keyed on a unique prefix).
  *
- * Schema reference: titan-db-core/src/main/resources/io/adaptiq/titan/db/
- * migration/V1__init.sql.
+ * Schema reference: the LIVE rig schema (probed via information_schema —
+ * issue #64). titan.jobs carries no default_branch/repo_url/source_type/kind
+ * and titan.builds carries no branch/commit_sha columns: branch + commitSha
+ * moved into the builds.trigger_meta_json JSON payload (the same field
+ * spec 52 asserts on), so the adversarial branch/sha content is seeded there.
  *
  * Why direct-to-Postgres instead of going through the HTTP API: the HTTP API
  * rejects most of the adversarial shapes (length validators, charset checks).
@@ -69,13 +72,19 @@ export interface ParkourSeed {
 /**
  * Seed three adversarial jobs + a long-title build under each.
  *
- *   1. long-title job — title is ADVERSARIAL_LONG_TITLE; default_branch is
- *      a 100-char emoji-laden string. Builds rendered on /builds and /jobs.
- *   2. null-field job — display_name is NULL, default_branch is NULL,
- *      description is empty. Mimics `@JsonInclude(NON_NULL)` serialisation
- *      omitting these fields on the wire.
+ *   1. long-title job — title is ADVERSARIAL_LONG_TITLE; its build carries a
+ *      100-char emoji-laden branch + a 40-char sha inside trigger_meta_json
+ *      (where the live schema keeps them). Rendered on /builds and /jobs.
+ *   2. null-field job — display_name is NULL, the build's display_name /
+ *      triggered_by / trigger_meta_json are NULL and pipeline_script is the
+ *      empty string (the column is NOT NULL). Mimics `@JsonInclude(NON_NULL)`
+ *      serialisation omitting these fields on the wire.
  *   3. churn job — has 5 builds inserted within a 200ms window so the row
  *      ordering "by createdAt DESC" must stay stable under polling.
+ *
+ * The rows are engine-inert (no titan.task_queue rows are created), per the
+ * spec-ownership rule in e2e/README.md — the worker never touches them and
+ * `cleanParkourSeed` removes exactly the prefix-tagged rows.
  *
  * Returns a ParkourSeed the caller passes to `cleanParkourSeed` in afterAll.
  * Cleanup is idempotent so a hanging seed from a previous run doesn't poison
@@ -92,22 +101,27 @@ export async function seedAdversarialRows(): Promise<ParkourSeed> {
     {
       const fullName = `${prefix}-long`
       const res = await c.query<{ id: string }>(
-        `INSERT INTO titan.jobs (full_name, display_name, default_branch, repo_url, source_type, kind)
-         VALUES ($1, $2, $3, 'https://example.invalid/repo', 'TITAN', 'PIPELINE')
+        `INSERT INTO titan.jobs (full_name, display_name, pipeline_script, config_json, enabled)
+         VALUES ($1, $2, 'stages: []', '{}', TRUE)
          ON CONFLICT (full_name) DO UPDATE SET display_name = EXCLUDED.display_name
          RETURNING id::text AS id`,
-        [fullName, ADVERSARIAL_LONG_TITLE, '🌿' + 'x'.repeat(99)],
+        [fullName, ADVERSARIAL_LONG_TITLE],
       )
       const jobId = Number(res.rows[0]!.id)
       jobIds.push(jobId)
       const b = await c.query<{ id: string }>(
         `INSERT INTO titan.builds
            (job_id, build_number, status, started_at, finished_at,
-            display_name, branch, commit_sha)
+            display_name, triggered_by, trigger_meta_json)
          VALUES ($1, 1, 'SUCCESS', NOW() - INTERVAL '5 min', NOW(),
                  $2, $3, $4)
          RETURNING id::text AS id`,
-        [jobId, ADVERSARIAL_LONG_TITLE, '🚀' + 'b'.repeat(99), 'a'.repeat(40)],
+        [
+          jobId,
+          ADVERSARIAL_LONG_TITLE,
+          `${prefix}-long-bot`,
+          JSON.stringify({ branch: '🚀' + 'b'.repeat(99), commitSha: 'a'.repeat(40) }),
+        ],
       )
       buildIds.push(Number(b.rows[0]!.id))
     }
@@ -116,8 +130,8 @@ export async function seedAdversarialRows(): Promise<ParkourSeed> {
     {
       const fullName = `${prefix}-nulls`
       const res = await c.query<{ id: string }>(
-        `INSERT INTO titan.jobs (full_name, display_name, default_branch, repo_url, source_type, kind)
-         VALUES ($1, NULL, NULL, 'https://example.invalid/repo', 'TITAN', 'PIPELINE')
+        `INSERT INTO titan.jobs (full_name, display_name, pipeline_script, config_json, enabled)
+         VALUES ($1, NULL, '', '{}', TRUE)
          ON CONFLICT (full_name) DO UPDATE SET display_name = NULL
          RETURNING id::text AS id`,
         [fullName],
@@ -127,7 +141,7 @@ export async function seedAdversarialRows(): Promise<ParkourSeed> {
       const b = await c.query<{ id: string }>(
         `INSERT INTO titan.builds
            (job_id, build_number, status, started_at, finished_at,
-            display_name, branch, commit_sha)
+            display_name, triggered_by, trigger_meta_json)
          VALUES ($1, 1, 'SUCCESS', NOW() - INTERVAL '1 min', NOW(),
                  NULL, NULL, NULL)
          RETURNING id::text AS id`,
@@ -142,8 +156,8 @@ export async function seedAdversarialRows(): Promise<ParkourSeed> {
     {
       const fullName = `${prefix}-churn`
       const res = await c.query<{ id: string }>(
-        `INSERT INTO titan.jobs (full_name, display_name, default_branch, repo_url, source_type, kind)
-         VALUES ($1, $1, 'main', 'https://example.invalid/repo', 'TITAN', 'PIPELINE')
+        `INSERT INTO titan.jobs (full_name, display_name, pipeline_script, config_json, enabled)
+         VALUES ($1, $1, 'stages: []', '{}', TRUE)
          ON CONFLICT (full_name) DO UPDATE SET display_name = EXCLUDED.display_name
          RETURNING id::text AS id`,
         [fullName],
@@ -154,11 +168,17 @@ export async function seedAdversarialRows(): Promise<ParkourSeed> {
         const b = await c.query<{ id: string }>(
           `INSERT INTO titan.builds
              (job_id, build_number, status, started_at,
-              display_name, branch, commit_sha)
+              display_name, triggered_by, trigger_meta_json)
            VALUES ($1, $2, 'RUNNING', NOW(),
-                   $3, 'main', $4)
+                   $3, $4, $5)
            RETURNING id::text AS id`,
-          [jobId, n, `churn-${n}`, n.toString().padStart(40, '0')],
+          [
+            jobId,
+            n,
+            `churn-${n}`,
+            `${prefix}-churn-bot`,
+            JSON.stringify({ branch: 'main', commitSha: n.toString().padStart(40, '0') }),
+          ],
         )
         buildIds.push(Number(b.rows[0]!.id))
       }
