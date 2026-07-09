@@ -2,17 +2,11 @@
  * 61-stage-timings — GET /api/v1/jobs/{id}/stage-timings +
  * JobStageTimingsPanel against REAL engine-produced history (refs #123).
  *
- * ── CURRENTLY test.fixme — BLOCKED BY #127 ─────────────────────────────────
- * Writing this spec caught the exact bug it was designed for: the engine
- * NEVER stamps flow_nodes.duration_ms (every orchestrator call site passes
- * durationMs=null; only BuildCloser computes a duration, for titan.builds).
- * JobTimingsDao filters `duration_ms IS NOT NULL`, so stage-timings returns
- * `stages: []` for every real job and the panel permanently renders "Not
- * enough history yet." — the vitest fixtures and the seed rows both
- * hand-write duration_ms, which is why nothing else noticed.
- * When #127 lands: delete the test.fixme line below and add `@golden` back
- * to the describe title — this spec IS the acceptance test for #127.
- * ───────────────────────────────────────────────────────────────────────────
+ * History: writing this spec caught the exact bug it was designed for — the
+ * engine never stamped flow_nodes.duration_ms, so stage-timings returned
+ * `stages: []` for every real job (filed as #127, fixed: FlowNodeDao now
+ * derives duration_ms on every completing transition). This spec IS the
+ * acceptance test for that fix and runs @golden since #127 landed.
  *
  * Why this spec exists:
  *   The stage-timings endpoint (#1095) and its "Stage Timing — last 30
@@ -202,19 +196,13 @@ async function stageDurationsFromNodes(
   return out
 }
 
-// @golden intentionally ABSENT until #127 is fixed — a fixme'd spec must not
-// inflate the golden floor (dev/rig-smoke/check-golden-count.sh counts titles).
-test.describe('v3 stage-timings', () => {
+// @golden sits BEFORE any parenthetical on purpose: golden-count.sh's regex
+// stops at the first `)` on the title line (PR #128 lesson).
+test.describe('v3 stage-timings @golden', () => {
   test('two real runs of a 3-stage pipeline surface per-stage durations in API + panel', async ({
     page,
     request,
   }) => {
-    test.fixme(
-      true,
-      'blocked by #127: the engine never stamps flow_nodes.duration_ms, so ' +
-        '/stage-timings returns stages:[] for every real build. This spec is ' +
-        'the acceptance test for #127 — remove this fixme + re-add @golden there.',
-    )
     test.setTimeout(300_000)
 
     const bearer = await fetchBearerToken(ENV)
