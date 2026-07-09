@@ -27,6 +27,8 @@
 #   TITAN_PW_WORKERS          playwright workers (default 2 — the sanctioned CI value)
 #   TITAN_GLOBAL_TIMEOUT_MS   suite budget; if unset, derived from the @golden count
 #   RIG_SMOKE_SKIP_FRESHNESS  =1 skips the #44 stale-rig probe (check-rig-freshness.sh)
+#                             AND the #149 mount probe (family-wide hermetic knob)
+#   RIG_SMOKE_SKIP_MOUNTS     =1 skips only the #149 bind-mount probe (check-rig-mounts.sh)
 #   RIG_SMOKE_SKIP_PREWARM    =1 skips the #84 cold-worker pre-warm (prewarm-worker.sh)
 set -euo pipefail
 
@@ -78,6 +80,20 @@ if ! RIG_SHA_MISMATCH=$(bash "$REPO_ROOT/dev/rig-smoke/check-rig-freshness.sh");
 fi
 case "$RIG_SHA_MISMATCH" in true|false) ;; *) RIG_SHA_MISMATCH=false ;; esac
 
+# ── Dangling/foreign bind-mount probe (#149) ────────────────────────────────
+# The #147 phantom P1: a rig composed from a since-deleted worktree keeps
+# running, Docker recreates the bind source as an EMPTY dir, and the worker
+# fixtures vanish while the image SHA still looks fresh. The sibling probe
+# inspects every titan-* container's bind mounts for missing / empty-vs-
+# checkout / outside-checkout sources. Same contract as the #44 probe:
+# `true`/`false` on stdout, loud warning on stderr, always exit 0, lands as
+# the ADDITIVE `rigMountIssue` telemetry field. Honors the same
+# RIG_SMOKE_SKIP_FRESHNESS knob (plus RIG_SMOKE_SKIP_MOUNTS).
+if ! RIG_MOUNT_ISSUE=$(bash "$REPO_ROOT/dev/rig-smoke/check-rig-mounts.sh"); then
+  RIG_MOUNT_ISSUE=false
+fi
+case "$RIG_MOUNT_ISSUE" in true|false) ;; *) RIG_MOUNT_ISSUE=false ;; esac
+
 # ── Cold-worker pre-warm (#84) ──────────────────────────────────────────────
 # A titan-worker container younger than ~15min has a cold npm cache; the
 # first real build pays a cold `npm ci` and blows the triage spec's 30s
@@ -105,4 +121,5 @@ DUR=$((END_MS - START_MS))
 # result rides along as the additive `rigShaMismatch` field (existing fields
 # are untouched — parse-compat for check-3-consecutive.sh and friends).
 RIG_SMOKE_RIG_SHA_MISMATCH="$RIG_SHA_MISMATCH" \
+  RIG_SMOKE_RIG_MOUNT_ISSUE="$RIG_MOUNT_ISSUE" \
   bash "$REPO_ROOT/dev/rig-smoke/rig-smoke-parse.sh" "$TEE_FILE" "$EXIT" "$DUR" "$JSONL"

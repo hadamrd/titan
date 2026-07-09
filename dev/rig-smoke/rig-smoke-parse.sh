@@ -21,6 +21,11 @@
 #     Recorded as the ADDITIVE `rigShaMismatch` field; anything other than
 #     "true" (unset, empty, garbage) records false. Existing fields keep
 #     their exact names/order — parse-compat with check-3-consecutive.sh.
+#   RIG_SMOKE_RIG_MOUNT_ISSUE  "true" when the #149 bind-mount probe
+#     (check-rig-mounts.sh) found a titan-* container with a missing/empty/
+#     foreign bind-mount source (the #147 compose-from-deleted-worktree
+#     footgun). Recorded as the ADDITIVE `rigMountIssue` field with the same
+#     strict-boolean sanitization; existing fields untouched.
 #
 # Side effects:
 #   - Echoes the JSON line to stdout.
@@ -57,8 +62,15 @@ if [ "${RIG_SMOKE_RIG_SHA_MISMATCH:-false}" = "true" ]; then
 else
   RIG_SHA_MISMATCH=false
 fi
+# #149 mount-integrity telemetry — additive field, same strict-boolean
+# sanitization (no caller value can ever inject JSON into the line).
+if [ "${RIG_SMOKE_RIG_MOUNT_ISSUE:-false}" = "true" ]; then
+  RIG_MOUNT_ISSUE=true
+else
+  RIG_MOUNT_ISSUE=false
+fi
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-LINE="{\"ts\":\"$TS\",\"passed\":$PASSED,\"failed\":$FAILED,\"did_not_run\":$DID_NOT_RUN,\"durationMs\":$DUR,\"rigShaMismatch\":$RIG_SHA_MISMATCH}"
+LINE="{\"ts\":\"$TS\",\"passed\":$PASSED,\"failed\":$FAILED,\"did_not_run\":$DID_NOT_RUN,\"durationMs\":$DUR,\"rigShaMismatch\":$RIG_SHA_MISMATCH,\"rigMountIssue\":$RIG_MOUNT_ISSUE}"
 
 echo "$LINE"
 if [ -n "$OUT" ]; then
