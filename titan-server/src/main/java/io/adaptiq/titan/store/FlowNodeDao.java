@@ -115,12 +115,41 @@ public interface FlowNodeDao {
       @Bind("failureCategory") @NonNull String failureCategory,
       @Bind("failureReason") @NonNull String failureReason);
 
+  /**
+   * SET-clause fragment shared by {@link #updateStatus} and {@link #compareAndSetStatus} that
+   * stamps {@code duration_ms} (issue #127 — the stage-timings panel reads it and every
+   * orchestrator call site passes {@code durationMs = null}). Precedence:
+   *
+   * <ol>
+   *   <li>an explicit {@code :durationMs} bind (e.g. replay's SKIPPED-with-zero sentinel),
+   *   <li>an already-stamped {@code duration_ms} — never overwritten, so only the transition that
+   *       first completes the node stamps it (exactly-once under the CAS),
+   *   <li>derived: milliseconds between the {@code :completedAt} being written now and the node's
+   *       own recorded {@code started_at} (pre-update column value; falls back to a {@code
+   *       :startedAt} supplied in the same call).
+   * </ol>
+   *
+   * <p>If the transition writes no {@code completed_at}, or the node never started (e.g. a PENDING
+   * node SKIPPED because an upstream failed), every branch is NULL and {@code duration_ms} stays
+   * NULL — such nodes are invisible to {@code JobTimingsDao}, which is the desired SKIPPED
+   * semantics (a 0 would skew the percentiles down).
+   *
+   * <p>{@code EXTRACT(EPOCH FROM ...)} on plain timestamps (not on an interval) is the portable
+   * spelling — it evaluates identically on PostgreSQL and on the H2 PostgreSQL-mode database the
+   * unit tests run against.
+   */
+  String DURATION_STAMP =
+      "duration_ms = COALESCE(:durationMs, duration_ms, CAST("
+          + "(EXTRACT(EPOCH FROM CAST(:completedAt AS TIMESTAMP)) "
+          + "- EXTRACT(EPOCH FROM COALESCE(started_at, CAST(:startedAt AS TIMESTAMP)))) "
+          + "* 1000 AS BIGINT)), ";
+
   /** Update status and timing fields for a node. */
   @SqlUpdate(
       "UPDATE titan.flow_nodes SET status = :status, "
           + "started_at = COALESCE(:startedAt, started_at), "
           + "completed_at = COALESCE(:completedAt, completed_at), "
-          + "duration_ms = COALESCE(:durationMs, duration_ms), "
+          + DURATION_STAMP
           + "result_json = COALESCE(:resultJson, result_json) "
           + "WHERE build_id = :buildId AND node_id = :nodeId")
   void updateStatus(
@@ -136,14 +165,17 @@ public interface FlowNodeDao {
    * Compare-and-set a node's status: move it from {@code fromStatus} to {@code toStatus} only if it
    * is still in {@code fromStatus} (design/26 Tier B — two controllers cannot both advance the same
    * node). {@code started_at} / {@code completed_at} / {@code result_json} are written only when
-   * supplied (COALESCE). Returns rows affected — {@code 1} if this caller won the transition,
-   * {@code 0} if the node had already moved on.
+   * supplied (COALESCE). {@code duration_ms} is stamped by the winning transition per {@link
+   * #DURATION_STAMP} — a terminal CAS that writes {@code completed_at} derives the duration from
+   * the node's own {@code started_at} without the caller having to re-read the row. Returns rows
+   * affected — {@code 1} if this caller won the transition, {@code 0} if the node had already moved
+   * on.
    */
   @SqlUpdate(
       "UPDATE titan.flow_nodes SET status = :toStatus, "
           + "started_at = COALESCE(:startedAt, started_at), "
           + "completed_at = COALESCE(:completedAt, completed_at), "
-          + "duration_ms = COALESCE(:durationMs, duration_ms), "
+          + DURATION_STAMP
           + "result_json = COALESCE(:resultJson, result_json) "
           + "WHERE build_id = :buildId AND node_id = :nodeId AND status = :fromStatus")
   int compareAndSetStatus(
@@ -165,8 +197,10 @@ public interface FlowNodeDao {
    * advanced the attempt sees {@code 0} rows and does not double-enqueue.
    *
    * <p>Every field that records the <em>previous attempt's outcome</em> is reset, so the node
-   * presents as a genuinely clean fresh attempt: {@code result_json}, {@code started_at} and {@code
-   * completed_at}, and — design/45 — the structured failure {@code failure_category} / {@code
+   * presents as a genuinely clean fresh attempt: {@code result_json}, {@code started_at}, {@code
+   * completed_at} and {@code duration_ms} (a stale duration would otherwise survive the retry —
+   * {@link #DURATION_STAMP} COALESCEs and would refuse to re-stamp the final attempt's real
+   * timing), and — design/45 — the structured failure {@code failure_category} / {@code
    * failure_reason}. Resetting the failure fields keeps this method's contract complete: a node
    * that fails an attempt and then succeeds on a retry must not carry a stale {@code ✗} failure
    * into its green terminal state. (The orchestrator sets the failure fields only on a terminal
@@ -177,7 +211,7 @@ public interface FlowNodeDao {
    */
   @SqlUpdate(
       "UPDATE titan.flow_nodes SET attempt = attempt + 1, "
-          + "result_json = NULL, started_at = NULL, completed_at = NULL, "
+          + "result_json = NULL, started_at = NULL, completed_at = NULL, duration_ms = NULL, "
           + "failure_category = NULL, failure_reason = NULL "
           + "WHERE build_id = :buildId AND node_id = :nodeId "
           + "AND status = 'QUEUED' AND attempt = :fromAttempt")
