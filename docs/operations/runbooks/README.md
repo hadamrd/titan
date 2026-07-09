@@ -9,3 +9,4 @@ one written against a real situation we've hit.
 | [observability.md](observability.md) | Wiring Titan's Prometheus metrics and OpenTelemetry traces to your back-end. |
 | [github-app-dev.md](github-app-dev.md) | Relaying GitHub webhooks to a local dev rig via a smee.io tunnel. |
 | [ci-on-pr.md](ci-on-pr.md) | The `task ci:verify` pre-merge gate and the build-time break classes it catches. |
+| [rig-worker-queues-and-capacity.md](rig-worker-queues-and-capacity.md) | Local-rig builds stuck QUEUED / fused "No worker available", executor starvation, and exit-127 node fixtures. |

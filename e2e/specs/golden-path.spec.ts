@@ -474,7 +474,7 @@ async function seedOrRotateCredential(
   const headers = { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' }
   const create = await api.post(`${API_BASE}/api/v1/credentials`, {
     headers,
-    data: { kind: 'string', scope: 'global', key, plaintext },
+    data: { kind: 'STRING', scope: 'global', key, plaintext },
   })
   if (create.status() === 201) return
   if (create.status() !== 409) {

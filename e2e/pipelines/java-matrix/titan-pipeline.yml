@@ -17,7 +17,7 @@
 # semantics — fan-out, env injection, verdict roll-up — are what's being
 # validated, not the JDK toolchain itself.
 
-agent: titan-worker-1
+agent: linux
 
 env:
   CI: "true"

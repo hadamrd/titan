@@ -31,7 +31,7 @@ test.describe('UI — JUnit Test Result page', () => {
     const build = await titanApi.submitPipeline(
       'e2e-ui-junit-report',
       [
-        'agent: titan-worker-1',
+        'agent: linux',
         'stages:',
         '  - stage: report',
         '    steps:',

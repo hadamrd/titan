@@ -26,7 +26,7 @@ test.describe('UI — gate approval', () => {
     const build = await titanApi.submitPipeline(
       'e2e-ui-gate',
       [
-        'agent: titan-worker-1',
+        'agent: linux',
         'stages:',
         '  - stage: build',
         '    steps:',
