@@ -109,4 +109,35 @@ describe('ConfirmDialog', () => {
     fireEvent.click(screen.getByTestId('pat-confirm'))
     expect(onConfirm).toHaveBeenCalledTimes(1)
   })
+
+  // ── #113: portal semantics ─────────────────────────────────────────────
+  // Rendered inline, the fixed backdrop was captured by transformed/animated
+  // ancestors (`.tab-pane` fade-in), offsetting it from the viewport and
+  // letting the `.btn:active` micro-shift steal clicks to the backdrop.
+  // jsdom can't reproduce the gesture physics (the e2e revoke spec is the
+  // real proof); here we pin the structural fix: the dialog escapes the
+  // React tree via a portal to <body>.
+
+  it('portals the backdrop to document.body, NOT into the render container (#113)', () => {
+    const { container } = render(<ConfirmDialog {...defaults({ testId: 'pat' })} />)
+    const backdrop = screen.getByTestId('pat-backdrop')
+    // Direct child of <body> — outside any transformed/animated ancestor.
+    expect(backdrop.parentElement).toBe(document.body)
+    // And crucially NOT inside the component's own mount point.
+    expect(container.contains(backdrop)).toBe(false)
+  })
+
+  it('confirm click still fires through the portal boundary (#113)', () => {
+    const onConfirm = vi.fn()
+    const onCancel = vi.fn()
+    render(<ConfirmDialog {...defaults({ onConfirm, onCancel, testId: 'pat' })} />)
+    const confirm = screen.getByTestId('pat-confirm')
+    // The full gesture sequence resolves on the BUTTON — the click must fire
+    // the action, not bubble to the backdrop's dismiss handler.
+    fireEvent.pointerDown(confirm)
+    fireEvent.mouseDown(confirm)
+    fireEvent.click(confirm)
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+    expect(onCancel).not.toHaveBeenCalled()
+  })
 })

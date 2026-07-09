@@ -21,6 +21,7 @@ import { resolve } from 'node:path'
 const STYLES_DIR = resolve(__dirname, '../styles')
 const globalsCss = readFileSync(resolve(STYLES_DIR, 'globals.css'), 'utf8')
 const tokensCss = readFileSync(resolve(STYLES_DIR, 'tokens.css'), 'utf8')
+const componentsCss = readFileSync(resolve(STYLES_DIR, 'components.css'), 'utf8')
 
 describe('design-token CSS bundle', () => {
   it('tokens.css defines the oklch token --bg', () => {
@@ -47,5 +48,15 @@ describe('design-token CSS bundle', () => {
 
   it('globals.css references --bg on body so the token is actually consumed', () => {
     expect(globalsCss).toMatch(/body[\s\S]*var\(--bg\)/)
+  })
+
+  it('modal buttons neutralize the .btn:active translate (#113)', () => {
+    // tokens.css presses buttons down by 0.5px on :active. Inside a modal
+    // that micro-shift lets the click hit-test resolve to the backdrop and
+    // dismiss the dialog instead of firing the action. components.css must
+    // keep the higher-specificity override in place.
+    expect(componentsCss).toMatch(
+      /\.gate-modal\s+\.btn:active\s*\{[^}]*transform\s*:\s*none/,
+    )
   })
 })

@@ -18,6 +18,7 @@
  * {@link ApiError} (the only place the wire carries semantic intent today).
  */
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from '@tanstack/react-router'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -149,7 +150,9 @@ export function NewJobDialog({ open, onOpenChange, onNetworkError }: NewJobDialo
     )
   }
 
-  return (
+  // Portal to <body> (#113): keeps the fixed backdrop viewport-relative even
+  // when the modal is mounted under a transformed/animated ancestor.
+  return createPortal(
     <div
       className="gate-modal-backdrop"
       role="presentation"
@@ -306,7 +309,8 @@ export function NewJobDialog({ open, onOpenChange, onNetworkError }: NewJobDialo
           </div>
         </form>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 

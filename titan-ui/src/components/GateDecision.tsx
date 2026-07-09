@@ -15,6 +15,7 @@
  * via ApiError and render the message inline.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Check, Lock, X, ArrowRight } from 'lucide-react'
 import { useApproveGate, useRejectGate } from '@/api/hooks'
 import { ApiError, type GateDto } from '@/api/types'
@@ -267,7 +268,9 @@ function RejectModal({
     return () => window.removeEventListener('keydown', onKey)
   }, [onCancel])
 
-  return (
+  // Portal to <body> (#113): keeps the fixed backdrop viewport-relative even
+  // when the modal is mounted under a transformed/animated ancestor.
+  return createPortal(
     <div className="gate-modal-backdrop" onClick={onCancel} role="presentation">
       <div
         className="gate-modal"
@@ -341,7 +344,8 @@ function RejectModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 

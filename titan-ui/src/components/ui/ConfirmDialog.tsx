@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/Button'
 
 export interface ConfirmDialogProps {
@@ -43,7 +44,12 @@ export function ConfirmDialog({
 
   if (!open) return null
 
-  return (
+  // Portal to <body> (#113): rendered inline, the position:fixed backdrop is
+  // captured by any transformed/animated ancestor (e.g. `.tab-pane`'s fade-in
+  // keyframe), which offsets it from the viewport and makes gesture-time hit
+  // testing land on the backdrop instead of the buttons. Same house pattern
+  // as TriggerParamsModal.
+  return createPortal(
     <div
       className="gate-modal-backdrop"
       role="presentation"
@@ -103,6 +109,7 @@ export function ConfirmDialog({
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
