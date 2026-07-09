@@ -1,32 +1,42 @@
 /**
- * 23-audit-golden-path — /audit screen end-to-end (closes #584).
+ * 23-audit-golden-path @golden — /audit screen end-to-end (closes #584).
  *
  * Mirrors spec 21's diagnostics + assertion discipline. Hard assertions only.
  *
  * The dev user has ADMIN role in the titan-dev realm, so READ_AUDIT is
  * exercised (closes the UI half of #517 / #478 / #519).
  *
+ * Hermeticity (#123 golden promotion): the spec used to trigger a build on
+ * the SEEDED `titan-hello` job and never cleaned it up — one leaked build
+ * (+ flow_nodes/logs/task rows) per run, silently reshaping the shared
+ * job's history. It now creates its OWN per-run job (#59 ownership rule),
+ * triggers the build there, and tears everything down via
+ * `safeDeleteJobCascade` in a finally. The audit row itself is append-only
+ * by design and stays — that's the audit log's contract, not litter.
+ *
  * Flow:
  *   1. Login as dev via PKCE (and grab a separate ROPC bearer for direct API
- *      build-triggering).
- *   2. Trigger a build for titan-hello via POST /api/v1/jobs/$id/builds
- *      (uses the API helper — same path as exercised in spec 22 but called
- *      directly here so the audit event is uniquely identifiable).
+ *      job-creation + build-triggering).
+ *   2. Create a per-run job, then trigger a build via
+ *      POST /api/v1/jobs/$id/builds so the audit event is uniquely
+ *      identifiable by the fresh buildId.
  *   3. Navigate to /audit.
  *   4. Poll up to 15s for the row { action: BUILD_TRIGGER, target: BUILD/<id>,
  *      actor: dev } to appear.
  *   5. Hard-fail with the raw /audit response attached as a diagnostic on
  *      timeout.
+ *   6. finally: cancel-safe cascade delete of the per-run job (zero litter).
  */
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken, loginViaKeycloak } from '../../fixtures/auth-v3'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
 
-interface JobsPage {
-  items: Array<{ id: number; fullName: string }>
-}
+// Minimal valid pipeline — the build only needs to EXIST (BUILD_TRIGGER is
+// audited at accept-time); it does not need to produce interesting output.
+const MIN_YAML = 'stages:\n  - stage: audit-probe\n    steps:\n      - sh: echo audit probe\n'
 
 interface AuditEvent {
   id: number
@@ -105,14 +115,15 @@ async function apiPost<T>(
   return { ok: r.ok(), status: r.status(), body, raw }
 }
 
-test.describe('v3 audit-golden-path', () => {
+test.describe('v3 audit-golden-path @golden', () => {
   test('BUILD_TRIGGER audit row surfaces in /audit within 15s', async ({
     page,
     request,
   }) => {
-    test.setTimeout(90_000)
+    test.setTimeout(120_000)
     let attachedDiagnostics = false
     let bearer: string | undefined
+    let jobId: number | undefined
     let triggeredBuildId: number | undefined
 
     const dumpDiagnostics = async (label: string) => {
@@ -149,28 +160,32 @@ test.describe('v3 audit-golden-path', () => {
       //     API trigger independent of the SPA's token refresh.
       const apiBearer = await fetchBearerToken(ENV)
 
-      // 2. Resolve titan-hello + trigger a build directly via the API.
-      const jobsResp = await apiGet<JobsPage>(
-        request,
-        apiBearer,
-        '/api/v1/jobs?offset=0&limit=200',
-      )
+      // 2. Create a per-run job (own rows — #59 ownership rule; the old
+      //    titan-hello trigger leaked one build per run onto the shared
+      //    seeded job), then trigger a build on IT via the API.
+      const runTag = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+      const createResp = await apiPost<{ id: number }>(request, apiBearer, '/api/v1/jobs', {
+        fullName: `e2e/audit-${runTag}`,
+        displayName: 'e2e audit-golden-path',
+        pipelineScript: MIN_YAML,
+        enabled: true,
+      })
       expect(
-        jobsResp.ok && jobsResp.body,
-        `GET /api/v1/jobs failed: HTTP ${jobsResp.status} body=${jobsResp.raw.slice(0, 300)}`,
+        createResp.status === 201 && createResp.body,
+        `POST /api/v1/jobs failed: HTTP ${createResp.status} body=${createResp.raw.slice(0, 300)}`,
       ).toBeTruthy()
-      const titanHello = jobsResp.body!.items.find((j) => j.fullName === 'titan-hello')
-      expect(titanHello, 'titan-hello job not seeded').toBeTruthy()
+      jobId = createResp.body!.id
+      expect(jobId).toBeGreaterThan(0)
 
       const triggerResp = await apiPost<{ buildId: number; buildNumber: number }>(
         request,
         apiBearer,
-        `/api/v1/jobs/${titanHello!.id}/builds`,
+        `/api/v1/jobs/${jobId}/builds`,
         {},
       )
       expect(
         triggerResp.ok && triggerResp.body,
-        `POST /jobs/${titanHello!.id}/builds failed: HTTP ${triggerResp.status} ` +
+        `POST /jobs/${jobId}/builds failed: HTTP ${triggerResp.status} ` +
           `body=${triggerResp.raw.slice(0, 300)}`,
       ).toBeTruthy()
       triggeredBuildId = triggerResp.body!.buildId
@@ -247,6 +262,21 @@ test.describe('v3 audit-golden-path', () => {
     } catch (err) {
       await dumpDiagnostics('assertion-failure')
       throw err
+    } finally {
+      // 6. Zero litter: the per-run job + its triggered build (which may
+      //    still be RUNNING — safeDeleteJobCascade cancels it first and
+      //    never deletes under a leased task row, #59).
+      if (jobId !== undefined) {
+        const result = await safeDeleteJobCascade(request, jobId).catch((e) => {
+          console.warn(`[23-audit] teardown of job ${jobId} failed: ${String(e)}`)
+          return null
+        })
+        if (result && !result.deleted) {
+          console.warn(
+            `[23-audit] job ${jobId} left rows behind: builds ${result.leftoverBuildIds.join(',')}`,
+          )
+        }
+      }
     }
   })
 })
