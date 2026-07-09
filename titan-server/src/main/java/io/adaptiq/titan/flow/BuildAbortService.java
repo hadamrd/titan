@@ -3,6 +3,7 @@ package io.adaptiq.titan.flow;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import io.adaptiq.titan.build.BuildStateChangedEvent;
 import io.adaptiq.titan.store.TitanStores;
+import io.adaptiq.titan.store.rows.ApprovalRow;
 import io.adaptiq.titan.store.rows.BuildRow;
 import io.adaptiq.titan.store.rows.FlowNodeRow;
 import io.adaptiq.titan.store.rows.TaskQueueRow;
@@ -133,10 +134,43 @@ public final class BuildAbortService {
       }
     }
 
+    // 3b. Close any PENDING approval rows (#68) — a parked approval must not outlive its build.
+    //     Without this, an aborted build's PENDING row sat in the /approvals inbox (and the UI
+    //     banner list) until the 24h timeout sweep. decideIfPending's status='PENDING' CAS guard
+    //     makes this idempotent AND race-safe against a concurrent human decide: whoever wins
+    //     keeps its terminal status, the loser is a 0-row no-op.
+    int closedApprovals = 0;
+    for (ApprovalRow a : daos.approvals().listForBuild(buildId)) {
+      if ("PENDING".equals(a.status)
+          && daos.approvals().decideIfPending(a.id, "REJECTED", "<aborted by " + actor + ">", now)
+              == 1) {
+        closedApprovals++;
+      }
+    }
+    if (closedApprovals > 0) {
+      LOGGER.log(
+          Level.INFO,
+          "[titan] abort: closed {0} PENDING approval(s) for build {1}",
+          new Object[] {closedApprovals, buildId});
+    }
+
     // 4. Abort the build itself.
     daos.builds().updateStatus(buildId, "ABORTED", build.startedAt, now, null, reason);
     // Terminal write: drop any cached PipelineModel for this build.
     io.adaptiq.titan.cache.PipelineModelCache.invalidateIfActive(buildId);
+
+    // 4b. Second task-cancel sweep, AFTER the terminal flip (#68). A handler in flight during
+    //     step 2 may have enqueued a follow-up task between our listByBuild read and the status
+    //     write — exactly the race that resurrected build 365 on the live rig (a surviving
+    //     SYNTHESIZE poll re-dispatched synthesis + re-baked an ABORTED build). Any such row is
+    //     cancelled here; anything that still slips through is cancelled at claim time by
+    //     QueueProcessor's terminal-build fuse. Both sweeps are idempotent by construction.
+    daos.taskQueue().markCancelRequested(buildId);
+    for (TaskQueueRow t : daos.taskQueue().listByBuild(buildId)) {
+      if (TASK_LIVE.contains(t.status) && daos.taskQueue().cancel(t.id)) {
+        cancelledTasks++;
+      }
+    }
 
     // 5. Fan-out the state change to CDI observers (issue #1080 — SCM status reporters need to
     //    see the cancelled→error transition for builds that originated from an SCM webhook).

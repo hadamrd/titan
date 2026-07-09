@@ -10,13 +10,20 @@ import io.adaptiq.titan.flow.model.StepModel;
 import io.adaptiq.titan.store.TitanStores;
 import io.adaptiq.titan.store.rows.TaskQueueRow;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -44,6 +51,59 @@ public class QueueProcessor {
   private static final Logger LOGGER = Logger.getLogger(QueueProcessor.class.getName());
 
   static final int BATCH_SIZE = 20;
+
+  /**
+   * Build statuses past which an {@code ORCHESTRATE} task must never run (issue #68). Mirrors
+   * {@code BuildAbortService.BUILD_TERMINAL}.
+   */
+  private static final Set<String> BUILD_TERMINAL =
+      Set.of("SUCCESS", "FAILED", "ABORTED", "UNSTABLE");
+
+  /**
+   * Parallelism of the per-tick dispatch phase (issue #68). Same-build tasks always run serially,
+   * in claim order, on one thread — the parallelism unit is the <em>build</em>, so the engine's
+   * per-build ordering invariant is preserved while one slow build can no longer starve every other
+   * build's ORCHESTRATE chain (the failure mode behind "no PENDING approval surfaced within
+   * 30000ms": a 16-task serial tick took &gt;20s under e2e load, so the ADVANCE pass that parks an
+   * approval gate landed past the UI's polling budget). Env knob: {@code
+   * TITAN_QUEUE_DISPATCH_THREADS}, default 8, floor 1.
+   */
+  static final int DISPATCH_THREADS = dispatchThreadsFromEnv();
+
+  private static int dispatchThreadsFromEnv() {
+    String raw = System.getenv("TITAN_QUEUE_DISPATCH_THREADS");
+    if (raw != null) {
+      try {
+        return Math.max(1, Integer.parseInt(raw.trim()));
+      } catch (NumberFormatException e) {
+        LOGGER.log(
+            Level.WARNING,
+            "[titan] QueueProcessor: invalid TITAN_QUEUE_DISPATCH_THREADS \"{0}\" — using 8",
+            raw);
+      }
+    }
+    return 8;
+  }
+
+  /**
+   * Shared dispatch pool — process-wide (like the schedulers that drive the processor), daemon
+   * threads, never shut down. Sized by {@link #DISPATCH_THREADS}. Tests that construct their own
+   * {@code QueueProcessor} instances share it safely: a tick blocks until its own groups finish, so
+   * no work leaks across tick() calls.
+   */
+  private static final ExecutorService DISPATCH_POOL =
+      Executors.newFixedThreadPool(
+          DISPATCH_THREADS,
+          new java.util.concurrent.ThreadFactory() {
+            private final AtomicInteger n = new AtomicInteger();
+
+            @Override
+            public Thread newThread(Runnable r) {
+              Thread t = new Thread(r, "titan-queue-dispatch-" + n.incrementAndGet());
+              t.setDaemon(true);
+              return t;
+            }
+          });
 
   /**
    * Visibility-timeout floor used by the per-tick reaper. Set to the <em>largest</em> timeout any
@@ -186,8 +246,7 @@ public class QueueProcessor {
       LOGGER.log(Level.WARNING, "[titan] QueueProcessor: no-worker sweep failed", e);
     }
 
-    int processed = 0;
-
+    List<TaskQueueRow> batch = new ArrayList<>();
     for (int i = 0; i < BATCH_SIZE; i++) {
       Optional<TaskQueueRow> claimed;
       try {
@@ -199,8 +258,74 @@ public class QueueProcessor {
       if (claimed.isEmpty()) {
         break;
       }
+      batch.add(claimed.get());
+    }
 
-      TaskQueueRow task = claimed.get();
+    int processed = dispatchBatch(daos, batch);
+
+    if (processed > 0) {
+      LOGGER.log(
+          Level.INFO, "[release-flow] QueueProcessor: processed {0} task(s) this tick", processed);
+    }
+
+    // Archive COMPLETED/FAILED/CANCELLED rows out of task_queue into task_archive.
+    archiveCompletedTasks(daos);
+
+    return processed;
+  }
+
+  /**
+   * Dispatch one claimed batch (issue #68). Tasks are grouped by build id; groups run in parallel
+   * on the shared {@link #DISPATCH_POOL} while the tasks <em>within</em> a group run serially in
+   * claim order. This keeps the engine's per-build serialisation invariant (two tasks of one build
+   * are never processed concurrently by this controller) while collapsing tick latency from the
+   * <em>sum</em> of every build's handler time to the <em>max</em> — the root fix for parked
+   * approval gates surfacing tens of seconds late under load.
+   *
+   * <p>Build-less tasks (no {@code build_id}) each form their own group. A single-group batch is
+   * dispatched inline on the tick thread — no pool hop, so single-build unit/IT flows are
+   * bit-for-bit the old behaviour.
+   *
+   * @return the number of tasks processed (the whole batch — per-task failures are folded by {@link
+   *     #dispatchGroup})
+   */
+  private int dispatchBatch(@NonNull TitanStores daos, @NonNull List<TaskQueueRow> batch) {
+    if (batch.isEmpty()) {
+      return 0;
+    }
+    Map<Long, List<TaskQueueRow>> groups = new LinkedHashMap<>();
+    for (TaskQueueRow task : batch) {
+      long key = task.buildId != null ? task.buildId : -task.id;
+      groups.computeIfAbsent(key, k -> new ArrayList<>()).add(task);
+    }
+    if (groups.size() == 1) {
+      dispatchGroup(daos, batch);
+      return batch.size();
+    }
+    List<Future<?>> futures = new ArrayList<>(groups.size());
+    for (List<TaskQueueRow> group : groups.values()) {
+      futures.add(DISPATCH_POOL.submit(() -> dispatchGroup(daos, group)));
+    }
+    for (Future<?> f : futures) {
+      try {
+        f.get();
+      } catch (InterruptedException e) {
+        // Preserve the interrupt for the scheduler; in-flight groups finish on the pool. Any
+        // task left CLAIMED by a torn-down process is recovered by the stale-task reaper.
+        Thread.currentThread().interrupt();
+        break;
+      } catch (ExecutionException e) {
+        // dispatchGroup folds per-task failures itself — reaching here means a defect escaped
+        // it. Log loudly; the affected tasks stay CLAIMED and are reaped back to QUEUED.
+        LOGGER.log(Level.WARNING, "[titan] QueueProcessor: dispatch group failed unexpectedly", e);
+      }
+    }
+    return batch.size();
+  }
+
+  /** Run one build's claimed tasks serially, folding each task's failure independently. */
+  private void dispatchGroup(@NonNull TitanStores daos, @NonNull List<TaskQueueRow> group) {
+    for (TaskQueueRow task : group) {
       try {
         dispatch(daos, task);
       } catch (RuntimeException e) {
@@ -218,18 +343,7 @@ public class QueueProcessor {
         }
         support.failTaskSafely(daos, task, e.getMessage());
       }
-      processed++;
     }
-
-    if (processed > 0) {
-      LOGGER.log(
-          Level.INFO, "[release-flow] QueueProcessor: processed {0} task(s) this tick", processed);
-    }
-
-    // Archive COMPLETED/FAILED/CANCELLED rows out of task_queue into task_archive.
-    archiveCompletedTasks(daos);
-
-    return processed;
   }
 
   /** Migrate COMPLETED/FAILED/CANCELLED rows out of task_queue into task_archive. Best-effort. */
@@ -267,6 +381,28 @@ public class QueueProcessor {
   }
 
   private void dispatch(@NonNull TitanStores daos, @NonNull TaskQueueRow task) {
+    // Issue #68 — the terminal-build fuse. Never run an ORCHESTRATE task whose build is already
+    // terminal (or deleted): BuildAbortService cancels the task rows it can SEE, but a follow-up
+    // enqueued by an in-flight handler survives that sweep and would resurrect the build — on the
+    // live rig a SYNTHESIZE poll inserted concurrently with an abort re-dispatched worker
+    // synthesis, re-baked the DAG and re-armed ADVANCE loops on an ABORTED build (build 365), and
+    // parked/aborted builds kept 300s-backoff ADVANCE rows alive forever. Cancelling at claim time
+    // makes cancel-closure idempotent and self-healing: every straggler drains on its next claim
+    // and the per-tick archive sweep moves it out of task_queue. Stage-retry and replay are
+    // unaffected — both flip their build non-terminal (or mint a fresh QUEUED build) before
+    // enqueueing their ORCHESTRATE task.
+    if (task.buildId != null && "ORCHESTRATE".equals(task.type)) {
+      String buildStatus = daos.builds().findById(task.buildId).map(b -> b.status).orElse(null);
+      if (buildStatus == null || BUILD_TERMINAL.contains(buildStatus)) {
+        LOGGER.log(
+            Level.INFO,
+            "[titan] QueueProcessor: cancelling task {0} — build {1} is {2}",
+            new Object[] {task.id, task.buildId, buildStatus == null ? "deleted" : buildStatus});
+        daos.taskQueue().cancel(task.id);
+        return;
+      }
+    }
+
     Map<String, Object> payload;
     try {
       payload = QueueHandlerSupport.JSON.readValue(task.payloadJson, QueueHandlerSupport.MAP_TYPE);
