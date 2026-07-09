@@ -10,7 +10,7 @@
  */
 import { test, expect, type ConsoleMessage } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../fixtures/auth-v3'
-import { seedMixedScopeTokens } from '../fixtures/pat'
+import { seedMixedScopeTokens, MIXED_SCOPE_TOKEN_SCOPES } from '../fixtures/pat'
 
 const ENV = authEnv()
 
@@ -62,14 +62,21 @@ test.describe('Profile / Access tokens — mixed-scope render', () => {
     await expect(withScopesRow, 'scoped token row visible').toBeVisible()
 
     // The unscoped row renders the "all (legacy)" sentinel rather than crashing
-    // on undefined .scopes. This is the regression #1036 fixed.
-    await expect(noScopesRow.getByTestId('token-scopes')).toContainText(/all \(legacy\)/i)
+    // on undefined .scopes. This is the regression #1036 fixed. NOTE: in the
+    // current PatTable markup the sentinel <span> deliberately carries NO
+    // data-testid (only the scoped branch renders `token-scopes`), so the
+    // assertion is scoped to the row, not the testid. Same oracle: the
+    // sentinel text is visible in THIS token's row.
+    await expect(noScopesRow).toContainText(/all \(legacy\)/i)
 
     // The scoped row renders each scope as a badge — we don't pin badge text
-    // beyond it appearing somewhere in the cell.
+    // beyond it appearing somewhere in the cell. The strings come from the
+    // fixture's exported constant (legal PatScopes.ALLOWED role names, #109)
+    // so spec and seed can never drift apart again.
     const scopedCell = withScopesRow.getByTestId('token-scopes')
-    await expect(scopedCell).toContainText('builds:read')
-    await expect(scopedCell).toContainText('pipelines:read')
+    for (const scope of MIXED_SCOPE_TOKEN_SCOPES) {
+      await expect(scopedCell).toContainText(scope)
+    }
 
     // The hard regression assertion: NO console errors, NO uncaught exceptions.
     // We allow benign warnings/info; an error-level message is a fail.

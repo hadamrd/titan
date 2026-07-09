@@ -36,6 +36,13 @@
  * Cleanup: afterAll revokes every minted token (best-effort, allSettled) and
  * then HARD-ASSERTS via the list endpoint that none is still active — zero
  * litter even when an assertion mid-spec fails.
+ *
+ * Job ownership (#112): this spec creates its OWN tiny job in beforeAll for
+ * the authorizes/attributes/pattern assertions and deletes it in afterAll
+ * (safeDeleteJobCascade). It must NOT depend on the shared seeded
+ * 'titan-hello' row — the ownership rule cuts both ways: specs may not
+ * DEPEND on shared seed rows any more than they may MUTATE them, and an
+ * earlier spec in full-suite order can legitimately have removed them.
  */
 import {
   test,
@@ -45,14 +52,19 @@ import {
 } from '@playwright/test'
 import { authEnv, fetchBearerToken } from '../../fixtures/auth-v3'
 import { createToken, deleteToken, listTokens, type CreateResponse } from '../../fixtures/pat'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const BASE = ENV.uiBaseUrl.replace(/\/$/, '')
 
 /** Stable problem-type URI emitted by PatJobScopeFilter on a pattern deny. */
 const SCOPE_DENIED_PROBLEM = 'https://titan.adaptiq.io/problems/pat-scope-denied'
-/** Glob that can never match a seeded job — used for the out-of-pattern PAT. */
+/** Glob that can never match any job on the rig — used for the out-of-pattern PAT. */
 const NO_MATCH_PATTERN = 'e2e-104-no-such-job-*'
+/** Glob matching ONLY the job this spec creates (never a seeded/shared one). */
+const OWN_JOB_PATTERN = 'e2e-104-pat-*'
+/** Smallest valid pipeline — the job is never built, it only needs to EXIST. */
+const MIN_YAML = 'stages:\n  - stage: build\n    steps:\n      - shell: echo hi\n'
 
 interface JobsPage {
   items: Array<{ id: number; fullName: string }>
@@ -72,7 +84,8 @@ interface ProblemJson {
 
 let patCtx: APIRequestContext | undefined
 let creatorBearer: string
-let helloJobId: number
+let ownJobId: number | undefined
+let ownJobName: string
 
 let fullPat: CreateResponse | undefined
 let scopedPat: CreateResponse | undefined
@@ -145,20 +158,41 @@ test.describe('v3 pat-authenticates-api @golden', () => {
     // per-request. This is the seam the issue demands.
     patCtx = await playwrightRequest.newContext()
 
-    const jobs = await bearerGet<JobsPage>('/api/v1/jobs?offset=0&limit=200', creatorBearer)
-    expect(
-      jobs.status === 200 && jobs.body !== null,
-      `GET /api/v1/jobs (setup) failed: HTTP ${jobs.status} body=${jobs.raw.slice(0, 300)}`,
-    ).toBe(true)
-    const hello = jobs.body!.items.find((j) => j.fullName === 'titan-hello')
-    expect(hello, 'titan-hello job not seeded on the rig').toBeTruthy()
-    helloJobId = hello!.id
-
+    // Own job (#112): created HERE, torn down in afterAll — never the shared
+    // seeded 'titan-hello' row, which some earlier spec in suite order may
+    // legitimately have deleted.
     const stamp = Date.now()
+    ownJobName = `e2e-104-pat-${stamp}-${Math.floor(Math.random() * 1e6)}`
+    const createRes = await fetch(`${BASE}/api/v1/jobs`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${creatorBearer}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        fullName: ownJobName,
+        displayName: 'e2e-104-pat',
+        pipelineScript: MIN_YAML,
+        enabled: true,
+      }),
+    })
+    const createRaw = await createRes.text()
+    expect(
+      createRes.status,
+      `POST /api/v1/jobs (setup) failed: HTTP ${createRes.status} body=${createRaw.slice(0, 300)}`,
+    ).toBe(201)
+    const createdJob = parseJsonOrNull<{ id: number }>(createRaw)
+    expect(
+      createdJob !== null && createdJob.id > 0,
+      'created job must carry a numeric id',
+    ).toBe(true)
+    ownJobId = createdJob!.id
+
     fullPat = await createToken(`e2e-104-full-${stamp}`, undefined, creatorBearer, ENV)
     scopedPat = await createToken(`e2e-104-scoped-${stamp}`, ['READ_JOB'], creatorBearer, ENV)
     inPatternPat = await createToken(`e2e-104-inpattern-${stamp}`, undefined, creatorBearer, ENV, {
-      jobPattern: 'titan-*',
+      jobPattern: OWN_JOB_PATTERN,
     })
     outPatternPat = await createToken(
       `e2e-104-outpattern-${stamp}`,
@@ -186,7 +220,22 @@ test.describe('v3 pat-authenticates-api @golden', () => {
         }
       }
     } finally {
-      await patCtx?.dispose()
+      try {
+        // Zero-litter for the OWN job too (#112). The job never runs a build
+        // in this spec (GET-only), so the cascade must fully delete — hard
+        // oracle, not best-effort.
+        if (ownJobId !== undefined && patCtx) {
+          const res = await safeDeleteJobCascade(patCtx, ownJobId)
+          if (!res.deleted) {
+            throw new Error(
+              `cleanup failed: job id=${ownJobId} (${ownJobName}) not deleted ` +
+                `(leftover builds: ${res.leftoverBuildIds.join(', ')})`,
+            )
+          }
+        }
+      } finally {
+        await patCtx?.dispose()
+      }
     }
   })
 
@@ -198,14 +247,19 @@ test.describe('v3 pat-authenticates-api @golden', () => {
     const anon = await patGet('/api/v1/jobs', null)
     expect(anon.status, 'credential-free context must be rejected').toBe(401)
 
-    // (1) Authorized call through the PAT: a real jobs page.
-    const jobs = await patGet('/api/v1/jobs?offset=0&limit=200', fullPat!.token)
+    // (1) Authorized call through the PAT: a real jobs page containing the
+    // job THIS spec created (searched by its unique name — immune to both
+    // pagination and any shared seed row coming or going, #112).
+    const jobs = await patGet(
+      `/api/v1/jobs?search=${encodeURIComponent(ownJobName)}&offset=0&limit=50`,
+      fullPat!.token,
+    )
     expect(jobs.status, `PAT GET /api/v1/jobs → HTTP ${jobs.status}`).toBe(200)
     const page = parseJsonOrNull<JobsPage>(jobs.raw)
     expect(page && Array.isArray(page.items), 'jobs response is not a page').toBe(true)
     expect(
-      page!.items.some((j) => j.id === helloJobId && j.fullName === 'titan-hello'),
-      'jobs page under PAT auth must contain the seeded titan-hello job',
+      page!.items.some((j) => j.id === ownJobId && j.fullName === ownJobName),
+      `jobs page under PAT auth must contain the spec-owned job ${ownJobName}`,
     ).toBe(true)
 
     // (2) Principal attribution: /api/v1/me/tokens is strictly per-subject
@@ -266,13 +320,13 @@ test.describe('v3 pat-authenticates-api @golden', () => {
   test('job-pattern PAT: in-pattern job readable, out-of-pattern denied with problem+json and audit row', async () => {
     expect(inPatternPat && outPatternPat, 'setup did not mint the pattern PATs').toBeTruthy()
 
-    // In-pattern (titan-* matches titan-hello): full access to the job.
-    const allowed = await patGet(`/api/v1/jobs/${helloJobId}`, inPatternPat!.token)
+    // In-pattern (e2e-104-pat-* matches the spec-owned job): full access.
+    const allowed = await patGet(`/api/v1/jobs/${ownJobId}`, inPatternPat!.token)
     expect(allowed.status, 'in-pattern PAT must read the job').toBe(200)
 
     // Out-of-pattern: the structured deny PatJobScopeFilter promises — 403,
     // application/problem+json, stable type URI, pattern echoed in detail.
-    const denied = await patGet(`/api/v1/jobs/${helloJobId}`, outPatternPat!.token)
+    const denied = await patGet(`/api/v1/jobs/${ownJobId}`, outPatternPat!.token)
     expect(denied.status, 'out-of-pattern PAT must be denied').toBe(403)
     expect(denied.headers['content-type'] ?? '').toContain('application/problem+json')
     const problem = parseJsonOrNull<ProblemJson>(denied.raw)

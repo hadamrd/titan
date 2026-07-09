@@ -92,6 +92,15 @@ export async function deleteToken(
 }
 
 /**
+ * Scopes seeded on the "withScopes" token. These MUST be legal role names
+ * from the server's PatScopes.ALLOWED set (#109) — the API 400s anything
+ * else ("unknown scope: …"), which is exactly how the previous
+ * 'builds:read'/'pipelines:read' strings broke every consuming spec.
+ * Exported so consuming specs assert the SAME strings they were seeded with.
+ */
+export const MIXED_SCOPE_TOKEN_SCOPES: readonly string[] = ['READ_JOB', 'TRIGGER_BUILD']
+
+/**
  * Seed two tokens covering the two render-time scope cases #1036 hardened:
  *   - one created without scopes (server omits the field → undefined in DTO)
  *   - one with explicit scopes
@@ -113,10 +122,25 @@ export async function seedMixedScopeTokens(opts?: { prefixLabel?: string }): Pro
   const noScopesResp = await createToken(`${label}-noscopes-${stamp}`, undefined, bearer, env)
   const withScopesResp = await createToken(
     `${label}-scoped-${stamp}`,
-    ['builds:read', 'pipelines:read'],
+    [...MIXED_SCOPE_TOKEN_SCOPES],
     bearer,
     env,
   )
+
+  // Proven-successful seed (#109): createToken already throws on a non-2xx,
+  // but additionally pin that the server ACCEPTED and ECHOED the exact scope
+  // list — a fixture that silently plants a different shape than the specs
+  // assert against is a fake oracle.
+  const echoed = withScopesResp.scopes ?? []
+  const wanted = [...MIXED_SCOPE_TOKEN_SCOPES]
+  if (echoed.length !== wanted.length || wanted.some((s) => !echoed.includes(s))) {
+    await deleteToken(withScopesResp.id, bearer, env).catch(() => undefined)
+    await deleteToken(noScopesResp.id, bearer, env).catch(() => undefined)
+    throw new Error(
+      `seedMixedScopeTokens: server echoed scopes [${echoed.join(', ')}] — ` +
+        `expected exactly [${wanted.join(', ')}]`,
+    )
+  }
 
   const noScopes: SeededToken = {
     id: noScopesResp.id,
