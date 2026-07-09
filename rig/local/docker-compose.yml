@@ -178,6 +178,32 @@ services:
       QUARKUS_HTTP_CORS_METHODS: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
       QUARKUS_HTTP_CORS_HEADERS: "accept,authorization,content-type,x-requested-with"
       QUARKUS_HTTP_CORS_EXPOSED_HEADERS: "content-disposition,content-length"
+      # Pulsar SCM seam seed (issue #97). The Layer-1 golden spec
+      # e2e/specs/v3/58-pulsar-check-lifecycle.spec.ts drives the REAL
+      # webhook → clone/discovery → build → check-report loop against a
+      # spec-owned fake Pulsar node bound on the HOST (git dumb-HTTP mirror +
+      # ledger recorder on :18098).
+      #   • PULSAR_WEBHOOK_SECRET — the HMAC key PulsarWebhookApi verifies
+      #     X-Pulsar-Signature-256 against. Without it the endpoint is
+      #     fail-closed (401 pulsar-webhook-not-configured) and the seam is
+      #     dead on the local rig. DEV ONLY fixture value, same posture as
+      #     the Keycloak dev secrets above (CONSTITUTION §6 — no real
+      #     secrets in git).
+      #   • PULSAR_NODE_BASE_URL — where PulsarEventSource git-fetches a
+      #     change revision from and PulsarCheckReporter posts `build`
+      #     checks to. Points at the host via host.docker.internal (see
+      #     extra_hosts below). Inert while no spec is running: the rig
+      #     registers no pulsar sources (no scan ticks) and the check
+      #     reporter only fires for pulsar-triggered builds, so nothing
+      #     dials this address outside the spec.
+      PULSAR_WEBHOOK_SECRET: "${PULSAR_WEBHOOK_SECRET:-titan-dev-pulsar-webhook-secret}"
+      PULSAR_NODE_BASE_URL: "${PULSAR_NODE_BASE_URL:-http://host.docker.internal:18098}"
+    # host.docker.internal is implicit on Docker Desktop but absent on native
+    # Linux; host-gateway (Docker ≥20.10) makes it resolve everywhere so the
+    # containerised titan-server can reach the e2e fake Pulsar node bound on
+    # the host (PULSAR_NODE_BASE_URL above).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       # Internal network address stays 8080 (titan-server:8080). On the host
       # we publish on 18080 to dodge collisions with other local JVMs that
