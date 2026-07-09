@@ -295,6 +295,55 @@ class GitlabWebhookApiTest {
 
   // ── helpers ──────────────────────────────────────────────────────────────────
 
+  // ── #69: enqueue failure must NEVER be swallowed into a 2xx ─────────────────
+
+  @Test
+  void enqueueFailure_returns500_andLogsSevere() {
+    // Job known to the JobService but with no titan.jobs row — allocation inside enqueueBuild
+    // throws. Mirrors GithubWebhookApiTest; GitLab only retries deliveries on non-2xx.
+    String configJson =
+        "{\"triggers\":[{\"type\":\"gitlab\",\"id\":\"trig-1\",\"branches\":[\"trunk\"],"
+            + "\"events\":[\"push\"],\"credentialsId\":\"gl-token\"}]}";
+    jobs.add(
+        new Job(
+            999_999L, "group/repo-phantom", null, null, "", configJson, null, null, null, true));
+    creds.put("gitlab-webhook", "gl-token", TOKEN);
+
+    List<LogRecord> records = new java.util.ArrayList<>();
+    Logger logger = Logger.getLogger(GitlabWebhookApi.class.getName());
+    Handler capture = recordingHandler(records);
+    logger.addHandler(capture);
+    Response resp;
+    try {
+      byte[] body = pushBody("refs/heads/trunk", "abc");
+      resp = api.receive(headers(TOKEN, "Push Hook"), body);
+    } finally {
+      logger.removeHandler(capture);
+    }
+
+    assertEquals(
+        500, resp.getStatus(), "enqueue failure must surface as non-2xx so GitLab retries (#69)");
+    assertTrue(
+        records.stream().anyMatch(r -> r.getLevel() == Level.SEVERE && r.getThrown() != null),
+        "enqueue failure must be logged at SEVERE with the cause chain (#69)");
+  }
+
+  @NonNull
+  private static Handler recordingHandler(@NonNull List<LogRecord> sink) {
+    return new Handler() {
+      @Override
+      public void publish(LogRecord record) {
+        sink.add(record);
+      }
+
+      @Override
+      public void flush() {}
+
+      @Override
+      public void close() {}
+    };
+  }
+
   private long seedJob(@NonNull String fullName, @NonNull String ref, @NonNull String eventName) {
     JobRow row = new JobRow();
     row.fullName = fullName;
