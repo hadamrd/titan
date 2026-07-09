@@ -10,9 +10,16 @@ import org.jdbi.v3.sqlobject.statement.SqlQuery;
 import org.jdbi.v3.sqlobject.statement.SqlUpdate;
 
 /**
- * JDBI SqlObject access for {@code titan.user_roles} — the v1 RBAC role-assignment table (closes
- * #1121). Read by {@link io.adaptiq.titan.auth.Authz} on every {@code requires(...)} call; written
- * by admin SQL/tooling in v1 (no UI yet — see #1114 for the lifecycle surface).
+ * JDBI SqlObject access for {@code titan.user_roles} — the LEGACY v1 flat RBAC table (V35, #1121).
+ *
+ * <p><strong>Legacy fallback only (#126).</strong> The canonical role store is {@code
+ * titan.rbac_user_role} (V38, {@link RbacUserRoleDao}) — the table the AdminUsersApi grant surface
+ * writes. The only remaining reader of this DAO is {@link io.adaptiq.titan.auth.ScopedAuthz}'s
+ * documented last-chance fallthrough, kept so pre-V38 SQL-seeded ADMIN rows keep working. {@code
+ * io.adaptiq.titan.auth.Authz} no longer reads it directly. Do NOT add new writers or readers —
+ * grant through {@code rbac_user_role}. The table itself is retained (no destructive drop); a
+ * future migration may lift surviving rows into {@code rbac_user_role (ORG, 'global')} and retire
+ * the fallback, per the V38 migration header.
  */
 @RegisterFieldMapper(UserRoleRow.class)
 public interface UserRolesDao extends SqlObject {
