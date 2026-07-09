@@ -89,6 +89,10 @@ final class WorkerDb implements AutoCloseable {
    * task_queue.trace_parent} at enqueue (issue #314, PR #382). The worker uses it to continue the
    * originating trace — see {@link WorkerTracing#startTaskSpan}. {@code null} when the row had no
    * traceparent (server enqueued from a non-traced context, or row predates V17).
+   *
+   * <p>{@code buildId} is the row's {@code build_id} — {@code null} for build-less tasks. Carried
+   * so a step completion can wake the owning build's orchestrator (issue #145) without re-reading
+   * the row.
    */
   record ClaimedTask(
       long id,
@@ -96,6 +100,7 @@ final class WorkerDb implements AutoCloseable {
       UUID claimToken,
       String type,
       String payloadJson,
+      Long buildId,
       String traceParent) {}
 
   /**
@@ -272,7 +277,7 @@ final class WorkerDb implements AutoCloseable {
         ClaimedTask task;
         try (PreparedStatement get =
             c.prepareStatement(
-                "SELECT task_token, type, payload_json, trace_parent "
+                "SELECT task_token, type, payload_json, build_id, trace_parent "
                     + "FROM titan.task_queue WHERE id=?")) {
           get.setLong(1, id);
           try (ResultSet rs = get.executeQuery()) {
@@ -284,6 +289,7 @@ final class WorkerDb implements AutoCloseable {
                     claimToken,
                     rs.getString("type"),
                     rs.getString("payload_json"),
+                    rs.getObject("build_id", Long.class),
                     rs.getString("trace_parent"));
           }
         }
@@ -595,6 +601,43 @@ final class WorkerDb implements AutoCloseable {
       ps.setLong(3, taskId);
       ps.setObject(4, claimToken);
       return ps.executeUpdate() == 1;
+    }
+  }
+
+  /**
+   * Wake the controller's orchestrator for {@code buildId} by enqueuing an immediately-claimable
+   * {@code ORCHESTRATE/ADVANCE} task (issue #145).
+   *
+   * <p>Why: step completion used to be observed only by the controller's <em>delayed</em> ADVANCE
+   * re-poll ({@code AdvanceHandler.BACKOFF_LADDER[0]} = 5s). When a step finished just after a poll
+   * checked, the verdict waited a full extra poll cycle (~6s including tick alignment) — per step.
+   * On the failure-triage smoke that race pushed trigger→FAILURE past its 30s budget under
+   * concurrent e2e load. This writeback makes verdict propagation event-driven: the completion is
+   * folded on the next 500ms controller tick. The delayed re-poll remains as the crash-safe
+   * backstop, exactly as the #827 backoff design already assumed ("worker step-complete writeback
+   * ... enqueues a fresh ADVANCE").
+   *
+   * <p>Duplicate-safety: ADVANCE is an idempotent reconcile pass and race-tolerant by contract
+   * (#911 benign CAS-loss); approvals, gates and timer fires already enqueue fresh ADVANCE rows
+   * alongside a pending delayed one. The extra row per step is well inside the transition-cap
+   * budget (soft 200 / hard 1000). The terminal-build fuse cancels any straggler at claim time.
+   *
+   * <p>Same row shape as the controller's {@code QueueHandlerSupport.enqueueAdvance} with delay 0;
+   * {@code task_token}, {@code available_at} and {@code created_at} come from column defaults.
+   * {@code traceParent} carries the originating trace across the hop (issue #314).
+   */
+  void enqueueAdvanceWakeup(long buildId, String traceParent) throws SQLException {
+    try (Connection c = open();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "INSERT INTO titan.task_queue (type, queue_name, status, priority, "
+                    + "payload_json, attempts, max_attempts, visibility_timeout_seconds, "
+                    + "build_id, trace_parent) "
+                    + "VALUES ('ORCHESTRATE', 'default', 'QUEUED', 0, ?, 0, 3, 3600, ?, ?)")) {
+      ps.setString(1, "{\"action\":\"ADVANCE\",\"buildId\":" + buildId + "}");
+      ps.setLong(2, buildId);
+      ps.setString(3, traceParent);
+      ps.executeUpdate();
     }
   }
 

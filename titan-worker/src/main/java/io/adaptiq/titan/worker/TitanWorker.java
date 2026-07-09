@@ -295,9 +295,10 @@ public final class TitanWorker {
   private void runTaskInner(WorkerDb.ClaimedTask task, boolean isSynthesis) {
     try {
       db.markProcessing(task.id(), task.claimToken());
+      boolean synthesisTask = isSynthesis || isSynthesizeAction(task);
       String status;
       String resultJson;
-      if (isSynthesis || isSynthesizeAction(task)) {
+      if (synthesisTask) {
         // design/38 Stage 1b — pipeline synthesis, not a DAG step.
         SynthesisTaskHandler.Result r = synthesis.run(task);
         status = r.success() ? "COMPLETED" : "FAILED";
@@ -314,6 +315,15 @@ public final class TitanWorker {
       boolean accepted = db.complete(task.id(), task.claimToken(), status, resultJson);
       if (accepted) {
         LOG.info("task {} -> {}", task.id(), status);
+        // Event-driven orchestrator wake-up (issue #145): a step verdict must
+        // not wait for the controller's 5s delayed ADVANCE re-poll — losing
+        // that race cost ~6s PER STEP and blew the failure-triage 30s budget
+        // under concurrent load. Steps only: synthesis completion is observed
+        // by the SYNTHESIZE poll, whose done-branch enqueues BAKE — an
+        // unconditional ADVANCE there could double-BAKE the DAG.
+        if (!synthesisTask) {
+          wakeOrchestrator(task);
+        }
       } else {
         // Diagnose the REAL cause (issue #57): only one of the four rejection causes is
         // the reaper; blaming them all on "reaped and re-claimed" mis-directed a whole
@@ -326,6 +336,28 @@ public final class TitanWorker {
       }
     } catch (Exception e) {
       LOG.error("task {} failed mid-flight", task.id(), e);
+    }
+  }
+
+  /**
+   * Best-effort enqueue of an immediate {@code ORCHESTRATE/ADVANCE} for the completed step task's
+   * build (issue #145) — see {@link WorkerDb#enqueueAdvanceWakeup}. A failure here is logged and
+   * swallowed: the controller's delayed ADVANCE re-poll (#827 backoff ladder) still observes the
+   * completion, just up to one poll cycle later — the pre-#145 behaviour.
+   */
+  private void wakeOrchestrator(WorkerDb.ClaimedTask task) {
+    if (task.buildId() == null) {
+      return;
+    }
+    try {
+      db.enqueueAdvanceWakeup(task.buildId(), task.traceParent());
+      LOG.debug("task {} completion woke orchestrator for build {}", task.id(), task.buildId());
+    } catch (Exception e) {
+      LOG.warn(
+          "orchestrator wake-up enqueue failed for build {} — "
+              + "the delayed ADVANCE poll will fold the verdict instead",
+          task.buildId(),
+          e);
     }
   }
 
