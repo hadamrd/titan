@@ -24,28 +24,33 @@ import org.junit.jupiter.api.Test;
  * on the request-validation surface and the happy-path 201 contract.
  *
  * <p>Beyond the {@code @RolesAllowed} realm-role gate, the replay endpoints run the DB-backed
- * {@link io.adaptiq.titan.auth.Authz#requires} check (#1121), which reads {@code titan.user_roles}
- * and default-denies users without a row. Each test therefore seeds an ADMIN row for {@code
- * testuser} in {@code @BeforeEach} and revokes it in {@code @AfterEach} so no role assignment leaks
- * into other test classes sharing the H2 database.
+ * {@link io.adaptiq.titan.auth.Authz#requires} check (#1121). Since #126 that check resolves roles
+ * through the CANONICAL chain — {@code titan.rbac_user_role} (the table AdminUsersApi writes) →
+ * legacy {@code titan.user_roles} → realm floor. Each test therefore seeds a scoped MAINTAINER
+ * grant for {@code testuser} in {@code @BeforeEach} and revokes it in {@code @AfterEach} so no role
+ * assignment leaks into other test classes sharing the H2 database. The class-level realm role is
+ * deliberately ONLY {@code TRIGGER_BUILD} (floors to DEVELOPER, below the MAINTAINER+ BUILD_RERUN
+ * policy) so the scoped grant — not the realm floor — is what authorizes the happy paths, pinning
+ * the canonical-table read.
  */
 @QuarkusTest
 @TestSecurity(
     user = "testuser",
-    roles = {"TRIGGER_BUILD", "ADMIN"})
+    roles = {"TRIGGER_BUILD"})
 class BuildReplayApiTest {
 
   @Inject TitanStores stores;
 
   @BeforeEach
-  void grantAdminTitanRole() {
-    // Authz.requires(BUILD_RERUN) consults titan.user_roles — default-deny without this row.
-    stores.userRoles().grant("testuser", "ADMIN");
+  void grantMaintainerViaCanonicalTable() {
+    // Authz.requires(BUILD_RERUN) resolves via rbac_user_role (ORG:global) — the same table the
+    // AdminUsersApi grant surface writes (#126). Default-deny without this row.
+    stores.rbacUserRoles().grant("testuser", "ORG", "global", "MAINTAINER");
   }
 
   @AfterEach
-  void revokeAdminTitanRole() {
-    stores.userRoles().revoke("testuser", "ADMIN");
+  void revokeMaintainerGrant() {
+    stores.rbacUserRoles().revoke("testuser", "ORG", "global", "MAINTAINER");
   }
 
   @Test
@@ -149,6 +154,49 @@ class BuildReplayApiTest {
         .post("/api/v1/builds/" + parentId + "/replay")
         .then()
         .statusCode(403);
+  }
+
+  // ── RBAC #126 — canonical-store resolution ──────────────────────────────
+
+  /**
+   * Adversarial (#126 default-deny): TRIGGER_BUILD clears the coarse gate and floors to DEVELOPER,
+   * but with NO rbac_user_role grant the MAINTAINER+ BUILD_RERUN policy must still deny. Distinct
+   * user — the class-level {@code @BeforeEach} seed applies to {@code testuser} only.
+   */
+  @Test
+  @TestSecurity(
+      user = "dev-ungranted",
+      roles = {"TRIGGER_BUILD"})
+  void replay_ungrantedDeveloper_returns403() {
+    long parentId = freshBakedParent("stage-1", "SUCCESS");
+    given()
+        .contentType("application/json")
+        .body("{\"nodeId\":\"stage-1\"}")
+        .when()
+        .post("/api/v1/builds/" + parentId + "/replay")
+        .then()
+        .statusCode(403);
+  }
+
+  /**
+   * The exact #126 rig scenario: a caller whose JWT carries the ADMIN realm role and who has NO row
+   * in either RBAC table must clear BUILD_RERUN via the realm floor — this was the caller the old
+   * flat-table-only read 403'd on every fresh rig.
+   */
+  @Test
+  @TestSecurity(
+      user = "admin-realm-only",
+      roles = {"ADMIN"})
+  void replay_adminRealmRole_noDbSeed_returns201() {
+    long parentId = freshBakedParent("stage-1", "SUCCESS");
+    given()
+        .contentType("application/json")
+        .body("{\"nodeId\":\"stage-1\"}")
+        .when()
+        .post("/api/v1/builds/" + parentId + "/replay")
+        .then()
+        .statusCode(201)
+        .body("newBuildId", greaterThan(0));
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────

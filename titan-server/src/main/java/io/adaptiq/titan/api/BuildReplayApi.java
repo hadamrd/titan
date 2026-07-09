@@ -63,6 +63,10 @@ public class BuildReplayApi {
    * Resolve the owning job of {@code parentBuildId} and run the {@link Action#BUILD_RERUN} RBAC
    * check against it (closes #1121). Returns the resolved job id for downstream use.
    *
+   * <p>Since #126 the check resolves roles through the canonical {@code rbac_user_role} chain
+   * (scoped grant → legacy {@code user_roles} → realm floor) — a MAINTAINER+ grant made via {@code
+   * AdminUsersApi} or an ADMIN realm role on the JWT satisfies it; nothing needs a pg-direct seed.
+   *
    * <p><strong>Order:</strong> 404 BEFORE 403. If the build doesn't exist we throw {@link
    * ApiNotFoundException} first — the alternative (403-on-missing) would let an unprivileged caller
    * probe build-id existence by reading the error code. Documented in the test matrix on #1121.

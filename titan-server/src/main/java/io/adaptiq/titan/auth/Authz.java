@@ -4,8 +4,6 @@ import edu.umd.cs.findbugs.annotations.NonNull;
 import io.adaptiq.titan.audit.AuditAction;
 import io.adaptiq.titan.audit.AuditService;
 import io.adaptiq.titan.audit.AuditTargetType;
-import io.adaptiq.titan.store.TitanStores;
-import io.adaptiq.titan.store.rows.UserRoleRow;
 import io.quarkus.security.ForbiddenException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -26,15 +24,25 @@ import java.util.Set;
  * }
  * }</pre>
  *
- * <p>{@code requires(...)} reads the caller's flat roles from {@code titan.user_roles}, applies the
- * hardcoded action→roles policy table (see {@link #isAllowed}), emits an audit row on BOTH allow
- * and deny, and throws {@link ForbiddenException} on deny (mapped to HTTP 403 by the existing
- * {@link io.adaptiq.titan.api.exception.ForbiddenExceptionMapper}).
+ * <p>{@code requires(...)} resolves the caller's effective role through {@link
+ * ScopedAuthz#effectiveRoleWithRealmFloor} on the {@code ORG:"global"} scope — the same canonical
+ * chain every {@code @RequiresRole} gate uses: {@code titan.rbac_user_role} (V38, the single source
+ * of truth the AdminUsersApi grant surface writes) → org-parent fallthrough → legacy flat {@code
+ * titan.user_roles} (V35) → realm-role floor from the caller's JWT. It then applies the hardcoded
+ * action→roles policy table (see {@link #isAllowed}), emits an audit row on BOTH allow and deny,
+ * and throws {@link ForbiddenException} on deny (mapped to HTTP 403 by the existing {@link
+ * io.adaptiq.titan.api.exception.ForbiddenExceptionMapper}).
  *
- * <p><strong>Default-deny.</strong> A caller with no row in {@code titan.user_roles} resolves to an
- * empty role set — denied for every privileged action. The check is intentionally NOT "if no rows,
- * allow as superuser" — we'd rather break a brand-new deploy until someone seeds the first ADMIN
- * row than ship the dev-mode foot-gun.
+ * <p><em>History (#126):</em> this class originally read ONLY the flat {@code titan.user_roles}
+ * table, which no product surface writes — so a role granted via {@code AdminUsersApi} (which
+ * writes {@code rbac_user_role}) or carried on the JWT never satisfied {@code BUILD_RERUN} and the
+ * replay endpoints 403'd for everyone on a fresh rig. Same drift #1221 fixed for {@code
+ * PIPELINE_EDIT}.
+ *
+ * <p><strong>Default-deny.</strong> A caller with no scoped row, no legacy flat row and no
+ * privileged realm role resolves to {@link TitanRole#VIEWER} — denied for every privileged action.
+ * The check is intentionally NOT "if no rows, allow as superuser" — we'd rather break a brand-new
+ * deploy until someone seeds the first ADMIN row than ship the dev-mode foot-gun.
  *
  * <p><strong>Composition with Quarkus realm roles.</strong> The Quarkus security pipeline runs
  * first ({@code @RolesAllowed} on the resource method), gating coarse classes of access. {@code
@@ -57,12 +65,19 @@ public class Authz {
     VIEWER
   }
 
-  private final TitanStores stores;
+  /**
+   * The scope {@code requires(...)} resolves roles on. ORG:"global" (not a REPO scope keyed by the
+   * numeric job id) because {@link ScopedAuthz#parentOrgFromRepo} cannot resolve a bare numeric id
+   * — mirrors the {@code @RequiresRole} gates on the same endpoints (see JobsApi #1221 note).
+   */
+  private static final String GLOBAL_SCOPE = "global";
+
+  private final ScopedAuthz scopedAuthz;
   private final AuditService audit;
 
   @Inject
-  Authz(TitanStores stores, AuditService audit) {
-    this.stores = stores;
+  Authz(ScopedAuthz scopedAuthz, AuditService audit) {
+    this.scopedAuthz = scopedAuthz;
     this.audit = audit;
   }
 
@@ -82,8 +97,11 @@ public class Authz {
       @NonNull Resource resource,
       String remoteIp) {
     String user = safeUserId(ctx);
-    Set<TitanRole> userRoles = loadRoles(user);
-    boolean allowed = isAllowed(action, userRoles);
+    // Canonical role resolution (#126): rbac_user_role → legacy user_roles → realm floor. The
+    // chain is total-ordered, so the single highest role decides — Set.of(effective) feeds the
+    // existing set-based policy table unchanged. Default-deny holds: no grant anywhere → VIEWER.
+    TitanRole effective = scopedAuthz.effectiveRoleWithRealmFloor(ctx, ScopeKind.ORG, GLOBAL_SCOPE);
+    boolean allowed = isAllowed(action, Set.of(effective));
     AuditAction auditAction = auditActionFor(action);
     AuditTargetType targetType = AuditTargetType.JOB; // v1: every Resource is JobResource
     String targetId = targetIdOf(resource);
@@ -126,9 +144,10 @@ public class Authz {
   }
 
   /**
-   * Parse a list of role-name strings (as carried in {@code titan.user_roles.role}) into typed
-   * {@link TitanRole}s. Unknown / null / blank values are silently dropped — a stale string left
-   * over from a future migration won't crash the request but also won't grant access.
+   * Parse a list of role-name strings (as carried in {@code titan.rbac_user_role.role} / the legacy
+   * {@code titan.user_roles.role}) into typed {@link TitanRole}s. Unknown / null / blank values are
+   * silently dropped — a stale string left over from a future migration won't crash the request but
+   * also won't grant access.
    */
   public static Set<TitanRole> parseRoles(@NonNull List<String> raw) {
     Set<TitanRole> out = new HashSet<>();
@@ -146,28 +165,6 @@ public class Authz {
   }
 
   // ── internals ────────────────────────────────────────────────────────────
-
-  private Set<TitanRole> loadRoles(String userId) {
-    if (userId == null) {
-      return Set.of();
-    }
-    List<UserRoleRow> rows = stores.userRoles().findByUserId(userId);
-    if (rows.isEmpty()) {
-      return Set.of();
-    }
-    Set<TitanRole> roles = new HashSet<>();
-    for (UserRoleRow r : rows) {
-      if (r.role == null) {
-        continue;
-      }
-      try {
-        roles.add(TitanRole.valueOf(r.role.trim().toUpperCase(Locale.ROOT)));
-      } catch (IllegalArgumentException ignored) {
-        // unknown role string — drop
-      }
-    }
-    return roles;
-  }
 
   private static String safeUserId(AuthContext ctx) {
     String u = ctx.currentUser();
