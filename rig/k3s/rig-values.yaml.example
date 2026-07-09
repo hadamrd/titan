@@ -13,6 +13,10 @@
 deploy:
   namespace: titan
   kubeContext: titan-k3s
+  # sshNode: YOUR-SSH-ALIAS   # PLACEHOLDER — ssh alias/host of the k3s node.
+  #                           # REQUIRED by fetch-kubeconfig.sh (SSH tunnel +
+  #                           # kubeconfig fetch); no sane default, so it stays
+  #                           # commented here. Uncomment with your real host.
 
 # ── Postgres ────────────────────────────────────────────────────────────────
 postgres:

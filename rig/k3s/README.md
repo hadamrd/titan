@@ -26,6 +26,41 @@ schema; titan-worker waits on that schema before claiming tasks.
   (run `task k3s:kubeconfig` to set one up via the SSH tunnel)
 - `cert-manager` + `ingress-nginx` on the cluster (only if `ingress.enabled=true`)
 
+## Rig values (`rig-values.yaml`)
+
+Both `deploy.sh` and `fetch-kubeconfig.sh` read their site config from
+`rig/k3s/rig-values.yaml` (**gitignored** — it holds your real host names and
+secrets). When it doesn't exist yet, they fall back to the committed
+`rig/k3s/rig-values.yaml.example`; if neither is present they exit 1 with
+instructions. Scaffold yours from the example:
+
+```bash
+cp rig/k3s/rig-values.yaml.example rig/k3s/rig-values.yaml
+$EDITOR rig/k3s/rig-values.yaml
+```
+
+The `deploy:` block is the part the shell scripts parse directly — everything
+else in the file is plain Helm values (documented inline in the example):
+
+```yaml
+# STUB / PLACEHOLDER VALUES — replace with your rig's real host values.
+deploy:
+  namespace: titan            # target namespace (allowlist-guarded by deploy.sh)
+  kubeContext: titan-k3s      # kube context fetch-kubeconfig.sh creates and uses
+  sshNode: YOUR-SSH-ALIAS     # ssh alias/host of the k3s node — REQUIRED by
+                              # fetch-kubeconfig.sh (SSH tunnel + kubeconfig
+                              # fetch). Commented out in the example: it has
+                              # no sane default, set your real host here.
+```
+
+One-off env overrides for `fetch-kubeconfig.sh`: `SSH_NODE` and
+`TITAN_KUBE_CONTEXT` take precedence over the file (and work without it).
+
+Every value in the example file is a **placeholder** (`titan.example.com`,
+`REPLACE-with-…` secrets). Replace them with real values for your rig before
+a real deploy, and never commit `rig-values.yaml` or real secrets — see the
+[Secrets](#secrets) section below for the ExternalSecret alternative.
+
 ## Deploy
 
 ```bash

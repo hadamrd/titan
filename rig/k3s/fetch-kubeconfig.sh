@@ -21,9 +21,23 @@ VALUES="$RIG_DIR/rig-values.yaml"
 # rig-values.yaml — the same single site-config file deploy.sh uses. Env vars
 # still override (SSH_NODE / TITAN_KUBE_CONTEXT) for one-off runs. If the
 # values file is absent (first-ever run, before deploy.sh scaffolds it), fall
-# back to the example file so this script still works standalone.
+# back to the committed example so this script still works standalone. If
+# NEITHER exists (fresh clone with the example missing), fail with
+# instructions instead of letting awk die with a raw "cannot open file" (#143).
 deploy_val() {
-  local f="$VALUES"; [[ -f "$f" ]] || f="$RIG_DIR/rig-values.example.yaml"
+  local f="$VALUES"; [[ -f "$f" ]] || f="$RIG_DIR/rig-values.yaml.example"
+  if [[ ! -f "$f" ]]; then
+    {
+      echo "ERROR: rig/k3s/rig-values(.yaml.example) not found — see rig/k3s/README.md"
+      echo "       (section 'Rig values') for what your rig config must contain."
+      echo "       Looked for: $VALUES"
+      echo "              then: $RIG_DIR/rig-values.yaml.example"
+      echo "       Scaffold it with:"
+      echo "         cp rig/k3s/rig-values.yaml.example rig/k3s/rig-values.yaml"
+      echo "       (or bypass the file with SSH_NODE / TITAN_KUBE_CONTEXT env vars)"
+    } >&2
+    exit 1
+  fi
   awk -v key="$1" '
     /^deploy:/        { in_d=1; next }
     /^[^[:space:]]/   { in_d=0 }
@@ -39,8 +53,8 @@ deploy_val() {
 SSH_NODE="${SSH_NODE:-$(deploy_val sshNode)}"
 CONTEXT="${TITAN_KUBE_CONTEXT:-$(deploy_val kubeContext)}"
 KUBE_CONFIG="${HOME}/.kube/config"
-[[ -n "$SSH_NODE" ]] || { echo "deploy.sshNode missing — set it in rig-values.yaml or pass SSH_NODE"; exit 1; }
-[[ -n "$CONTEXT"  ]] || { echo "deploy.kubeContext missing — set it in rig-values.yaml or pass TITAN_KUBE_CONTEXT"; exit 1; }
+[[ -n "$SSH_NODE" ]] || { echo "deploy.sshNode missing — set it in rig/k3s/rig-values.yaml or pass SSH_NODE (see rig/k3s/README.md, 'Rig values')" >&2; exit 1; }
+[[ -n "$CONTEXT"  ]] || { echo "deploy.kubeContext missing — set it in rig/k3s/rig-values.yaml or pass TITAN_KUBE_CONTEXT (see rig/k3s/README.md, 'Rig values')" >&2; exit 1; }
 
 log() { printf '\033[1;34m[kubeconfig]\033[0m %s\n' "$*"; }
 
