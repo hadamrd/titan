@@ -28,7 +28,7 @@
 # Out of scope: rotation, audit-log of the secret read, secret-store auth
 # failure modes — those land in dedicated fixtures.
 
-agent: titan-worker-1
+agent: linux
 
 env:
   # Top-level non-secret env to prove secrets and plain env coexist without

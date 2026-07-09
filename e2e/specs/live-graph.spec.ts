@@ -14,7 +14,7 @@ test.describe('UI — live graph view', () => {
     const build = await titanApi.submitPipeline(
       'e2e-ui-live-graph',
       [
-        'agent: titan-worker-1',
+        'agent: linux',
         'stages:',
         '  - stage: build',
         '    steps:',

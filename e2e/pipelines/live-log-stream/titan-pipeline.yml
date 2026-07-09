@@ -16,7 +16,7 @@
 # window to observe incremental growth — a burst-then-exit step would race the
 # poller and could land terminal before the page mounts.
 
-agent: titan-worker-1
+agent: linux
 
 stages:
   - stage: stream

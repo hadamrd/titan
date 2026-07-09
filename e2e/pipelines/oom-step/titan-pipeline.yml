@@ -29,7 +29,7 @@
 # not implement it. Without (a) the 512 MiB allocation simply succeeds on a
 # multi-GB host and the build goes green, so the spec stays gated until #1116.
 
-agent: titan-worker-1
+agent: linux
 
 # The cgroup memory cap the worker must enforce (#1116). 512 MiB inside 64 MiB
 # is a ~8x over-commit — large enough that the OOM killer fires deterministically

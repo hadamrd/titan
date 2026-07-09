@@ -10,7 +10,12 @@
 #   * after the spec patches the failing test to passing and re-triggers,
 #     the build terminates as SUCCESS.
 
-agent: titan-worker-1
+# Source location: the local rig bind-mounts the repo's e2e/pipelines/ at
+# /titan/fixtures inside the worker (rig/local/docker-compose.yml). Steps cd
+# into the mounted dir — node_modules persists there across builds, so the
+# `npm install` fallback is a fast no-op after the first run, and the triage
+# spec's patch-source-then-retrigger leg (#1130 test 4) sees host edits live.
+agent: linux
 
 env:
   NODE_ENV: test
@@ -19,7 +24,7 @@ env:
 stages:
   - stage: install
     steps:
-      - sh: cd e2e/pipelines/node-app-with-failing-test && npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - sh: cd /titan/fixtures/node-app-with-failing-test && npm ci --no-audit --no-fund || npm install --no-audit --no-fund --no-package-lock
 
   - stage: unit-test
     dependsOn: [install]
@@ -27,7 +32,7 @@ stages:
       # vitest exits 1 when any test fails; the engine maps that to FAILURE.
       # The worker captures stdout/stderr verbatim — vitest's "FAIL " prefix
       # is what the UI log viewer scrolls to on click.
-      - sh: cd e2e/pipelines/node-app-with-failing-test && npx vitest run --reporter=default
+      - sh: cd /titan/fixtures/node-app-with-failing-test && npx vitest run --reporter=default
 
   - stage: build
     dependsOn: [unit-test]
@@ -42,4 +47,4 @@ stages:
     # the engine now rejects with a precise message instead of the opaque
     # "Transaction failed" abort.
     steps:
-      - sh: cd e2e/pipelines/node-app-with-failing-test && npm run build
+      - sh: cd /titan/fixtures/node-app-with-failing-test && npm run build

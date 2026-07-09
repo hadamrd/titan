@@ -237,7 +237,17 @@ services:
       TITAN_QUEUE: "default"
       TITAN_AGENT_NAME: "Local Worker 01"
       TITAN_LABELS: "docker,linux,amd64"
-      TITAN_EXECUTORS: "2"
+      # Executor capacity sized for the golden e2e suite's known concurrent
+      # load (GH #74): Playwright runs with 2 workers, so a container-heavy
+      # fixture build (spec-24's 23-node fullstack pipeline runs 2 lint steps
+      # in parallel for ~90s) overlaps with approval/burst micro-builds AND
+      # worker-synthesis tasks — which all compete for the same executor
+      # slots. With 2 executors one fullstack build saturated the worker and
+      # starved 25-approval-flow's 30/60s budgets. 4 = 2 (one saturating
+      # fixture build) + 1 (concurrent micro-build step) + 1 (synthesis /
+      # burst headroom) — fits a laptop; raise via a compose override if you
+      # run more PW workers.
+      TITAN_EXECUTORS: "4"
       TITAN_REMOTE_FS: "/titan"
       TITAN_MODE: "NORMAL"
       # Local rig: explicit TITAN_WORKSPACE + TITAN_DEV_MODE=true lets the
@@ -275,6 +285,16 @@ services:
       TITAN_ARTIFACT_ROOT: "/titan/artifacts"
     volumes:
       - titan-ws:/titan
+      # Vendored e2e fixture sources (GH #73). The legacy golden-path fixtures
+      # (e2e/pipelines/*/titan-pipeline.yml) cd into /titan/fixtures/<name> —
+      # their specs document that "the fixture source is mounted into the
+      # worker workspace by the rig's docker-compose", and the failure-triage
+      # spec (#1130 test 4) patches a fixture file ON THE HOST and expects the
+      # next build to pick the change up, so this must be a live bind mount,
+      # not a copy. Mounted rw: npm writes node_modules/ into the fixture dirs
+      # (gitignored), which is what keeps `npm install` a no-op after the
+      # first build and the triage spec inside its 30s FAILURE budget.
+      - ../../e2e/pipelines:/titan/fixtures
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     networks: [titan]
