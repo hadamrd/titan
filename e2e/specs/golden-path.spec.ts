@@ -46,6 +46,7 @@ import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
 import { authEnv, fetchBearerToken, loginViaKeycloak } from '../fixtures/auth-v3'
+import { safeDeleteJobCascade } from '../fixtures/teardown-v3'
 import {
   GithubAppFixture,
   cutFixtureBranch,
@@ -99,6 +100,11 @@ function pipelineYaml(fixture: string): string {
   )
 }
 
+// #116: every job this suite creates is registered here and torn down in
+// afterAll — pre-fix, blocks A/B/C leaked one gp-fail-*/gp-matrix-*/gp-secret-*
+// job per run (26/14/14 rows in the 2026-07-09 litter census).
+const createdJobIds: number[] = []
+
 async function createJob(
   api: APIRequestContext,
   bearer: string,
@@ -116,7 +122,9 @@ async function createJob(
     },
   })
   expect(resp.status(), `job create for ${fixture}: ${await resp.text()}`).toBe(201)
-  return (JSON.parse(await resp.text()) as JobCreateResp).id
+  const id = (JSON.parse(await resp.text()) as JobCreateResp).id
+  createdJobIds.push(id)
+  return id
 }
 
 async function triggerBuild(api: APIRequestContext, bearer: string, jobId: number): Promise<number> {
@@ -200,6 +208,16 @@ test.describe('golden-path UI @golden @sre @1166', () => {
     // any block runs — never a silent green.
     bearer = await fetchBearerToken(ENV)
     expect(bearer.length, 'Keycloak returned an empty bearer — is the rig up?').toBeGreaterThan(10)
+  })
+
+  test.afterAll(async ({ request }) => {
+    // #116: zero-litter — delete every gp-* job this run created. Cancel-then-
+    // delete via safeDeleteJobCascade (#59 ownership rule: only rows we
+    // created, never under a live worker lease). Best-effort per job so one
+    // wedged teardown cannot mask the suite verdict.
+    for (const id of createdJobIds) {
+      await safeDeleteJobCascade(request, id).catch(() => undefined)
+    }
   })
 
   // ── A. Failing step → red verdict + FAIL log line, all on the DOM ──────────

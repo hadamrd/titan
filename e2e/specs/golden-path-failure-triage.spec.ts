@@ -49,6 +49,7 @@ import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken, loginViaKeycloak } from '../fixtures/auth-v3'
+import { safeDeleteJobCascade } from '../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -172,6 +173,15 @@ test.describe('golden-path-failure-triage @golden @sre', () => {
     bearer = await fetchBearerToken(ENV)
     runTag = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
     jobId = await createJob(request, bearer, `e2e-failure-triage-${runTag}`)
+  })
+
+  test.afterAll(async ({ request }) => {
+    // #116: zero-litter — this suite used to leak one e2e-failure-triage-*
+    // job per run (~27 rows in the litter census). Cancel-then-delete via
+    // safeDeleteJobCascade; never yanks a leased task_queue row (#59).
+    if (jobId) {
+      await safeDeleteJobCascade(request, jobId).catch(() => undefined)
+    }
   })
 
   test('1. push -> red build: FAILURE within 30s of trigger', async ({ request }) => {

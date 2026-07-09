@@ -32,6 +32,7 @@ import * as crypto from 'node:crypto'
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken } from '../../fixtures/auth-v3'
 import { readFixtureYaml } from '../../fixtures/fixture-files'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -451,7 +452,8 @@ test.describe('v3 secrets-handling @golden', () => {
       await dump('assertion-failure')
       throw err
     } finally {
-      // Cleanup — credentials only (JobsApi has no DELETE).
+      // Cleanup — credentials + the job this spec created (#116: used to leak
+      // one e2e-secrets-handling-* job per run).
       if (bearer && credentialId) {
         await request
           .delete(`${API_BASE}/api/v1/credentials/${credentialId}`, {
@@ -469,6 +471,11 @@ test.describe('v3 secrets-handling @golden', () => {
           .catch(() => {
             /* best-effort */
           })
+      }
+      if (jobId) {
+        await safeDeleteJobCascade(request, jobId).catch(() => {
+          /* best-effort — leftovers are logged by the helper */
+        })
       }
     }
   })

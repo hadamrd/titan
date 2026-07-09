@@ -42,8 +42,8 @@
  *      stream self-terminates once the build is terminal and logs are
  *      drained — issue #66: an earlier revision hit a nonexistent
  *      `/api/v1/logs/{taskId}` route).
- *  10. finally{}: delete credential. Job rows aren't deletable today; the
- *      per-run RUN_TAG suffix avoids fullName collisions across reruns.
+ *  10. finally{}: delete credential + job (safeDeleteJobCascade, #116 — this
+ *      spec used to leak one e2e-with-httpRequest-* job per run).
  *
  * Sad-path note: the matrix issue (#786) calls for a sad-path on one of the
  * specs. Specs 28-approval (REJECT path) and 29-retry (attempt counter) already
@@ -59,6 +59,7 @@ import * as crypto from 'node:crypto'
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
 import { readFixtureYaml } from '../../fixtures/fixture-files'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -417,7 +418,9 @@ test.describe('v3 fixture-with-httpRequest @golden', () => {
       await dump('assertion-failure')
       throw err
     } finally {
-      // ── 10. Cleanup credential (jobs not deletable today). ───────────────
+      // ── 10. Cleanup credential + job (#116 — used to leak one
+      // e2e-with-httpRequest-* job per run). safeDeleteJobCascade cancels any
+      // live build first and never deletes under a worker lease (#59).
       if (bearer && credentialId) {
         await request
           .delete(`${API_BASE}/api/v1/credentials/${credentialId}`, {
@@ -426,6 +429,11 @@ test.describe('v3 fixture-with-httpRequest @golden', () => {
           .catch(() => {
             /* best-effort */
           })
+      }
+      if (jobId) {
+        await safeDeleteJobCascade(request, jobId).catch(() => {
+          /* best-effort — leftovers are logged by the helper */
+        })
       }
     }
   })

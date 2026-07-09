@@ -25,6 +25,7 @@
 import * as crypto from 'node:crypto'
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -289,6 +290,9 @@ test.describe('v3 when-skipped @golden', () => {
           `the SKIPPED node must render under the skip variant (the GH #1093 variantOf fix)`,
       ).toBeGreaterThanOrEqual(1)
     } finally {
+      // #116: also delete the job this spec created (used to leak one
+      // e2e-when-skipped-* job per run). Cancel-then-delete, never under a
+      // worker lease (#59 ownership rule).
       if (bearer && credentialId) {
         await request
           .delete(`${API_BASE}/api/v1/credentials/${credentialId}`, {
@@ -297,6 +301,11 @@ test.describe('v3 when-skipped @golden', () => {
           .catch(() => {
             /* best-effort */
           })
+      }
+      if (jobId) {
+        await safeDeleteJobCascade(request, jobId).catch(() => {
+          /* best-effort — leftovers are logged by the helper */
+        })
       }
     }
   })
