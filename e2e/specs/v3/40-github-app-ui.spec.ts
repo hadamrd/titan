@@ -6,17 +6,26 @@
  * keeps its value as a regression seat-belt for the UI — the only change will
  * be removing the mocks.
  *
- * Coverage:
- *   1. /onboarding renders the "Create Titan GitHub App" screen for an admin,
- *      and the warning banner for a non-admin.
- *   2. After manifest exchange (we simulate by pre-seeding the github-app
- *      endpoint with a 200), the screen flips to "Install on GitHub".
- *   3. The Install button links to `${app.html_url}/installations/new`.
- *   4. /integrations/github lists the installations, repos, and pipelines we
- *      seed.
- *   5. The "Sync now" button POSTs to /installations/{id}/sync.
- *   6. The "Enable" button POSTs to /api/v1/jobs with the right scm metadata.
- *   7. /repositories falls back to the "Connect a GitHub org" empty state.
+ * Coverage (rewritten for Design 66 — Refs #52):
+ *   1. /onboarding renders the "Create Titan GitHub App" screen (screen 1)
+ *      when no App exists, with the manual fallback link reachable.
+ *   2. With an App + an installation present, /onboarding auto-navigates to
+ *      /integrations/github — screen 2 never lingers (Design 66), so its
+ *      heading is deliberately NOT asserted.
+ *   3. /integrations/github lists installations as hairline rows
+ *      (`install-row-*`) with repo counts; the row meta link drills into the
+ *      per-install detail page /integrations/github/:installId.
+ *   4. The detail page shows repos + discovered pipelines. Every discovered
+ *      pipeline is auto-enabled by the scanner: cards render an informational
+ *      "active" pill and NO per-pipeline Enable button exists (Design 66
+ *      removed the enable flow). Repos without pipelines hide behind the
+ *      "Show all" toggle.
+ *   5. The "Sync now" button (`install-sync-btn-*`) POSTs to
+ *      /installations/{id}/sync.
+ *   6. Regression guard: the integrations surface never POSTs /api/v1/jobs
+ *      (job rows are created server-side by the scanner, not by the UI).
+ *   7. /integrations/github falls back to the "Set up Titan GitHub App" empty
+ *      state when no App and no installs exist.
  *   8. /onboarding has a working "Or connect a Git URL directly" link to
  *      /onboarding/manual.
  *
@@ -25,11 +34,6 @@
  * NO GitHub App registration, installation, or webhook tunnel. Only the
  * standard rig env applies (TITAN_UI_URL, TITAN_KEYCLOAK_URL, TITAN_DEV_USER /
  * TITAN_DEV_PASSWORD — see fixtures/auth-v3.ts defaults).
- *
- * DRIFT NOTE (#52): the "enable + sync" test below is `test.fixme` — Design 66
- * removed the per-pipeline Enable button (pipelines auto-enable on discovery)
- * and moved pipeline cards + "Sync now" to /integrations/github/:installId.
- * Rewrite tracked in #52; do not un-fixme without it.
  *
  * @tag @golden
  */
@@ -207,19 +211,9 @@ async function installMocks(page: Page, state: MockState) {
 }
 
 test.describe('@golden v3 github-app-ui', () => {
-  test('admin → screen 2 → install link → /integrations/github → enable + sync', async ({
+  test('admin → onboarding auto-navigates → install detail: active pipelines + sync', async ({
     page,
   }) => {
-    // Not an env gap — this test is fully mocked. It asserts the pre-Design-66
-    // UI: a per-pipeline Enable button (removed — pipelines auto-enable on
-    // discovery) and pipeline cards + "Sync now" on /integrations/github (moved
-    // to /integrations/github/:installId). Rewrite tracked in #52.
-    test.fixme(
-      true,
-      'UI drift (#52): Design 66 removed the per-pipeline Enable button and moved ' +
-        'pipeline cards + "Sync now" to /integrations/github/:installId — this test ' +
-        'asserts the pre-Design-66 Integrations UI. Test-only rewrite tracked in #52.',
-    )
     test.setTimeout(90_000)
     const state = freshState()
 
@@ -231,74 +225,58 @@ test.describe('@golden v3 github-app-ui', () => {
 
     await page.goto(`${ENV.uiBaseUrl}/onboarding`)
 
-    // App already exists per freshState — screen 2.
-    await expect(page.getByRole('heading', { name: /install on github/i })).toBeVisible({
+    // App + installation both exist per freshState → the installation poll
+    // resolves immediately and /onboarding auto-navigates to
+    // /integrations/github (Design 66). Screen 2 never lingers, so we follow
+    // the redirect instead of asserting its heading.
+    await page.waitForURL('**/integrations/github', { timeout: 15_000 })
+
+    // Index page (Design 66 IA): installations render as hairline rows.
+    await expect(page.locator('[data-testid="install-row-42"]')).toBeVisible({
       timeout: 10_000,
     })
+    await expect(page.locator('[data-testid="install-repo-count-42"]')).toHaveText('2 repos')
 
-    const installLink = page.locator('[data-testid="onboarding-install-link"]')
-    await expect(installLink).toHaveAttribute(
-      'href',
-      'https://github.com/apps/titan-acme/installations/new',
-    )
+    // Drill into the per-install detail page — pipeline management (repo
+    // expansion, pipeline cards, "Sync now") moved here in Design 66.
+    await page.locator('[data-testid="install-row-meta-42"]').click()
+    await page.waitForURL('**/integrations/github/42', { timeout: 10_000 })
 
-    // The polling poll → installation exists → SPA auto-navigates to /integrations/github
-    await page.waitForURL('**/integrations/github', { timeout: 10_000 })
-
-    await expect(
-      page.getByRole('heading', { name: /github installations/i }),
-    ).toBeVisible({ timeout: 10_000 })
-
-    // Installation card visible with correct counts (2 repos, 2 pipelines).
     const card = page.locator('[data-testid="install-card-42"]')
-    await expect(card).toBeVisible()
+    await expect(card).toBeVisible({ timeout: 10_000 })
     await expect(page.locator('[data-testid="install-repo-count-42"]')).toHaveText('2 repos')
     await expect(page.locator('[data-testid="install-pipeline-count-42"]')).toHaveText(
       '2 pipelines',
     )
 
-    // Click Sync now → state.syncCalls increments.
-    const syncBtn = page.locator('[data-testid="install-sync-btn-42"]')
-    await syncBtn.click()
+    // acme-co/web carries pipelines → shown (and expanded) by default;
+    // acme-co/cli has none → hidden until the "Show all repos" toggle.
+    const webRepo = encodeURIComponent('acme-co/web')
+    const cliRepo = encodeURIComponent('acme-co/cli')
+    await expect(page.locator(`[data-testid="repo-42-${webRepo}"]`)).toBeVisible()
+    await expect(page.locator(`[data-testid="repo-42-${cliRepo}"]`)).toHaveCount(0)
+    await page.locator('[data-testid="install-toggle-all-42"]').click()
+    await expect(page.locator(`[data-testid="repo-42-${cliRepo}"]`)).toBeVisible()
+
+    // Design 66: every discovered pipeline is auto-enabled by the scanner.
+    // Both cards render the informational "active" pill — and NO per-pipeline
+    // Enable button exists anywhere on the page (removed product behavior).
+    const buildId = `pipeline-card-42-${webRepo}-${encodeURIComponent('.titan/pipelines/build.yml')}`
+    const deployId = `pipeline-card-42-${webRepo}-${encodeURIComponent('.titan/pipelines/deploy.yml')}`
+    await expect(page.locator(`[data-testid="${buildId}"]`)).toBeVisible()
+    await expect(page.locator(`[data-testid="${buildId}-active"]`)).toHaveText(/active/)
+    await expect(page.locator(`[data-testid="${deployId}"]`)).toBeVisible()
+    await expect(page.locator(`[data-testid="${deployId}-active"]`)).toHaveText(/active/)
+    await expect(page.locator('[data-testid$="-enable-btn"]')).toHaveCount(0)
+
+    // Click Sync now → POST /api/v1/github-app/installations/42/sync.
+    await page.locator('[data-testid="install-sync-btn-42"]').click()
     await expect.poll(() => state.syncCalls, { timeout: 5_000 }).toBeGreaterThanOrEqual(1)
 
-    // 'deploy' pipeline is pre-enabled → enabled badge, no Enable button.
-    const deployCard = page.locator(
-      '[data-testid^="pipeline-card-42-acme-co%2Fweb-"]',
-      { hasText: 'deploy' },
-    )
-    await expect(deployCard).toBeVisible()
-    await expect(deployCard.locator('text=enabled')).toBeVisible()
-
-    // 'build' pipeline → click Enable, assert POST body shape.
-    const buildEnable = page.locator(
-      '[data-testid^="pipeline-card-42-acme-co%2Fweb-"][data-testid$="build.yml"] [data-testid$="enable-btn"]',
-    )
-    // Selector hardening: take the first matching Enable button if multiple
-    // pipelines render Enable in parallel.
-    const buildEnableBtn = page.getByTestId(
-      /pipeline-card-42-acme-co%2Fweb-.*build\.yml-enable-btn$/,
-    )
-    await buildEnableBtn.click()
-    void buildEnable
-    await expect
-      .poll(() => state.jobCreateBodies.length, { timeout: 5_000 })
-      .toBeGreaterThanOrEqual(1)
-
-    const body = state.jobCreateBodies[0] as {
-      pipelineScript?: string
-      configJson?: string
-      displayName?: string
-    }
-    expect(body.displayName).toBe('build')
-    expect(body.pipelineScript ?? '').toContain('titan github-app')
-    const cfg = JSON.parse(body.configJson ?? '{}') as {
-      scm: { type: string; installationId: number; repoFullName: string; filename: string }
-    }
-    expect(cfg.scm.type).toBe('github-app')
-    expect(cfg.scm.installationId).toBe(42)
-    expect(cfg.scm.repoFullName).toBe('acme-co/web')
-    expect(cfg.scm.filename).toBe('.titan/pipelines/build.yml')
+    // Regression guard for the removed enable flow: the integrations surface
+    // must never POST /api/v1/jobs — job rows are created server-side by the
+    // scanner, not by the UI.
+    expect(state.jobCreateBodies).toHaveLength(0)
   })
 
   test('no app yet → screen 1 + manual fallback link visible', async ({ page }) => {
