@@ -133,7 +133,11 @@ public final class TitanWorker {
     // Reap the workspaces of finished builds (design/43 W4) — once now, to clear a
     // previous life's leftovers, then on a schedule. Its own daemon scheduler, so a slow
     // rm -rf of a large workspace can never delay a liveness heartbeat.
-    WorkspaceReaper workspaceReaper = new WorkspaceReaper(db, cfg.workspaceRoot());
+    WorkspaceReaper workspaceReaper =
+        new WorkspaceReaper(
+            db::buildStatus,
+            cfg.workspaceRoot(),
+            WorkspaceReaper.orphanTtlFromEnv(System.getenv()));
     workspaceReaper.sweep();
     ScheduledExecutorService reaper =
         Executors.newSingleThreadScheduledExecutor(
