@@ -590,32 +590,91 @@ final class WorkerDb implements AutoCloseable {
   boolean complete(long taskId, UUID claimToken, String status, String resultJson)
       throws SQLException {
     try (Connection c = open();
-        PreparedStatement ps =
-            c.prepareStatement(
-                "UPDATE titan.task_queue SET status=?, result_json=?, "
-                    + "completed_at=CURRENT_TIMESTAMP, "
-                    + "payload_json=(payload_json::jsonb - 'credentialsSealed')::text "
-                    + "WHERE id=? AND claim_token=? AND status IN ('CLAIMED','PROCESSING')")) {
-      ps.setString(1, status);
-      ps.setString(2, resultJson);
-      ps.setLong(3, taskId);
-      ps.setObject(4, claimToken);
+        PreparedStatement ps = c.prepareStatement(COMPLETE_SQL)) {
+      bindComplete(ps, taskId, claimToken, status, resultJson);
       return ps.executeUpdate() == 1;
     }
   }
 
+  /** Token-guarded terminal completion — see {@link #complete}. */
+  private static final String COMPLETE_SQL =
+      "UPDATE titan.task_queue SET status=?, result_json=?, "
+          + "completed_at=CURRENT_TIMESTAMP, "
+          + "payload_json=(payload_json::jsonb - 'credentialsSealed')::text "
+          + "WHERE id=? AND claim_token=? AND status IN ('CLAIMED','PROCESSING')";
+
+  private static void bindComplete(
+      PreparedStatement ps, long taskId, UUID claimToken, String status, String resultJson)
+      throws SQLException {
+    ps.setString(1, status);
+    ps.setString(2, resultJson);
+    ps.setLong(3, taskId);
+    ps.setObject(4, claimToken);
+  }
+
   /**
-   * Wake the controller's orchestrator for {@code buildId} by enqueuing an immediately-claimable
-   * {@code ORCHESTRATE/ADVANCE} task (issue #145).
+   * Terminally complete a step task AND enqueue the orchestrator wake-ADVANCE <strong>in one
+   * transaction</strong> (issue #147 hardening of the issue #145 wake).
    *
-   * <p>Why: step completion used to be observed only by the controller's <em>delayed</em> ADVANCE
-   * re-poll ({@code AdvanceHandler.BACKOFF_LADDER[0]} = 5s). When a step finished just after a poll
-   * checked, the verdict waited a full extra poll cycle (~6s including tick alignment) — per step.
-   * On the failure-triage smoke that race pushed trigger→FAILURE past its 30s budget under
-   * concurrent e2e load. This writeback makes verdict propagation event-driven: the completion is
-   * folded on the next 500ms controller tick. The delayed re-poll remains as the crash-safe
-   * backstop, exactly as the #827 backoff design already assumed ("worker step-complete writeback
-   * ... enqueues a fresh ADVANCE").
+   * <p>Before this method, {@link #complete} and a standalone wake INSERT ran as two separate
+   * auto-commit statements on two pooled connections. The call ordering (complete returns only
+   * after its commit; the wake INSERT starts strictly after) already guaranteed the wake row could
+   * never be visible before the completion on a single PostgreSQL — but that guarantee lived in
+   * Java call ordering, not in the data. Committing both in one transaction makes the ordering
+   * provable by construction: an ADVANCE woken by this row can never observe the completing task as
+   * still in-flight, under any topology (multiple controllers, future read replicas, async commit).
+   *
+   * <p>The wake row is written only when the completion is accepted (token still held) — a stale
+   * zombie completion enqueues nothing. See {@link #WAKE_SQL} for the wake-row contract
+   * (immediately claimable, duplicate-safe by the ADVANCE reconcile contract).
+   *
+   * @return {@code true} if the completion was accepted (and the wake row committed with it),
+   *     {@code false} if rejected as stale (no wake row written).
+   */
+  boolean completeAndWakeOrchestrator(
+      long taskId,
+      UUID claimToken,
+      String status,
+      String resultJson,
+      long buildId,
+      String traceParent)
+      throws SQLException {
+    try (Connection c = open()) {
+      c.setAutoCommit(false);
+      try {
+        boolean accepted;
+        try (PreparedStatement ps = c.prepareStatement(COMPLETE_SQL)) {
+          bindComplete(ps, taskId, claimToken, status, resultJson);
+          accepted = ps.executeUpdate() == 1;
+        }
+        if (accepted) {
+          try (PreparedStatement ps = c.prepareStatement(WAKE_SQL)) {
+            bindWake(ps, buildId, traceParent);
+            ps.executeUpdate();
+          }
+        }
+        c.commit();
+        return accepted;
+      } catch (SQLException e) {
+        c.rollback();
+        throw e;
+      }
+    }
+  }
+
+  /**
+   * The orchestrator wake row (issue #145): an immediately-claimable {@code ORCHESTRATE/ADVANCE}
+   * for the completed step's build, written by {@link #completeAndWakeOrchestrator} in the same
+   * transaction as the completion.
+   *
+   * <p>Why it exists: step completion used to be observed only by the controller's <em>delayed</em>
+   * ADVANCE re-poll ({@code AdvanceHandler.BACKOFF_LADDER[0]} = 5s). When a step finished just
+   * after a poll checked, the verdict waited a full extra poll cycle (~6s including tick alignment)
+   * — per step. On the failure-triage smoke that race pushed trigger→FAILURE past its 30s budget
+   * under concurrent e2e load. This writeback makes verdict propagation event-driven: the
+   * completion is folded on the next 500ms controller tick. The delayed re-poll remains as the
+   * crash-safe backstop, exactly as the #827 backoff design already assumed ("worker step-complete
+   * writeback ... enqueues a fresh ADVANCE").
    *
    * <p>Duplicate-safety: ADVANCE is an idempotent reconcile pass and race-tolerant by contract
    * (#911 benign CAS-loss); approvals, gates and timer fires already enqueue fresh ADVANCE rows
@@ -626,19 +685,17 @@ final class WorkerDb implements AutoCloseable {
    * {@code task_token}, {@code available_at} and {@code created_at} come from column defaults.
    * {@code traceParent} carries the originating trace across the hop (issue #314).
    */
-  void enqueueAdvanceWakeup(long buildId, String traceParent) throws SQLException {
-    try (Connection c = open();
-        PreparedStatement ps =
-            c.prepareStatement(
-                "INSERT INTO titan.task_queue (type, queue_name, status, priority, "
-                    + "payload_json, attempts, max_attempts, visibility_timeout_seconds, "
-                    + "build_id, trace_parent) "
-                    + "VALUES ('ORCHESTRATE', 'default', 'QUEUED', 0, ?, 0, 3, 3600, ?, ?)")) {
-      ps.setString(1, "{\"action\":\"ADVANCE\",\"buildId\":" + buildId + "}");
-      ps.setLong(2, buildId);
-      ps.setString(3, traceParent);
-      ps.executeUpdate();
-    }
+  private static final String WAKE_SQL =
+      "INSERT INTO titan.task_queue (type, queue_name, status, priority, "
+          + "payload_json, attempts, max_attempts, visibility_timeout_seconds, "
+          + "build_id, trace_parent) "
+          + "VALUES ('ORCHESTRATE', 'default', 'QUEUED', 0, ?, 0, 3, 3600, ?, ?)";
+
+  private static void bindWake(PreparedStatement ps, long buildId, String traceParent)
+      throws SQLException {
+    ps.setString(1, "{\"action\":\"ADVANCE\",\"buildId\":" + buildId + "}");
+    ps.setLong(2, buildId);
+    ps.setString(3, traceParent);
   }
 
   /**

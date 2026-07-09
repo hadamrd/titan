@@ -297,7 +297,7 @@ public final class TitanOrchestrator {
     gateEvaluator.evaluateGates(flowNodes, model, nameToId, nodes);
     gateEvaluator.evaluatePreconditions(flowNodes, model, nameToId, nodes, ctx);
 
-    return finishIfDone(flowNodes, model, dispatched, reconciled);
+    return finishIfDone(flowNodes, model, dispatched, reconciled, tasks);
   }
 
   // ── 1. reconcile ──────────────────────────────────────────────────────
@@ -667,7 +667,8 @@ public final class TitanOrchestrator {
       @NonNull FlowNodeDao flowNodes,
       @NonNull PipelineModel model,
       int dispatched,
-      int reconciled) {
+      int reconciled,
+      @NonNull List<TaskQueueRow> tasks) {
     Map<String, FlowNodeRow> nodes = PipelineNodes.byId(flowNodes.listByBuild(buildId));
     boolean anyFailed = nodes.values().stream().anyMatch(n -> "FAILED".equals(n.status));
 
@@ -683,6 +684,16 @@ public final class TitanOrchestrator {
           tainted.add(n.nodeId);
         }
       }
+      // Issue #147 (conservative fold under ambiguity): a node that RAN — its current-generation
+      // EXECUTE_COMMAND task is terminal — must fold to its REAL verdict (SUCCESS/FAILED via the
+      // reconcile leg), never to SKIPPED. On this controller the reconcile leg earlier in this
+      // same pass has already folded everything in `tasks`, so this set is empty here in
+      // single-controller operation; it becomes load-bearing when a PEER controller's pass is
+      // mid-fold (design/26 Tier B) or when a completion lands between this pass's task snapshot
+      // and this sweep. Holding such a node for one more tick costs at most the #827 re-poll
+      // backstop; folding it SKIPPED would report "never ran" for a step that ran (and possibly
+      // failed) — a wrong verdict. Correctness over latency (CONSTITUTION §2).
+      Set<String> verdictPending = pendingVerdictNodes(model, tasks, nodes);
       Instant now = Instant.now();
       // #1213: a `fail_fast` matrix/each group ABORTs its active siblings on first cell failure,
       // tainting each so the sweep below SKIPs its descendant steps. See MatrixCoordinator.
@@ -693,6 +704,14 @@ public final class TitanOrchestrator {
       }
       for (FlowNodeRow n : nodes.values()) {
         if (NODE_TERMINAL.contains(n.status)) {
+          continue;
+        }
+        if (verdictPending.contains(n.nodeId)) {
+          LOGGER.log(
+              Level.FINE,
+              "[titan] build {0}: node {1} has a terminal task verdict pending fold — "
+                  + "holding it out of the SKIPPED sweep this pass",
+              new Object[] {buildId, n.nodeId});
           continue;
         }
         // SKIP this node iff any node in its transitive ancestor closure is FAILED. A node whose
@@ -728,6 +747,59 @@ public final class TitanOrchestrator {
       buildCloser.close(buildId, result, model);
     }
     return new AdvanceResult(dispatched, reconciled, finished, result, parked);
+  }
+
+  /**
+   * Node ids whose <em>current-generation</em> {@code EXECUTE_COMMAND} task is terminal while the
+   * flow node itself is still non-terminal — i.e. a real verdict exists but has not been folded
+   * into {@code flow_nodes} yet (issue #147). The {@code blockOnFailure} sweep must not fold such a
+   * node to {@code SKIPPED}: SKIPPED means "never ran", and these nodes ran.
+   *
+   * <p>Mirrors {@link #reconcileFinishedSteps}' selection exactly: latest task per node wins
+   * (chronological order), and a task stamped with a superseded {@code attempt} (#125 stage-retry
+   * generation guard) is ignored — a reset node whose only task belongs to a previous generation
+   * has NO pending verdict and stays sweepable.
+   *
+   * <p>Steps propagate to their owning stage: a stage must not be swept SKIPPED while one of its
+   * steps holds an unfolded verdict, or the stage would contradict the step it contains once the
+   * verdict folds ({@code stage=SKIPPED, step=FAILED}).
+   *
+   * <p>When is this non-empty? (a) Single controller: {@code advance()} refetches the task snapshot
+   * after a productive reconcile (#125), so a completion landing between the two reads reaches this
+   * sweep unfolded in the same pass. (b) Multi-controller (design/26 Tier B): a peer's pass can be
+   * between the completion's commit and its fold when this pass sweeps. Package-private static for
+   * direct unit coverage.
+   */
+  @NonNull
+  static Set<String> pendingVerdictNodes(
+      @NonNull PipelineModel model,
+      @NonNull List<TaskQueueRow> tasks,
+      @NonNull Map<String, FlowNodeRow> nodes) {
+    Map<String, TaskQueueRow> latestByNode = new HashMap<>();
+    for (TaskQueueRow t : tasks) {
+      if ("EXECUTE_COMMAND".equals(t.type) && t.nodeId != null) {
+        latestByNode.put(t.nodeId, t); // chronological — last write wins
+      }
+    }
+    Set<String> pending = new HashSet<>();
+    for (TaskQueueRow t : latestByNode.values()) {
+      if (!TASK_TERMINAL.contains(t.status)) {
+        continue;
+      }
+      FlowNodeRow node = nodes.get(t.nodeId);
+      if (node == null || NODE_TERMINAL.contains(node.status)) {
+        continue; // already folded (or unknown) — nothing pending
+      }
+      if (TaskAttempts.attemptOf(t.payloadJson) < node.attempt) {
+        continue; // #125: superseded generation — not a verdict for the current attempt
+      }
+      pending.add(t.nodeId);
+      StageModel owner = PipelineNodes.findStage(model, t.nodeId);
+      if (owner != null) {
+        pending.add(owner.getId());
+      }
+    }
+    return pending;
   }
 
   // ── helpers ───────────────────────────────────────────────────────────
