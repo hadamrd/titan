@@ -14,6 +14,7 @@ import io.adaptiq.titan.auth.RequiresRole;
 import io.adaptiq.titan.auth.Roles;
 import io.adaptiq.titan.auth.ScopeKind;
 import io.adaptiq.titan.build.Build;
+import io.adaptiq.titan.build.BuildEnqueuer;
 import io.adaptiq.titan.build.BuildService;
 import io.adaptiq.titan.flow.model.ParameterModel;
 import io.adaptiq.titan.flow.model.PipelineModel;
@@ -23,10 +24,8 @@ import io.adaptiq.titan.job.Job;
 import io.adaptiq.titan.job.JobService;
 import io.adaptiq.titan.ratelimit.RateLimitDecision;
 import io.adaptiq.titan.ratelimit.TriggerRateLimiter;
-import io.adaptiq.titan.store.TaskQueueDao;
 import io.adaptiq.titan.store.TitanStores;
 import io.adaptiq.titan.store.rows.BuildRow;
-import io.adaptiq.titan.store.rows.TaskQueueRow;
 import io.quarkus.security.identity.SecurityIdentity;
 import jakarta.annotation.security.RolesAllowed;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -169,23 +168,10 @@ public class JobBuildsApi {
 
               long buildId = stores.builds().insert(conn, build);
 
-              // SYNTHESIZE is the design/38 §3 entry action: the controller dispatches a
-              // worker-side synthesis of titan.jobs.pipeline_script into pipeline_model_json,
-              // then enqueues BAKE. Enqueuing BAKE directly would fail in handleBake() with
-              // "bake: build N has no synthesized model — synthesize must run first" (closes
-              // #486).
-              TaskQueueRow task = new TaskQueueRow();
-              task.type = "ORCHESTRATE";
-              task.queueName = "default";
-              task.status = "QUEUED";
-              task.priority = 0;
-              task.payloadJson = "{\"action\":\"SYNTHESIZE\",\"buildId\":" + buildId + "}";
-              task.attempts = 0;
-              task.maxAttempts = 3;
-              task.visibilityTimeoutSeconds = 3600;
-              task.buildId = buildId;
-              task.availableAt = Instant.now();
-              TitanStores.onConnection(conn, TaskQueueDao.class, dao -> dao.insert(task));
+              // The shared entry-task contract (SYNTHESIZE action, priority, lease) lives in
+              // BuildEnqueuer — see its javadoc for the design/38 §3 rationale (closes #486,
+              // #106).
+              BuildEnqueuer.enqueueSynthesizeEntryTask(conn, buildId);
 
               return new TriggerBuildResponse(buildId, buildNumber, "QUEUED");
             });

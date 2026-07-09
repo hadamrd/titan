@@ -1,19 +1,13 @@
 package io.adaptiq.titan.trigger.engine;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import edu.umd.cs.findbugs.annotations.CheckForNull;
 import edu.umd.cs.findbugs.annotations.NonNull;
-import io.adaptiq.titan.db.TitanDataException;
-import io.adaptiq.titan.store.TaskQueueDao;
+import io.adaptiq.titan.build.BuildEnqueuer;
 import io.adaptiq.titan.store.TitanStores;
 import io.adaptiq.titan.store.rows.BuildRow;
 import io.adaptiq.titan.store.rows.JobTriggerRow;
-import io.adaptiq.titan.store.rows.TaskQueueRow;
 import java.sql.Connection;
 import java.time.Instant;
-import java.util.UUID;
 
 /**
  * Db-backed {@link TriggerScope} — the engine's view of one job's trigger state, bound to the
@@ -25,8 +19,6 @@ import java.util.UUID;
  * duration of the {@code inLockedScope} callback.
  */
 final class DbTriggerScope implements TriggerScope {
-
-  private static final ObjectMapper MAPPER = new ObjectMapper();
 
   private final Connection conn;
   private final TitanStores stores;
@@ -61,26 +53,11 @@ final class DbTriggerScope implements TriggerScope {
     build.triggerType = "TitanTimerCause";
     long buildId = stores.builds().insert(conn, build);
 
-    TaskQueueRow task = new TaskQueueRow();
-    task.type = "ORCHESTRATE";
-    task.queueName = "default";
-    task.status = "QUEUED";
-    task.priority = 5;
-    task.attempts = 0;
-    task.maxAttempts = 3;
-    task.visibilityTimeoutSeconds = 300;
-    task.buildId = buildId;
-    task.taskToken = UUID.randomUUID();
-    task.availableAt = Instant.now();
-    task.createdAt = Instant.now();
-    try {
-      ObjectNode payload = MAPPER.createObjectNode();
-      payload.put("buildId", buildId);
-      task.payloadJson = MAPPER.writeValueAsString(payload);
-    } catch (JsonProcessingException e) {
-      throw new TitanDataException("Failed to serialize trigger task payload", e);
-    }
-    TitanStores.onConnection(conn, TaskQueueDao.class, dao -> dao.insert(task));
+    // Issue #106: this used to hand-roll the ORCHESTRATE row with a {"buildId":N} payload — no
+    // "action" key — so every cron-fired build fail-closed in QueueProcessor.dispatch with
+    // "unknown orchestration action 'null'" before the worker ever saw it. The shared helper is
+    // the single definition of the entry-task contract (action=SYNTHESIZE, priority, lease).
+    BuildEnqueuer.enqueueSynthesizeEntryTask(conn, buildId);
   }
 
   @Override
