@@ -61,6 +61,7 @@ All read from the environment (`WorkerConfig`).
 | `TITAN_WORKSPACE` | workspace root | required unless `TITAN_DEV_MODE=true` |
 | `TITAN_LIBRARIES_ROOT` | shared-library cache root | required unless `TITAN_DEV_MODE=true` |
 | `TITAN_WORKSPACE_HOST_ROOT` | Docker-out-of-Docker host-path translation | empty (identity) |
+| `TITAN_WORKSPACE_ORPHAN_TTL_MS` | TTL (ms) before a workspace whose build row is gone is reaped; non-numeric or non-positive values are WARN-ed and the default is used | `86400000` (24 h) |
 | `TITAN_DEV_MODE` | allow tmpdir workspace/library fallback | `false` |
 | `TITAN_POLL_MS` | task poll interval (ms) | `1000` |
 | `TITAN_HEARTBEAT_MS` | heartbeat interval (ms) | `10000` |
@@ -141,6 +142,7 @@ Credentials are envelope-encrypted; the KEK comes from a `CredentialKeyProvider`
 | `…rate.idle-eviction-seconds` (`TITAN_TRIGGER_RATE_IDLE_EVICTION_SECONDS`) | idle bucket eviction | `3600` |
 | `quarkus.scheduler.titan.discovery.every` (`TITAN_DISCOVERY_EVERY`) | SCM discovery poll cadence | `1m` |
 | `quarkus.scheduler.titan.agent-reaper.every` (`TITAN_AGENT_REAPER_EVERY`) | agent-reaper cadence | `30s` |
+| `TITAN_QUEUE_DISPATCH_THREADS` | per-tick queue-dispatch parallelism (parallelism unit is the build; same-build tasks stay serial); floor `1`, invalid values are WARN-ed and the default is used | `8` |
 | `titan.agent-reaper.stale-seconds` (`TITAN_AGENT_REAPER_STALE_SECONDS`) | online→offline staleness | `90` |
 | `LOOP_NO_WORKER_TIMEOUT_S` | no-worker build timeout (5–3600) | `60` |
 | `LOOP_TRANSITION_SOFT_CAP` | transition-spam soft cap (warn) | `200` |
