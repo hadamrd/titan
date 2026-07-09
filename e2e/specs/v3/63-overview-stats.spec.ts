@@ -12,10 +12,9 @@
  * to prove that at rig level is to run a KNOWN workload through the real
  * engine and assert the stats move by exactly that delta.
  *
- * Strategy — own jobs, real builds, diff-based oracles
- * ────────────────────────────────────────────────────
- *   1. Capture /api/v1/stats BEFORE seeding (the diff baseline).
- *   2. Create two purpose-built jobs with unique-per-run names:
+ * Strategy — own jobs, real builds, race-free oracles (#140)
+ * ──────────────────────────────────────────────────────────
+ *   1. Create two purpose-built jobs with unique-per-run names:
  *        - e2e-ov-pass-<runTag>: `sh: echo …` → SUCCESS, run N=2 builds.
  *        - e2e-ov-fail-<runTag>: `sh: … exit 1` → FAILED, run M=3 builds.
  *      M=3 is load-bearing: TopFailingJobDao's HAVING clause only surfaces
@@ -24,26 +23,36 @@
  *      appear. The failure is deterministic (`exit 1` — the pattern spec 25
  *      documents as the fallback when a "missing binary" failure stops being
  *      deterministic).
- *   3. Drive all 5 builds through the REAL worker to terminal, hard-assert
+ *   2. Drive all 5 builds through the REAL worker to terminal, hard-assert
  *      the expected statuses (2× SUCCESS, 3× FAILED).
- *   4. API oracles — every assertion is either diff-based (before/after,
- *      tolerant to concurrent specs adding rows: `>=`, never `===` on
- *      cluster-wide counters) or ownership-scoped (exact `===` only on rows
- *      keyed by our unique job names):
- *        - stats.buildsToday grew by ≥ N+M (buildsToday counts queued-since-
+ *   3. API oracles — every assertion is a monotone lower bound, a same-beat
+ *      consistency check, or ownership-scoped (exact `===` only on rows
+ *      keyed by our unique job names). A before/after DIFF on a global
+ *      counter is racy by construction on the self-cleaning suite (#140):
+ *      every neighbor spec DELETEs its builds in teardown, so the
+ *      cluster-wide count legally SHRINKS between the two reads — `>=`
+ *      tolerance covers concurrent additions only, not deletions.
+ *        - stats.buildsToday ≥ N+M — a lower bound backed purely by rows WE
+ *          own: our builds were queued after UTC midnight and still exist
+ *          (teardown runs later), so no foreign insert OR delete can push
+ *          the global counter below it. (buildsToday counts queued-since-
  *          UTC-midnight, so this is skipped — annotated, not silently — in
- *          the ~1/720 run that straddles a UTC midnight rollover).
+ *          the ~1/720 run that straddles a UTC midnight rollover.)
  *        - stats.successRate ∈ [0, 1) — strict <1 is sound: our M FAILED
- *          builds finished inside the 24h window, so a 1.0 success rate
- *          would be a lie.
+ *          builds finished inside the 24h success-rate window, so a 1.0
+ *          success rate would be a lie.
  *        - /activity contains EXACTLY our N+M builds under our job names,
- *          with the right per-build terminal status.
+ *          with the right per-build terminal status — the ownership-scoped
+ *          "our builds really are counted" oracle.
  *        - /jobs/top-failing?since=24h lists the fail job with
  *          totalBuilds=3, failedBuilds=3, failureRate=1.0 and a
  *          lastFailedBuildId that is one of OUR build ids — and does NOT
  *          list the pass job.
- *   5. UI oracles — the Overview route renders the same truths:
- *        - kpi-builds tile ≥ baseline + N+M (same midnight guard),
+ *   4. UI oracles — the Overview route renders the same truths:
+ *        - kpi-builds tile == /api/v1/stats buildsToday read in the SAME
+ *          poll beat (no-lies consistency: the tile mirrors the API, never
+ *          a baseline captured minutes earlier), and the matched value
+ *          honors the ≥ N+M ownership lower bound (same midnight guard),
  *        - kpi-fail-rate tile shows a real percentage (never "—"/"no data"
  *          once terminal builds exist),
  *        - the Top-failing card renders the fail job's row with the exact
@@ -58,7 +67,8 @@
  * Both jobs + all builds are created by THIS spec under unique-per-run
  * names; `finally{}` tears down via `safeDeleteJobCascade` (cancel →
  * terminal wait → lease drain → scoped delete). Zero litter. Reads of
- * foreign rows (the cluster-wide stats) are diff-based and never mutated.
+ * foreign rows (the cluster-wide stats) are bounds/consistency checks and
+ * never mutated.
  */
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken, loginViaKeycloak } from '../../fixtures/auth-v3'
@@ -229,7 +239,7 @@ async function collectOwnedActivity(
   return found
 }
 
-/** UTC calendar day marker — guards the buildsToday diff across a midnight rollover. */
+/** UTC calendar day marker — guards the buildsToday lower bound across a midnight rollover. */
 function utcDay(): string {
   return new Date().toISOString().slice(0, 10)
 }
@@ -256,15 +266,15 @@ test.describe('v3 overview dashboard stats @golden (closes #138)', () => {
       await loginViaKeycloak(page, ENV)
       const bearer = await fetchBearerToken(ENV)
 
-      // ── 1. Baseline BEFORE seeding — the diff anchor. ───────────────────────
-      const dayBefore = utcDay()
-      const statsBefore = await getStats(request, bearer)
-
-      // ── 2. Create the two owned jobs. ───────────────────────────────────────
+      // ── 1. Create the two owned jobs. ───────────────────────────────────────
       passJobId = await createJob(request, bearer, passJobName, PASS_PIPELINE)
       failJobId = await createJob(request, bearer, failJobName, FAIL_PIPELINE)
 
-      // ── 3. Trigger N success + M failed builds; drive to terminal. ─────────
+      // ── 2. Trigger N success + M failed builds; drive to terminal. ─────────
+      // UTC day at queue time — if it still matches after the builds finish,
+      // all N+M owned builds count toward buildsToday (queued-since-UTC-
+      // midnight semantics) and the lower-bound oracles below are exact.
+      const dayQueued = utcDay()
       const passBuildIds: number[] = []
       for (let i = 0; i < N_SUCCESS; i++) {
         passBuildIds.push(await triggerBuild(request, bearer, passJobId))
@@ -290,25 +300,28 @@ test.describe('v3 overview dashboard stats @golden (closes #138)', () => {
           `got ${JSON.stringify(failStatuses)}`,
       ).toEqual(Array(M_FAILED).fill('FAILED'))
 
-      // ── 4a. /api/v1/stats — diff-based. ─────────────────────────────────────
+      // ── 3a. /api/v1/stats — race-free oracles (#140). ───────────────────────
+      // NOT a before/after diff: on the self-cleaning suite every neighbor
+      // spec DELETEs its builds in teardown, so a global counter legally
+      // shrinks between two reads — `after >= before + N+M` flaked on exactly
+      // that (2026-07-09 smoke, before=20 after=24). The lower bound below is
+      // backed purely by rows WE own — queued today, torn down only in
+      // finally{} — so no foreign insert or delete can falsify it.
       const statsAfter = await getStats(request, bearer)
       const dayAfter = utcDay()
-      if (dayBefore === dayAfter) {
-        // buildsToday counts queued-since-UTC-midnight; concurrent specs can
-        // only ADD to it inside the same day, so >= baseline + N+M is exact
-        // on our delta and tolerant to foreign rows.
+      if (dayQueued === dayAfter) {
         expect(
           statsAfter.buildsToday,
-          `stats.buildsToday must grow by ≥ ${N_SUCCESS + M_FAILED} ` +
-            `(before=${statsBefore.buildsToday}, after=${statsAfter.buildsToday}) — ` +
-            `the KPI is not counting real builds`,
-        ).toBeGreaterThanOrEqual(statsBefore.buildsToday + N_SUCCESS + M_FAILED)
+          `stats.buildsToday=${statsAfter.buildsToday} must be ≥ ${N_SUCCESS + M_FAILED} — ` +
+            `our ${N_SUCCESS + M_FAILED} builds were queued after UTC midnight and still ` +
+            `exist, so the KPI is not counting real builds`,
+        ).toBeGreaterThanOrEqual(N_SUCCESS + M_FAILED)
       } else {
         test.info().annotations.push({
           type: 'note',
           description:
-            `UTC day rolled over mid-test (${dayBefore} → ${dayAfter}); ` +
-            `buildsToday diff assertion skipped — window semantics reset at midnight.`,
+            `UTC day rolled over mid-test (${dayQueued} → ${dayAfter}); ` +
+            `buildsToday lower-bound assertion skipped — window semantics reset at midnight.`,
         })
       }
       // Our M FAILED builds finished inside the 24h success-rate window, so a
@@ -321,7 +334,7 @@ test.describe('v3 overview dashboard stats @golden (closes #138)', () => {
       expect(statsAfter.successRate).toBeGreaterThanOrEqual(0)
       expect(statsAfter.medianDurationMs).toBeGreaterThanOrEqual(0)
 
-      // ── 4b. /api/v1/activity — ownership-scoped, exact. ────────────────────
+      // ── 3b. /api/v1/activity — ownership-scoped, exact. ────────────────────
       const owned = await collectOwnedActivity(request, bearer, new Set([passJobName, failJobName]))
       const ownedSummary = JSON.stringify(
         owned.map((i) => ({ job: i.jobName, buildId: i.buildId, status: i.status })),
@@ -343,7 +356,7 @@ test.describe('v3 overview dashboard stats @golden (closes #138)', () => {
         expect(item.durationMs, `activity item ${item.id} durationMs`).toBeGreaterThanOrEqual(0)
       }
 
-      // ── 4c. /api/v1/jobs/top-failing — ownership-scoped, exact. ────────────
+      // ── 3c. /api/v1/jobs/top-failing — ownership-scoped, exact. ────────────
       const topResp = await apiJson<TopFailingJobDto[]>(
         request,
         bearer,
@@ -376,29 +389,49 @@ test.describe('v3 overview dashboard stats @golden (closes #138)', () => {
         `${passJobName} has zero failures and must not appear in top-failing`,
       ).toBeUndefined()
 
-      // ── 5. The Overview dashboard renders the same truths. ─────────────────
+      // ── 4. The Overview dashboard renders the same truths. ─────────────────
       await page.goto(`${ENV.uiBaseUrl}/`)
       await expect(page.getByTestId('overview-page')).toBeVisible({ timeout: 15_000 })
 
-      // kpi-builds tile ≥ baseline + N+M (same midnight guard as the API diff).
-      if (dayBefore === utcDay()) {
-        await expect
-          .poll(
-            async () => {
-              const txt = await page
-                .locator('[data-testid="kpi-builds"] .metric-value')
-                .textContent()
-              const n = Number((txt ?? '').trim())
-              return Number.isFinite(n) ? n : -1
-            },
-            {
-              timeout: 15_000,
-              message:
-                `kpi-builds tile must show ≥ ${statsBefore.buildsToday + N_SUCCESS + M_FAILED} ` +
-                `(baseline ${statsBefore.buildsToday} + our ${N_SUCCESS + M_FAILED} real builds)`,
-            },
-          )
-          .toBeGreaterThanOrEqual(statsBefore.buildsToday + N_SUCCESS + M_FAILED)
+      // kpi-builds: no-lies consistency — the tile must equal the API's
+      // buildsToday when both are read in the SAME poll beat (#140). Comparing
+      // the tile against a baseline captured minutes earlier is racy: neighbor
+      // teardowns shrink the global count in between. The tile fetches on page
+      // load and refetches every 30s (useStats refetchInterval), so the first
+      // beats usually match; the 90s budget rides out ≥2 refetch cycles when a
+      // neighbor mutates the count between the tile's fetch and ours.
+      let sameBeatBuilds = -1
+      await expect
+        .poll(
+          async () => {
+            const txt = (
+              await page.locator('[data-testid="kpi-builds"] .metric-value').textContent()
+            )?.trim()
+            const ui = Number(txt)
+            const api = (await getStats(request, bearer)).buildsToday
+            if (Number.isFinite(ui) && ui === api) {
+              sameBeatBuilds = api
+              return 'UI == API'
+            }
+            return `UI="${txt ?? ''}" API=${api}`
+          },
+          {
+            timeout: 90_000,
+            message:
+              'kpi-builds tile never equaled /api/v1/stats buildsToday in the same beat — ' +
+              'the KPI is rendering something other than the stats endpoint',
+          },
+        )
+        .toBe('UI == API')
+      // The same-beat value honors the ownership lower bound (same midnight
+      // guard as the API oracle): the tile can never show fewer builds than
+      // the N+M we own — queued today, still present until finally{}.
+      if (dayQueued === utcDay()) {
+        expect(
+          sameBeatBuilds,
+          `kpi-builds shows ${sameBeatBuilds} — must be ≥ our ${N_SUCCESS + M_FAILED} owned ` +
+            `builds queued today`,
+        ).toBeGreaterThanOrEqual(N_SUCCESS + M_FAILED)
       }
 
       // kpi-fail-rate must be a real percentage — never "—"/"no data yet" once
