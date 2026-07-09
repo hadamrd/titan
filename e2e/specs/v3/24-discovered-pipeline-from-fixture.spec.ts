@@ -41,6 +41,7 @@ import { test, expect, type Page, type APIRequestContext } from '@playwright/tes
 import yaml from 'js-yaml'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
 import { readFixtureYaml } from '../../fixtures/fixture-files'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -148,7 +149,11 @@ test.describe('v3 discovered-pipeline-from-fixture @golden', () => {
     page,
     request,
   }) => {
-    test.setTimeout(120_000)
+    // 120s test budget + headroom for the finally{} teardown: the fixture's
+    // containerised stages may still be RUNNING when the assertions finish
+    // (this spec deliberately proves wiring, not runtime), so the teardown has
+    // to cancel + wait for terminal status + lease drain before deleting.
+    test.setTimeout(240_000)
 
     // ── 1. Read the vendored fixture YAML (we'll persist this as the job's
     // pipelineScript and use it as the oracle for expected stage names). ─────
@@ -435,6 +440,30 @@ test.describe('v3 discovered-pipeline-from-fixture @golden', () => {
     } catch (err) {
       await dump('assertion-failure')
       throw err
+    } finally {
+      // #65: pre-fix this spec LEAKED its job + build + credential on every
+      // run. Because the fixture's containerised stages never finish on the
+      // dev rig, the leaked builds sat RUNNING forever (248/277/297/… on the
+      // long-running rig), polluting every later spec's in-flight assertions.
+      // safeDeleteJobCascade (#59) cancels the live build via the public API,
+      // waits (bounded) for terminal status + task-lease drain, and only then
+      // deletes — never yanking a CLAIMED/PROCESSING task_queue row out from
+      // under the worker. If the lease never drains it deletes nothing; the
+      // per-run unique job name keeps such orphans from colliding.
+      if (jobId && jobId > 0) {
+        await safeDeleteJobCascade(request, jobId, {
+          terminalBudgetMs: 60_000,
+          drainBudgetMs: 30_000,
+        })
+      }
+      // #83 sweep: the e2e-webhook-* credential is this spec's own row.
+      if (bearer && credentialId && credentialId > 0) {
+        await request
+          .delete(`${API_BASE}/api/v1/credentials/${credentialId}`, {
+            headers: { Authorization: `Bearer ${bearer}` },
+          })
+          .catch(() => undefined)
+      }
     }
   })
 })
