@@ -608,8 +608,14 @@ describe('Queue route /queue', () => {
     await waitFor(() =>
       expect(screen.getByText(/1 task waiting for a worker/i)).toBeInTheDocument(),
     )
-    // Row priority chip + drag handle accessible label
-    expect(screen.getByText(`P${SEED_QUEUE_ENTRY.priority}`)).toBeInTheDocument()
+    // Row priority chip + drag handle accessible label. Await the row: the
+    // page header renders straight from the query `data`, but rows render
+    // from the `localOrder` useState mirror that syncs one effect-flush
+    // later (queue.tsx) — asserting synchronously after the subtitle races
+    // that commit under load.
+    expect(
+      await screen.findByText(`P${SEED_QUEUE_ENTRY.priority}`),
+    ).toBeInTheDocument()
     expect(
       screen.getByRole('button', {
         name: new RegExp(`drag to reorder task ${SEED_QUEUE_ENTRY.taskId}`, 'i'),

@@ -5,8 +5,10 @@
  *  1. Same build vs itself → every delta is 0/'=', no NaN, no crashes
  *  2. Different jobs → muted '(different jobs — comparison may not be
  *     meaningful)' banner present, table still renders
- *  3. Stage in A absent in B → row shows A's value + '—' on B, delta '—'
- *  4. Stage in B absent in A → '—' on A side + B's value, delta '—'
+ *  3. Stage in A absent in B → row shows A's value + '—' on B, delta cell
+ *     carries the explicit 'Removed in B' presence label (#1077)
+ *  4. Stage in B absent in A → '—' on A side + B's value, delta cell
+ *     carries the explicit 'Added in B' presence label (#1077)
  *  5. Empty stage list both sides → muted empty-state placeholder
  *
  * Plus a happy-path delta check (B slower than A → '+45s').
@@ -119,7 +121,7 @@ describe('BuildCompareView', () => {
     expect(screen.getByTestId('compare-row-build')).toBeInTheDocument()
   })
 
-  it('stage in A absent in B (removed) → row shows A value + em-dash on B; delta em-dash', () => {
+  it('stage in A absent in B (removed) → row shows A value + em-dash on B; delta labels "Removed in B"', () => {
     const a = build({ id: 1, jobId: 1 })
     const b = build({ id: 2, jobId: 1 })
     const nodesA: FlowNodeDto[] = [
@@ -133,18 +135,20 @@ describe('BuildCompareView', () => {
     render(
       <BuildCompareView buildA={a} buildB={b} nodesA={nodesA} nodesB={nodesB} />,
     )
-    // A-only stage row: B cell is em-dash, delta em-dash.
+    // A-only stage row: B cell is em-dash; the delta cell carries the
+    // explicit presence label instead of a numeric delta (#1077).
     const aCell = screen.getByTestId('compare-cell-a-lint')
     const bCell = screen.getByTestId('compare-cell-b-lint')
     const delta = screen.getByTestId('compare-delta-lint')
     expect(aCell.textContent).toMatch(/SUCCESS/)
     expect(bCell.textContent?.trim()).toBe('—')
-    expect(delta.textContent?.trim()).toBe('—')
+    expect(delta.textContent?.trim()).toBe('Removed in B')
+    expect(delta.textContent).not.toMatch(/[+-]\d/)
     // Sibling row still paired up.
     expect(screen.getByTestId('compare-delta-build').textContent?.trim()).toBe('=')
   })
 
-  it('stage in B absent in A (added) → em-dash on A + B value', () => {
+  it('stage in B absent in A (added) → em-dash on A + B value; delta labels "Added in B"', () => {
     const a = build({ id: 1, jobId: 1 })
     const b = build({ id: 2, jobId: 1 })
     const nodesA: FlowNodeDto[] = [
@@ -162,7 +166,9 @@ describe('BuildCompareView', () => {
     const delta = screen.getByTestId('compare-delta-deploy')
     expect(aCell.textContent?.trim()).toBe('—')
     expect(bCell.textContent).toMatch(/SUCCESS/)
-    expect(delta.textContent?.trim()).toBe('—')
+    // Presence label instead of a numeric delta (#1077).
+    expect(delta.textContent?.trim()).toBe('Added in B')
+    expect(delta.textContent).not.toMatch(/[+-]\d/)
   })
 
   it('empty stage list on both → muted empty-state placeholder', () => {
