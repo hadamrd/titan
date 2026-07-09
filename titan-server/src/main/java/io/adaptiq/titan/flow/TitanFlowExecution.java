@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.annotations.Nullable;
+import io.adaptiq.titan.build.BuildStateChangedEvent;
 import io.adaptiq.titan.flow.expr.WhenEvaluator;
 import io.adaptiq.titan.flow.model.GateModel;
 import io.adaptiq.titan.flow.model.PipelineModel;
@@ -22,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -95,11 +97,34 @@ public final class TitanFlowExecution {
 
   private final TitanStores daos;
   private final long buildId;
+
+  /**
+   * Post-commit sink for the QUEUED→RUNNING {@link BuildStateChangedEvent} (issue #99). The
+   * production constructor wires the CDI event bus via programmatic Arc lookup — mirroring {@code
+   * BuildCloser}'s terminal emit — so SCM status reporters observe the worker-pickup transition.
+   * Tests inject their own consumer.
+   */
+  @NonNull private final Consumer<BuildStateChangedEvent> stateChangedSink;
+
   private PipelineModel model; // cached after bake / lazy load
 
   public TitanFlowExecution(@NonNull TitanStores daos, long buildId) {
+    this(daos, buildId, TitanFlowExecution::fireViaArc);
+  }
+
+  /**
+   * Test seam — inject an explicit {@link BuildStateChangedEvent} sink (e.g. a list collector, or a
+   * real SCM reporter's observer method) so the QUEUED→RUNNING emit of {@link #bake()} can be
+   * exercised outside a CDI container. Production code uses the two-arg constructor, which fires on
+   * the CDI event bus.
+   */
+  public TitanFlowExecution(
+      @NonNull TitanStores daos,
+      long buildId,
+      @NonNull Consumer<BuildStateChangedEvent> stateChangedSink) {
     this.daos = daos;
     this.buildId = buildId;
+    this.stateChangedSink = stateChangedSink;
   }
 
   // ── Synthesize ────────────────────────────────────────────────────────
@@ -166,6 +191,12 @@ public final class TitanFlowExecution {
    * like the pre-design/38 monolithic bake did — that column is now written by the earlier
    * synthesis phase.)
    *
+   * <p>After the transaction commits, a bake whose {@code activateIfQueued} CAS actually flipped
+   * the build QUEUED→RUNNING fires a {@link BuildStateChangedEvent} with {@code newStatus =
+   * "RUNNING"} (issue #99) — exactly once, best-effort — so SCM status reporters (GitHub / GitLab /
+   * Bitbucket / Pulsar) observe the worker-pickup transition the same way they observe terminal
+   * ones via {@code BuildCloser}.
+   *
    * @return {@link BakeResult#BAKED} if this call baked it, {@link BakeResult#ALREADY_BAKED} if an
    *     earlier delivery already did.
    * @throws IllegalStateException if the build has no synthesized model — synthesize must run
@@ -208,6 +239,7 @@ public final class TitanFlowExecution {
 
     // Effective params + every flow_nodes row + the RUNNING transition commit together.
     // `when:` is evaluated against the effective (defaults-applied) params.
+    boolean[] activated = new boolean[1];
     daos.withTransaction(
         conn -> {
           materialise(conn, parsed, stageSkipped);
@@ -216,7 +248,8 @@ public final class TitanFlowExecution {
               BuildDao.class,
               b -> {
                 b.updateParametersJson(buildId, effectiveParamsJson);
-                if (!b.activateIfQueued(buildId, Instant.now())) {
+                activated[0] = b.activateIfQueued(buildId, Instant.now());
+                if (!activated[0]) {
                   LOGGER.log(
                       Level.WARNING,
                       "[titan] build {0} was not QUEUED at bake — status left as-is",
@@ -226,6 +259,17 @@ public final class TitanFlowExecution {
               });
           return null;
         });
+
+    // Issue #99: the QUEUED→RUNNING flip above is a direct DAO write — it never passes through
+    // BuildServiceImpl.update, so without this emit no BuildStateChangedEvent(RUNNING) ever fires
+    // on the live engine and every SCM status reporter's in_progress signal is dead code. Fire
+    // exactly once: only when the activateIfQueued CAS actually flipped the row (a re-delivered
+    // BAKE short-circuits on the existing DAG above; a non-QUEUED build loses the CAS), and only
+    // AFTER the bake transaction has committed so no observer can see a RUNNING build whose DAG
+    // is not yet durable.
+    if (activated[0]) {
+      fireRunningStateChanged();
+    }
 
     this.model = parsed;
     LOGGER.log(
@@ -441,6 +485,50 @@ public final class TitanFlowExecution {
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────
+
+  /**
+   * Best-effort post-commit emit of the QUEUED→RUNNING {@link BuildStateChangedEvent} (issue #99).
+   * Mirrors {@code BuildCloser#fireStateChangedEvent}: the fresh row read supplies the trigger
+   * provenance observers filter on, and the whole dispatch is wrapped so a sink failure (no CDI
+   * container in raw JUnit, a throwing observer chain) never fails a bake that has already
+   * committed.
+   */
+  private void fireRunningStateChanged() {
+    try {
+      daos.builds()
+          .findById(buildId)
+          .ifPresent(
+              fresh ->
+                  stateChangedSink.accept(
+                      new BuildStateChangedEvent(
+                          fresh.id,
+                          "RUNNING",
+                          fresh.triggerType,
+                          fresh.triggerMetaJson,
+                          fresh.jobId,
+                          fresh.buildNumber)));
+    } catch (RuntimeException ee) {
+      LOGGER.log(
+          Level.FINE,
+          "[titan] build {0}: RUNNING state-change event dispatch failed: {1}",
+          new Object[] {buildId, ee.getMessage()});
+    }
+  }
+
+  /**
+   * Default production sink — fire on the CDI event bus via programmatic Arc lookup, exactly like
+   * {@code BuildCloser}'s terminal emit (PR #895): the bake path runs from the {@code
+   * QueueProcessor}, outside any CDI bean, so constructor injection of {@code
+   * Event<BuildStateChangedEvent>} is not available. {@code Arc.container()} throws in raw JUnit;
+   * {@link #fireRunningStateChanged()} catches it.
+   */
+  private static void fireViaArc(@NonNull BuildStateChangedEvent evt) {
+    io.quarkus.arc.Arc.container()
+        .beanManager()
+        .getEvent()
+        .select(BuildStateChangedEvent.class)
+        .fire(evt);
+  }
 
   /**
    * A {@code when:} stage is skipped when its expression evaluates false against {@code params}.
