@@ -19,6 +19,12 @@
  *   - adversarial: typing `.*?` (regex special chars) treated literally
  *     — no error toast, counter shows 0 of 0 (or matches if a literal match
  *     existed in the seed; titan-hello#1 has none).
+ *
+ * @golden promotion audit (#123): READ-ONLY against the seeded titan-hello#1
+ * build (pgClient does a single SELECT; the ownership rule explicitly allows
+ * reads of foreign rows). Creates no rows, mutates nothing, needs no
+ * teardown; the seed dependency is the same contract 00-seed-guard and
+ * 10-log-stream already enforce. Deterministic — Playwright waiters only.
  */
 import { test, expect } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
@@ -49,7 +55,9 @@ test.beforeAll(async () => {
   }
 })
 
-test.describe('v3 in-log search (#1097)', () => {
+// NOTE: @golden must precede the "(#1097)" parenthetical — the golden-count
+// helper's regex stops at the first `)` in the title line.
+test.describe('v3 in-log search @golden (#1097)', () => {
   test.beforeEach(async ({ page }) => {
     await loginViaKeycloak(page, ENV)
     await page.goto(`${ENV.uiBaseUrl}/builds/${helloBuildId}`)
