@@ -82,7 +82,7 @@ import * as crypto from 'node:crypto'
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken, loginViaKeycloak } from '../../fixtures/auth-v3'
 import { readFixtureYaml } from '../../fixtures/fixture-files'
-import { pgClient } from '../../fixtures/seed-v3'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -294,36 +294,45 @@ async function setupJobWithTriggers(
   ).toBe(201)
   const credentialId = (JSON.parse(credRaw) as CredentialCreateResp).id
 
-  const fullName = `e2e-burst-${runTag}`
-  const triggersConfig = {
-    triggers: [
-      {
-        type: 'github',
-        id: 'github-1',
-        branches,
-        events: ['push'],
-        credentialsId: credKey,
+  // #83 sweep: a failed job create below previously LEAKED the credential —
+  // the caller's finally{} only deletes ids it received, and setup threw
+  // before returning them (this is where the rig's e2e-burst-* leftovers
+  // came from). Delete the credential before rethrowing.
+  try {
+    const fullName = `e2e-burst-${runTag}`
+    const triggersConfig = {
+      triggers: [
+        {
+          type: 'github',
+          id: 'github-1',
+          branches,
+          events: ['push'],
+          credentialsId: credKey,
+        },
+      ],
+    }
+    const jobResp = await api.post(`${API_BASE}/api/v1/jobs`, {
+      headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
+      data: {
+        fullName,
+        displayName: `E2E burst (#961) ${runTag}`,
+        pipelineScript: fixtureYaml,
+        configJson: JSON.stringify(triggersConfig),
+        enabled: true,
       },
-    ],
-  }
-  const jobResp = await api.post(`${API_BASE}/api/v1/jobs`, {
-    headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
-    data: {
-      fullName,
-      displayName: `E2E burst (#961) ${runTag}`,
-      pipelineScript: fixtureYaml,
-      configJson: JSON.stringify(triggersConfig),
-      enabled: true,
-    },
-  })
-  const jobRaw = await jobResp.text()
-  expect(
-    jobResp.status(),
-    `POST /jobs HTTP ${jobResp.status()} body=${jobRaw.slice(0, 600)}`,
-  ).toBe(201)
-  const jobId = (JSON.parse(jobRaw) as JobCreateResp).id
+    })
+    const jobRaw = await jobResp.text()
+    expect(
+      jobResp.status(),
+      `POST /jobs HTTP ${jobResp.status()} body=${jobRaw.slice(0, 600)}`,
+    ).toBe(201)
+    const jobId = (JSON.parse(jobRaw) as JobCreateResp).id
 
-  return { credentialId, jobId, fullName, credKey, secret }
+    return { credentialId, jobId, fullName, credKey, secret }
+  } catch (err) {
+    await cleanup(api, bearer, undefined, credentialId)
+    throw err
+  }
 }
 
 /** Read the vendored simple-build fixture YAML from disk (hermetic — #48). */
@@ -340,36 +349,13 @@ async function cleanup(
   credentialId: number | undefined,
 ): Promise<void> {
   if (jobId && jobId > 0) {
-    const client = pgClient()
-    await client.connect()
-    try {
-      const buildIdsRes = await client.query<{ id: string }>(
-        `SELECT id::text AS id FROM titan.builds WHERE job_id = $1`,
-        [jobId],
-      )
-      const buildIds = buildIdsRes.rows.map((r) => Number(r.id))
-      if (buildIds.length > 0) {
-        await client
-          .query(`DELETE FROM titan.approvals WHERE build_id = ANY($1::bigint[])`, [buildIds])
-          .catch(() => undefined)
-        await client
-          .query(`DELETE FROM titan.test_result WHERE build_id = ANY($1::bigint[])`, [buildIds])
-          .catch(() => undefined)
-        await client
-          .query(`DELETE FROM titan.artifact WHERE build_id = ANY($1::bigint[])`, [buildIds])
-          .catch(() => undefined)
-        await client
-          .query(`DELETE FROM titan.flow_nodes WHERE build_id = ANY($1::bigint[])`, [buildIds])
-          .catch(() => undefined)
-        await client
-          .query(`DELETE FROM titan.task_queue WHERE build_id = ANY($1::bigint[])`, [buildIds])
-          .catch(() => undefined)
-        await client.query(`DELETE FROM titan.builds WHERE id = ANY($1::bigint[])`, [buildIds])
-      }
-      await client.query(`DELETE FROM titan.jobs WHERE id = $1`, [jobId])
-    } finally {
-      await client.end()
-    }
+    // #65: migrated off the raw-cascade SQL teardown. safeDeleteJobCascade
+    // (#59, fixtures/teardown-v3.ts) cancels any still-live build via the
+    // public API, waits (bounded) for terminal status + CLAIMED/PROCESSING
+    // task-lease drain, and only then deletes — never yanking a leased
+    // task_queue row out from under the worker (a burst spec is exactly the
+    // shape that leaves multiple leased rows behind on failure).
+    await safeDeleteJobCascade(api, jobId)
   }
   if (bearer && credentialId && credentialId > 0) {
     await api

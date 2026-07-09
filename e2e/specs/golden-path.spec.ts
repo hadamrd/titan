@@ -343,55 +343,69 @@ test.describe('golden-path UI @golden @sre @1166', () => {
     // A fresh structured sentinel per run so a stale log can never false-pass.
     const sentinel = `sentinel-redact-${randomBytes(6).toString('hex')}-canary`
 
-    // Seed the secret the fixture references (`${{ secrets.E2E_REDACTION_TOKEN }}`).
-    // A FAILED seed is an EXPLICIT error — never a silent skip (issue #1166).
-    await seedOrRotateCredential(request, bearer, 'E2E_REDACTION_TOKEN', sentinel)
+    // #83: the seeded credential is deleted in finally{} so an aborted or
+    // completed run never leaves a row that 400s the next run's create.
+    let credentialId: number | undefined
+    try {
+      // Seed the secret the fixture references (`${{ secrets.E2E_REDACTION_TOKEN }}`).
+      // A FAILED seed is an EXPLICIT error — never a silent skip (issue #1166).
+      credentialId = await seedOrRotateCredential(request, bearer, 'E2E_REDACTION_TOKEN', sentinel)
 
-    const jobId = await createJob(request, bearer, `gp-secret-${runTag}`, 'secret-redaction')
-    const buildId = await triggerBuild(request, bearer, jobId)
-    await pollTerminal(request, bearer, buildId)
+      const jobId = await createJob(request, bearer, `gp-secret-${runTag}`, 'secret-redaction')
+      const buildId = await triggerBuild(request, bearer, jobId)
+      await pollTerminal(request, bearer, buildId)
 
-    await openBuildDetail(page, buildId)
-    // Open the secret step's log panel.
-    const nodes = await fetchNodes(request, bearer, buildId)
-    const stage = findStage(nodes, 'use-secret')
-    if (stage) {
-      const row = page.locator(`[data-testid="tree-row-${stage.nodeId}"]`)
-      if (await row.count() > 0) await row.first().click()
+      await openBuildDetail(page, buildId)
+      // Open the secret step's log panel.
+      const nodes = await fetchNodes(request, bearer, buildId)
+      const stage = findStage(nodes, 'use-secret')
+      if (stage) {
+        const row = page.locator(`[data-testid="tree-row-${stage.nodeId}"]`)
+        if (await row.count() > 0) await row.first().click()
+      }
+      const logsTab = page.getByRole('tab', { name: /^logs$/i })
+      if (await logsTab.count() > 0) await logsTab.click()
+
+      const body = page.locator('[data-testid="terminal-body"]')
+      await expect(body, 'log panel (terminal-body) did not render').toBeVisible({ timeout: 20_000 })
+      const rendered = (await body.innerText()) ?? ''
+
+      // Capability gate: the env+secret RUNTIME (#1094) injects the value the
+      // masker then redacts. Until it lands the fixture's `${{ secrets.* }}` is
+      // a literal string (never injected, never masked). Detect that precisely
+      // and skip with a LOUD, dependency-naming reason — visible in the report,
+      // not a silent pass. (test.skip throws — the finally{} below still runs,
+      // so the credential is cleaned up even on the skip path.)
+      const runtimeAbsent = rendered.includes('${{ secrets') || rendered.includes('secrets.E2E_REDACTION_TOKEN')
+      test.skip(
+        runtimeAbsent,
+        'secret env-ref runtime (#1094) not active on this rig: the fixture\'s ' +
+          '`${{ secrets.E2E_REDACTION_TOKEN }}` is rendered as a literal, un-injected string. ' +
+          'Unskip when #1094 (env + secret refs runtime) lands.',
+      )
+
+      // The mask token fired and rendered.
+      expect(
+        rendered.includes('****'),
+        'the masked **** token never rendered in the log panel — redaction did not fire (or the step no-op\'d)',
+      ).toBe(true)
+
+      // Adversarial: the raw secret renders ZERO times — across the direct echo,
+      // the embedded curl line, the second use, AND the printenv export line.
+      const leakingLines = rendered.split('\n').filter((line) => line.includes(sentinel))
+      expect(
+        leakingLines,
+        `the raw secret rendered in ${leakingLines.length} log line(s) of the build-detail DOM: ${JSON.stringify(leakingLines)}`,
+      ).toEqual([])
+    } finally {
+      // #83: this test OWNS the E2E_REDACTION_TOKEN row it seeded/rotated —
+      // delete it so a leftover from ANY outcome (pass, fail, skip, abort
+      // after seed) can never 400 a later run's bare create. Best-effort:
+      // teardown must not mask the test's own verdict.
+      if (credentialId !== undefined) {
+        await deleteCredential(request, bearer, credentialId)
+      }
     }
-    const logsTab = page.getByRole('tab', { name: /^logs$/i })
-    if (await logsTab.count() > 0) await logsTab.click()
-
-    const body = page.locator('[data-testid="terminal-body"]')
-    await expect(body, 'log panel (terminal-body) did not render').toBeVisible({ timeout: 20_000 })
-    const rendered = (await body.innerText()) ?? ''
-
-    // Capability gate: the env+secret RUNTIME (#1094) injects the value the
-    // masker then redacts. Until it lands the fixture's `${{ secrets.* }}` is
-    // a literal string (never injected, never masked). Detect that precisely
-    // and skip with a LOUD, dependency-naming reason — visible in the report,
-    // not a silent pass.
-    const runtimeAbsent = rendered.includes('${{ secrets') || rendered.includes('secrets.E2E_REDACTION_TOKEN')
-    test.skip(
-      runtimeAbsent,
-      'secret env-ref runtime (#1094) not active on this rig: the fixture\'s ' +
-        '`${{ secrets.E2E_REDACTION_TOKEN }}` is rendered as a literal, un-injected string. ' +
-        'Unskip when #1094 (env + secret refs runtime) lands.',
-    )
-
-    // The mask token fired and rendered.
-    expect(
-      rendered.includes('****'),
-      'the masked **** token never rendered in the log panel — redaction did not fire (or the step no-op\'d)',
-    ).toBe(true)
-
-    // Adversarial: the raw secret renders ZERO times — across the direct echo,
-    // the embedded curl line, the second use, AND the printenv export line.
-    const leakingLines = rendered.split('\n').filter((line) => line.includes(sentinel))
-    expect(
-      leakingLines,
-      `the raw secret rendered in ${leakingLines.length} log line(s) of the build-detail DOM: ${JSON.stringify(leakingLines)}`,
-    ).toEqual([])
   })
 
   // ── D. PR check status: the customer-visible commit check matches the verdict ─
@@ -456,39 +470,72 @@ test.describe('golden-path UI @golden @sre @1166', () => {
 // ── credential seeding ───────────────────────────────────────────────────────
 
 interface CredentialDto { id: number; kind: string; scope: string; key: string }
-interface CredentialsPage { page: CredentialDto[]; total: number }
+interface CredentialsPage { items: CredentialDto[]; total: number }
 
 /**
  * Seed (or rotate) a `string` credential under the `global` scope so the
  * pipeline's `${{ secrets.<key> }}` reference resolves. Idempotent: a POST that
  * collides with an existing (scope,key) is rotated via PUT. Any other non-2xx
  * is an EXPLICIT throw — a silently-unseeded secret would make the redaction
- * assertion meaningless.
+ * assertion meaningless. Returns the row id so the caller can delete it in
+ * its finally{} (ownership discipline, issue #83).
+ *
+ * Wire-contract notes (issue #83 — all three broke the rotate path pre-fix):
+ *   - A duplicate (scope,key) surfaces as HTTP **400** with an "already
+ *     exists" detail: CredentialsApi#create maps the service's
+ *     IllegalArgumentException to ApiBadRequestException. We also accept 409
+ *     so a future status upgrade doesn't regress this helper.
+ *   - The list payload's page field is `items` (CredentialsPage record), not
+ *     `page`.
+ *   - PUT /credentials/{id} REQUIRES `kind` alongside `plaintext`
+ *     (UpdateCredentialRequest — the API 400s on a plaintext-only body).
  */
 async function seedOrRotateCredential(
   api: APIRequestContext,
   bearer: string,
   key: string,
   plaintext: string,
-): Promise<void> {
+): Promise<number> {
   const headers = { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' }
   const create = await api.post(`${API_BASE}/api/v1/credentials`, {
     headers,
     data: { kind: 'STRING', scope: 'global', key, plaintext },
   })
-  if (create.status() === 201) return
-  if (create.status() !== 409) {
-    throw new Error(`seeding credential '${key}' failed: HTTP ${create.status()} — ${(await create.text()).slice(0, 300)}`)
+  if (create.status() === 201) {
+    return (JSON.parse(await create.text()) as CredentialDto).id
+  }
+  const createBody = await create.text()
+  const isConflict =
+    create.status() === 409 ||
+    (create.status() === 400 && /already exists/i.test(createBody))
+  if (!isConflict) {
+    throw new Error(`seeding credential '${key}' failed: HTTP ${create.status()} — ${createBody.slice(0, 300)}`)
   }
   // Already present — rotate its value so this run's sentinel is the live one.
   const list = await apiGet<CredentialsPage>(api, bearer, `/api/v1/credentials?scope=global&limit=200`)
-  const existing = (list.body?.page ?? []).find((c) => c.key === key)
+  const existing = (list.body?.items ?? []).find((c) => c.key === key)
   if (!existing) {
-    throw new Error(`credential '${key}' reported as duplicate (409) but is absent from the list — cannot rotate`)
+    throw new Error(
+      `credential '${key}' reported as duplicate (HTTP ${create.status()}) but is absent from the list — cannot rotate`,
+    )
   }
   const put = await api.put(`${API_BASE}/api/v1/credentials/${existing.id}`, {
     headers,
-    data: { plaintext },
+    data: { kind: 'STRING', plaintext },
   })
   expect(put.status(), `rotating credential '${key}' (#${existing.id}) failed: ${await put.text()}`).toBeLessThan(300)
+  return existing.id
+}
+
+/** Best-effort credential delete for finally{} blocks — never throws. */
+async function deleteCredential(
+  api: APIRequestContext,
+  bearer: string,
+  credentialId: number,
+): Promise<void> {
+  await api
+    .delete(`${API_BASE}/api/v1/credentials/${credentialId}`, {
+      headers: { Authorization: `Bearer ${bearer}` },
+    })
+    .catch(() => undefined)
 }

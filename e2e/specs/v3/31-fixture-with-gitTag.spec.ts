@@ -62,6 +62,7 @@ import { test, expect, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken } from '../../fixtures/auth-v3'
 import { readFixtureYaml } from '../../fixtures/fixture-files'
 import { pgClient } from '../../fixtures/seed-v3'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -394,41 +395,13 @@ test.describe('v3 fixture-with-gitTag @golden', () => {
       // ── Cleanup: best-effort, idempotent, never throws past the boundary.
       // push:false in the fixture means no remote tag was created — nothing
       // to clean up on the GitHub side.
+      // #65: migrated off the raw-cascade SQL teardown. safeDeleteJobCascade
+      // (#59, fixtures/teardown-v3.ts) cancels any still-live build via the
+      // public API, waits (bounded) for terminal status + CLAIMED/PROCESSING
+      // task-lease drain, and only then deletes — never yanking a leased
+      // task_queue row out from under the worker.
       if (jobId && jobId > 0) {
-        const client = pgClient()
-        try {
-          await client.connect()
-          await client
-            .query(
-              `DELETE FROM titan.flow_nodes WHERE build_id IN (SELECT id FROM titan.builds WHERE job_id = $1)`,
-              [jobId],
-            )
-            .catch(() => undefined)
-          await client
-            .query(
-              `DELETE FROM titan.task_queue WHERE build_id IN (SELECT id FROM titan.builds WHERE job_id = $1)`,
-              [jobId],
-            )
-            .catch(() => undefined)
-          await client
-            .query(`DELETE FROM titan.builds WHERE job_id = $1`, [jobId])
-            .catch(() => undefined)
-          await client
-            .query(`DELETE FROM titan.jobs WHERE id = $1`, [jobId])
-            .catch(() => undefined)
-        } catch {
-          // ignored — cleanup is best-effort
-        } finally {
-          await client.end().catch(() => undefined)
-        }
-        // Fallback: API delete in case the DB path failed (e.g. pg conn).
-        if (bearer) {
-          await request
-            .delete(`${API_BASE}/api/v1/jobs/${jobId}`, {
-              headers: { Authorization: `Bearer ${bearer}` },
-            })
-            .catch(() => null)
-        }
+        await safeDeleteJobCascade(request, jobId)
       }
     }
   })

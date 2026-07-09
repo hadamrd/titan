@@ -22,8 +22,12 @@
  *      and deleted in `finally` so the rig stays clean — mirrors spec 27.
  *   3. /pipelines list renders REAL pipelines for the roled user — assert ≥1 row
  *      and the API agrees (no 403, no empty-state). Guards the roled-user-403
- *      regression.
- *   4. Click the pipeline's Trigger → the params modal opens showing EVERY
+ *      regression. Then reach the job the way a real operator does at ANY job
+ *      count (#85): Ctrl/⌘+K palette search on the unique job name (server-side
+ *      ?search=, #693) → pipeline detail page. The list is paginated, so
+ *      anchoring on the fresh job's page-1 row was litter-dependent (137+ jobs
+ *      on the long-running rig pushed it off page 1 — the #85 red).
+ *   4. Click the pipeline's Run/Trigger → the params modal opens showing EVERY
  *      declared param, labeled. (AC#3)
  *   5. MODAL-TRAP GUARD: press Escape → the modal is gone AND the page is
  *      interactive again (the exact bug just fixed). (AC#4, adversarial)
@@ -273,14 +277,41 @@ test.describe('v3 operator-golden-path-params @golden', () => {
       ).toBeGreaterThan(0)
 
       await page.goto(`${ENV.uiBaseUrl}/pipelines`)
-      // The list shell renders one row per pipeline. Our freshly-created job
-      // MUST be among them (limit=50 default; the rig has far fewer jobs).
-      const triggerBtn = page.getByTestId(`job-row-${jobId}-trigger`)
-      await expect(triggerBtn).toBeVisible({ timeout: 15_000 })
-      // The empty-state must NOT be on screen for a roled user with pipelines.
+      // The list shell renders rows for the roled user. NOTE (#85): the list
+      // is paginated (useJobs limit=50) and on a long-running rig 137+ jobs
+      // accumulate, so the fresh job's row is routinely BEYOND page 1 — we
+      // must not anchor on `job-row-<id>` here. The list assertions stay
+      // count-independent; the job itself is reached via search below.
       await expect(page.getByText('No pipelines yet', { exact: false })).not.toBeVisible()
       const rowCount = await page.locator('[data-testid^="job-row-"]').count()
       expect(rowCount, 'pipelines list rendered 0 rows in the DOM').toBeGreaterThan(0)
+
+      // 3b. Navigate to the job the way a real operator does at ANY job count
+      // (#85): Ctrl/⌘+K command palette → type the unique job name → the
+      // server-side `?search=` filter (#693) returns it regardless of list
+      // pagination → select the hit → land on the pipeline detail page. The
+      // detail page's Run button drives the SAME param-aware trigger flow as
+      // the list row (shared useParamAwareTrigger — the #1208 anti-drift
+      // seam), so every modal oracle below is unchanged.
+      await page.keyboard.press('ControlOrMeta+k')
+      const cmdkInput = page.getByTestId('cmdk-input')
+      await expect(cmdkInput, 'Ctrl+K did not open the command palette').toBeVisible({
+        timeout: 10_000,
+      })
+      await cmdkInput.fill(jobFullName)
+      const paletteHit = page.getByTestId(`cmdk-job-${jobId}`)
+      await expect(
+        paletteHit,
+        `command-palette search for '${jobFullName}' never surfaced job ${jobId} — ` +
+          `the operator search path must find a job at ANY job count (#85)`,
+      ).toBeVisible({ timeout: 15_000 })
+      await paletteHit.click()
+
+      const triggerBtn = page.getByTestId('pipeline-detail-trigger-btn')
+      await expect(
+        triggerBtn,
+        `pipeline detail page for job ${jobId} did not render its Run button after palette navigation`,
+      ).toBeVisible({ timeout: 15_000 })
 
       // 4. Click Trigger → params modal opens showing EVERY declared param (AC#3).
       await triggerBtn.click()

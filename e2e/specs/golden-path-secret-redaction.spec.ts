@@ -48,6 +48,7 @@ import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken, loginViaKeycloak } from '../fixtures/auth-v3'
+import { safeDeleteJobCascade } from '../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -101,12 +102,14 @@ async function seedSecret(
   bearer: string,
   key: string,
   plaintext: string,
-): Promise<void> {
+): Promise<number> {
   const create = await api.post(`${API_BASE}/api/v1/credentials`, {
     headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
     data: { kind: 'string', scope: 'GLOBAL', key, plaintext },
   })
-  if (create.status() === 201) return
+  if (create.status() === 201) {
+    return (JSON.parse(await create.text()) as { id: number }).id
+  }
   // Already present — rotate the value so this run's sentinel is the live one.
   if (create.status() === 400 || create.status() === 409) {
     const list = await api.get(`${API_BASE}/api/v1/credentials?scope=GLOBAL&limit=200`, {
@@ -120,9 +123,10 @@ async function seedSecret(
       data: { kind: 'string', plaintext },
     })
     expect(put.ok(), `credential rotate failed: ${put.status()} ${await put.text()}`).toBe(true)
-    return
+    return existing!.id
   }
   expect(create.ok(), `seedSecret create failed: ${create.status()} ${await create.text()}`).toBe(true)
+  throw new Error('unreachable: seedSecret create neither 201 nor conflict nor ok')
 }
 
 async function createJob(api: APIRequestContext, bearer: string, fullName: string): Promise<number> {
@@ -202,6 +206,7 @@ test.describe('golden-path-secret-redaction @golden @secret', () => {
   let jobId: number
   let buildId: number
   let sentinel: string
+  let credentialId: number | undefined
 
   test.beforeAll(async ({ request }) => {
     // test.skip() is illegal in beforeAll — gate with an early return; each
@@ -209,8 +214,26 @@ test.describe('golden-path-secret-redaction @golden @secret', () => {
     if (!SECRET_RUNTIME_SHIPPED) return
     bearer = await fetchBearerToken(ENV)
     sentinel = buildSentinel()
-    await seedSecret(request, bearer, SECRET_ID, sentinel)
+    credentialId = await seedSecret(request, bearer, SECRET_ID, sentinel)
     jobId = await createJob(request, bearer, `e2e-secret-redaction-${Date.now().toString(36)}`)
+  })
+
+  test.afterAll(async ({ request }) => {
+    // #83 sweep: this suite OWNS the E2E_REDACTION_TOKEN row + the job it
+    // seeded — delete both so a leftover never 400s a later run's bare create
+    // (golden-path.spec.ts test C seeds the same key). Best-effort: teardown
+    // must not mask the tests' own verdicts.
+    if (!SECRET_RUNTIME_SHIPPED) return
+    if (jobId) {
+      await safeDeleteJobCascade(request, jobId).catch(() => undefined)
+    }
+    if (bearer && credentialId !== undefined) {
+      await request
+        .delete(`${API_BASE}/api/v1/credentials/${credentialId}`, {
+          headers: { Authorization: `Bearer ${bearer}` },
+        })
+        .catch(() => undefined)
+    }
   })
 
   test('1. secret-bound step runs GREEN and the mask **** fired', async ({ request }) => {

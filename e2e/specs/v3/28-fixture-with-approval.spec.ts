@@ -56,7 +56,7 @@ import * as crypto from 'node:crypto'
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
 import { readFixtureYaml } from '../../fixtures/fixture-files'
-import { pgClient } from '../../fixtures/seed-v3'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -214,74 +214,85 @@ async function setupFixtureJob(
   ).toBe(201)
   const credentialId = (JSON.parse(credRaw) as CredentialCreateResp).id
 
-  // 3. Job with the fixture YAML + a github trigger.
-  const fullName = `e2e-with-approval-${runTag}`
-  const triggersConfig = {
-    triggers: [
-      {
-        type: 'github',
-        id: 'github-1',
-        branches: [FIXTURE_BRANCH],
-        events: ['push'],
-        credentialsId: credKey,
+  // #83 sweep: from here on, a mid-setup failure (job create / webhook
+  // dispatch) previously LEAKED the credential (and possibly the job) — the
+  // caller's finally{} never sees a ctx when setup throws. Clean up what this
+  // function created before rethrowing.
+  let createdJobId: number | undefined
+  try {
+    // 3. Job with the fixture YAML + a github trigger.
+    const fullName = `e2e-with-approval-${runTag}`
+    const triggersConfig = {
+      triggers: [
+        {
+          type: 'github',
+          id: 'github-1',
+          branches: [FIXTURE_BRANCH],
+          events: ['push'],
+          credentialsId: credKey,
+        },
+      ],
+    }
+    const jobResp = await api.post(`${API_BASE}/api/v1/jobs`, {
+      headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
+      data: {
+        fullName,
+        displayName: 'E2E with-approval (fixture)',
+        pipelineScript: fixtureYaml,
+        configJson: JSON.stringify(triggersConfig),
+        enabled: true,
       },
-    ],
-  }
-  const jobResp = await api.post(`${API_BASE}/api/v1/jobs`, {
-    headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
-    data: {
-      fullName,
-      displayName: 'E2E with-approval (fixture)',
-      pipelineScript: fixtureYaml,
-      configJson: JSON.stringify(triggersConfig),
-      enabled: true,
-    },
-  })
-  const jobRaw = await jobResp.text()
-  expect(
-    jobResp.status(),
-    `POST /jobs HTTP ${jobResp.status()} body=${jobRaw.slice(0, 600)}`,
-  ).toBe(201)
-  const jobId = (JSON.parse(jobRaw) as JobCreateResp).id
+    })
+    const jobRaw = await jobResp.text()
+    expect(
+      jobResp.status(),
+      `POST /jobs HTTP ${jobResp.status()} body=${jobRaw.slice(0, 600)}`,
+    ).toBe(201)
+    const jobId = (JSON.parse(jobRaw) as JobCreateResp).id
+    createdJobId = jobId
 
-  // 4. Synthesised + signed GitHub push payload.
-  const pushPayload = {
-    ref: `refs/heads/${FIXTURE_BRANCH}`,
-    before: '0'.repeat(40),
-    after: 'f'.repeat(40),
-    repository: { full_name: FIXTURE_REPO, default_branch: FIXTURE_BRANCH },
-    pusher: { name: 'e2e-bot' },
-    head_commit: { id: 'f'.repeat(40), message: 'e2e synthetic push' },
-  }
-  const bodyBytes = Buffer.from(JSON.stringify(pushPayload), 'utf8')
-  const sig =
-    'sha256=' + crypto.createHmac('sha256', secret).update(bodyBytes).digest('hex')
+    // 4. Synthesised + signed GitHub push payload.
+    const pushPayload = {
+      ref: `refs/heads/${FIXTURE_BRANCH}`,
+      before: '0'.repeat(40),
+      after: 'f'.repeat(40),
+      repository: { full_name: FIXTURE_REPO, default_branch: FIXTURE_BRANCH },
+      pusher: { name: 'e2e-bot' },
+      head_commit: { id: 'f'.repeat(40), message: 'e2e synthetic push' },
+    }
+    const bodyBytes = Buffer.from(JSON.stringify(pushPayload), 'utf8')
+    const sig =
+      'sha256=' + crypto.createHmac('sha256', secret).update(bodyBytes).digest('hex')
 
-  const webhook = await api.post(`${API_BASE}/api/v1/triggers/github`, {
-    headers: {
-      'Content-Type': 'application/json',
-      'X-GitHub-Event': 'push',
-      'X-Hub-Signature-256': sig,
-      'X-GitHub-Delivery': `e2e-${runTag}`,
-    },
-    data: bodyBytes,
-  })
-  const webhookRaw = await webhook.text()
-  expect(
-    webhook.status(),
-    `POST /triggers/github HTTP ${webhook.status()} body=${webhookRaw}`,
-  ).toBe(200)
-  const webhookBody = JSON.parse(webhookRaw) as {
-    accepted: boolean
-    dispatched: boolean
-    detail: string
-  }
-  expect(
-    webhookBody.dispatched,
-    `webhook accepted but dispatched=false (detail="${webhookBody.detail}")`,
-  ).toBe(true)
+    const webhook = await api.post(`${API_BASE}/api/v1/triggers/github`, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GitHub-Event': 'push',
+        'X-Hub-Signature-256': sig,
+        'X-GitHub-Delivery': `e2e-${runTag}`,
+      },
+      data: bodyBytes,
+    })
+    const webhookRaw = await webhook.text()
+    expect(
+      webhook.status(),
+      `POST /triggers/github HTTP ${webhook.status()} body=${webhookRaw}`,
+    ).toBe(200)
+    const webhookBody = JSON.parse(webhookRaw) as {
+      accepted: boolean
+      dispatched: boolean
+      detail: string
+    }
+    expect(
+      webhookBody.dispatched,
+      `webhook accepted but dispatched=false (detail="${webhookBody.detail}")`,
+    ).toBe(true)
 
-  return { bearer, credentialId, jobId, fullName, fixtureYaml }
+    return { bearer, credentialId, jobId, fullName, fixtureYaml }
+  } catch (err) {
+    await cleanupJobAndCred(api, bearer, createdJobId, credentialId)
+    throw err
+  }
 }
 
 /** Wait for a build to surface on the job. */
@@ -421,28 +432,12 @@ async function cleanupJobAndCred(
   credentialId: number | undefined,
 ): Promise<void> {
   if (jobId && jobId > 0) {
-    const client = pgClient()
-    await client.connect()
-    try {
-      await client
-        .query(
-          `DELETE FROM titan.approvals WHERE build_id IN (SELECT id FROM titan.builds WHERE job_id = $1)`,
-          [jobId],
-        )
-        .catch(() => undefined)
-      await client.query(
-        `DELETE FROM titan.flow_nodes WHERE build_id IN (SELECT id FROM titan.builds WHERE job_id = $1)`,
-        [jobId],
-      )
-      await client.query(
-        `DELETE FROM titan.task_queue WHERE build_id IN (SELECT id FROM titan.builds WHERE job_id = $1)`,
-        [jobId],
-      )
-      await client.query(`DELETE FROM titan.builds WHERE job_id = $1`, [jobId])
-      await client.query(`DELETE FROM titan.jobs WHERE id = $1`, [jobId])
-    } finally {
-      await client.end()
-    }
+    // #65: migrated off the raw-cascade SQL teardown. safeDeleteJobCascade
+    // (#59, fixtures/teardown-v3.ts) cancels any still-live build via the
+    // public API, waits (bounded) for terminal status + CLAIMED/PROCESSING
+    // task-lease drain, and only then deletes — never yanking a leased
+    // task_queue row out from under the worker.
+    await safeDeleteJobCascade(api, jobId)
   }
   if (credentialId && credentialId > 0) {
     await api
