@@ -25,7 +25,9 @@ import { test, expect } from '@playwright/test'
 import { authEnv, fetchBearerToken, loginViaKeycloak } from '../../fixtures/auth-v3'
 
 const ENV = authEnv()
-const API = process.env.TITAN_API_URL ?? 'http://localhost:8080'
+// 18080 is the rig's server port (rig/local) — every other v3 spec defaults to
+// it. 8080 was drift and killed this spec with ECONNREFUSED on smoke runs (#76).
+const API = process.env.TITAN_API_URL ?? 'http://localhost:18080'
 
 interface FlowNode {
   nodeId: string
