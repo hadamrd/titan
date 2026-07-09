@@ -13,7 +13,9 @@ import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.github.tomakehurst.wiremock.verification.LoggedRequest;
 import io.adaptiq.titan.api.FakeTitanStores;
+import io.adaptiq.titan.build.BuildEnqueuer;
 import io.adaptiq.titan.build.BuildStateChangedEvent;
+import io.adaptiq.titan.flow.TitanFlowExecution;
 import io.adaptiq.titan.store.TitanStores;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
@@ -35,6 +37,14 @@ import org.junit.jupiter.api.Test;
  * node-accepted (the stub deserializes the event tolerantly, keeping the sibling field) and that
  * the gate flips ONLY on the terminal success event — the two acceptance guarantees that the unit
  * test's pure wire assertions cannot demonstrate end-to-end.
+ *
+ * <p><b>Issue #99:</b> the original lifecycle test drove the reporter with hand-built {@code
+ * RUNNING} events, masking that production never fired one (the QUEUED→RUNNING flip is a direct
+ * {@code BuildDao.activateIfQueued} write inside the bake transaction). {@link
+ * #productionBakePath_firesInProgressCheckExactlyOnce()} closes that gap: it runs the REAL {@link
+ * TitanFlowExecution#bake()} — synthesis, DAG materialisation, the {@code activateIfQueued} CAS —
+ * with the reporter wired as the post-commit state-changed sink, so the {@code in_progress} check
+ * on the ledger is produced by the engine's own transition, not a fabricated event.
  */
 class PulsarCheckLifecycleIT {
 
@@ -108,6 +118,56 @@ class PulsarCheckLifecycleIT {
         queued.path("phase").asText().equals(running.path("phase").asText()),
         "queued and in_progress events must be distinguishable");
     assertTrue(ledger.get(0).has("phase") && ledger.get(1).has("phase"));
+  }
+
+  /**
+   * Issue #99 — the {@code in_progress} check must come out of the PRODUCTION transition. The build
+   * is enqueued through the canonical {@link BuildEnqueuer} seam (a real {@code QUEUED} row with
+   * Pulsar provenance), then baked through the real {@link TitanFlowExecution} with the reporter as
+   * the post-commit {@link BuildStateChangedEvent} sink. The {@code pending/in_progress} event
+   * landing on the ledger therefore proves the engine's own QUEUED→RUNNING CAS fired it — the exact
+   * path that was dead code before the fix.
+   */
+  @Test
+  void productionBakePath_firesInProgressCheckExactlyOnce() {
+    long buildId =
+        BuildEnqueuer.enqueue(
+            stores,
+            jobId,
+            "pulsar",
+            "pulsar",
+            "{\"commitSha\":\"oid1abc\",\"changeId\":\"" + CHANGE_ID + "\"}",
+            null);
+    assertTrue(ledger().isEmpty(), "nothing posted before the engine transitions the build");
+
+    String yaml =
+        """
+        titan:
+          stages:
+            - stage: Build
+              steps:
+                - sh: "echo hi"
+        """;
+    TitanFlowExecution execution =
+        new TitanFlowExecution(stores, buildId, reporter::onBuildStateChanged);
+    assertEquals(TitanFlowExecution.BakeResult.BAKED, execution.bake(yaml));
+
+    List<JsonNode> ledger = ledger();
+    assertEquals(1, ledger.size(), "the QUEUED→RUNNING CAS posts exactly one check");
+    assertEquals("ci", ledger.get(0).path("kind").asText());
+    assertEquals("pending", ledger.get(0).path("conclusion").asText());
+    assertEquals(
+        "in_progress",
+        ledger.get(0).path("phase").asText(),
+        "the production transition maps to the in_progress phase");
+    assertEquals("refused_incomplete", gate(), "in_progress must not clear the gate");
+
+    // Adversarial re-delivery (design/30): a second BAKE of the same build is ALREADY_BAKED and
+    // MUST NOT double-post the in_progress check.
+    assertEquals(
+        TitanFlowExecution.BakeResult.ALREADY_BAKED,
+        new TitanFlowExecution(stores, buildId, reporter::onBuildStateChanged).bake(yaml));
+    assertEquals(1, ledger().size(), "a re-delivered bake posts nothing");
   }
 
   /**
