@@ -53,6 +53,7 @@
  */
 import { test, expect, type Page, type APIRequestContext, type ConsoleMessage } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -443,13 +444,12 @@ test.describe('v3 operator-golden-path-params @golden', () => {
     } finally {
       page.off('console', onConsole)
       page.off('pageerror', onPageError)
-      // Cleanup: best-effort, never throws past the test boundary.
-      if (bearer && jobId) {
-        await request
-          .delete(`${API_BASE}/api/v1/jobs/${jobId}`, {
-            headers: { Authorization: `Bearer ${bearer}` },
-          })
-          .catch(() => null)
+      // Cleanup: best-effort, never throws past the test boundary. #116:
+      // a bare DELETE /jobs/{id} 409s while a build is still QUEUED/RUNNING
+      // (and the .catch swallowed it, leaking the job) — safeDeleteJobCascade
+      // cancels live builds first, then deletes.
+      if (jobId) {
+        await safeDeleteJobCascade(request, jobId).catch(() => null)
       }
     }
   })
@@ -525,12 +525,13 @@ test.describe('v3 operator-golden-path-params @golden', () => {
       expect(pageErrors, `uncaught pageerror on the no-params detail page`).toEqual([])
     } finally {
       page.off('pageerror', onPageError)
-      if (bearer && jobId) {
-        await request
-          .delete(`${API_BASE}/api/v1/jobs/${jobId}`, {
-            headers: { Authorization: `Bearer ${bearer}` },
-          })
-          .catch(() => null)
+      // #116: THE e2e-noparams-* leak. This test triggers a build and asserts
+      // on the QUEUED row without waiting for terminal — so the bare
+      // DELETE /jobs/{id} always hit the 409 "build(s) still QUEUED or
+      // RUNNING" guard and the .catch swallowed it (one leaked job per run).
+      // safeDeleteJobCascade cancels the build, waits, then deletes.
+      if (jobId) {
+        await safeDeleteJobCascade(request, jobId).catch(() => null)
       }
     }
   })

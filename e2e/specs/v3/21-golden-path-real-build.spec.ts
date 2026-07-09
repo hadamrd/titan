@@ -106,17 +106,27 @@ async function findTitanHelloJobId(
   request: APIRequestContext,
   bearer: string,
 ): Promise<number> {
-  const r = await apiGet<JobsPage>(request, bearer, '/api/v1/jobs?offset=0&limit=200')
+  // #116: query by name instead of scanning the first page. The old
+  // `?offset=0&limit=200` + client-side find() broke as soon as >200 jobs
+  // existed: the list is ORDER BY full_name, so accumulated e2e-*/gp-* litter
+  // sorted BEFORE 'titan-hello' and pushed it off the page — the 08:12 smoke's
+  // "titan-hello job not found (200 jobs)" was pagination overflow, not a
+  // deleted seed row.
+  const r = await apiGet<JobsPage>(
+    request,
+    bearer,
+    '/api/v1/jobs?search=titan-hello&offset=0&limit=50',
+  )
   if (!r.ok || !r.body) {
     throw new Error(`GET /api/v1/jobs failed: HTTP ${r.status} body=${r.raw.slice(0, 300)}`)
   }
   const hit = r.body.items.find((j) => j.fullName === 'titan-hello')
   if (!hit) {
     throw new Error(
-      `titan-hello job not found in /api/v1/jobs response (${r.body.items.length} jobs). ` +
-        `Is rig/local/seed-data.sh up to date? Available: ${r.body.items
-          .map((j) => j.fullName)
-          .join(', ')}`,
+      `titan-hello job not found via /api/v1/jobs?search=titan-hello ` +
+        `(${r.body.items.length} hits: ${r.body.items.map((j) => j.fullName).join(', ')}). ` +
+        `The seed contract is broken — re-run rig/local/seed-data.sh ` +
+        `(see also specs/v3/00-seed-guard.spec.ts).`,
     )
   }
   return hit.id

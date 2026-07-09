@@ -11,6 +11,7 @@
  */
 import * as crypto from 'node:crypto'
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
+import { safeDeleteJobCascade } from './teardown-v3'
 
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
 
@@ -84,7 +85,9 @@ export interface BuiltArtifact {
 /**
  * Create a webhook-triggered job from `fixtureYaml`, fire a signed push, poll the build to a
  * terminal status, HARD-assert SUCCESS, then download the single artifact matching
- * `artifactNameRe` and return its bytes-as-text. Cleans up the credential in a finally.
+ * `artifactNameRe` and return its bytes-as-text. Cleans up the credential AND the job in a
+ * finally (#116 — the job used to leak one row per run per consuming spec; teardown goes
+ * through safeDeleteJobCascade so a still-live build is cancelled first, #59 ownership rule).
  *
  * `bearer` must be a live access token (see {@link extractAccessToken}).
  */
@@ -105,6 +108,7 @@ export async function runFixtureBuildAndFetchArtifact(opts: {
   const webhookSecret = `s3cr3t-${runTag}`
 
   let credentialId: number | undefined
+  let jobId: number | undefined
   let buildId: number | undefined
 
   try {
@@ -137,7 +141,7 @@ export async function runFixtureBuildAndFetchArtifact(opts: {
     })
     const jobRaw = await jobCreate.text()
     expect(jobCreate.status(), `POST /jobs HTTP ${jobCreate.status()} body=${jobRaw.slice(0, 600)}`).toBe(201)
-    const jobId = (JSON.parse(jobRaw) as { id: number }).id
+    jobId = (JSON.parse(jobRaw) as { id: number }).id
     expect(jobId).toBeGreaterThan(0)
 
     // 3. Signed push webhook.
@@ -229,6 +233,13 @@ export async function runFixtureBuildAndFetchArtifact(opts: {
         .catch(() => {
           /* best-effort */
         })
+    }
+    // #116: zero-litter — delete the per-run job (covers specs 47/48 and any
+    // future consumer of this helper).
+    if (jobId) {
+      await safeDeleteJobCascade(request, jobId).catch(() => {
+        /* best-effort — leftovers are logged by the helper */
+      })
     }
     await page.screenshot({ fullPage: true }).then(
       (png) => test.info().attach(`screenshot-${runTag}.png`, { body: png, contentType: 'image/png' }),

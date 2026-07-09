@@ -39,9 +39,9 @@
  *      with name matching /out\.txt/.
  *   9. GET /api/v1/artifacts/{artifactId}/download; HARD assert body contains
  *      'hello'.
- *  10. finally{}: cleanup the credential (jobs intentionally not deleted —
- *      JobsApi exposes no DELETE today, full-name suffix per-run ensures no
- *      collision across re-runs).
+ *  10. finally{}: cleanup the credential AND the job (safeDeleteJobCascade —
+ *      cancel-then-delete under the #59 ownership rule; issue #116 closed the
+ *      one-leaked-job-per-run hole this spec used to have).
  *
  * Diagnostics on failure: dumps fixture YAML, build JSON, nodes JSON, artifact
  * list JSON, and a full-page screenshot.
@@ -50,6 +50,7 @@ import * as crypto from 'node:crypto'
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
 import { readFixtureYaml } from '../../fixtures/fixture-files'
+import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
@@ -410,10 +411,10 @@ test.describe('v3 fixture-simple-build @golden', () => {
       await dump('assertion-failure')
       throw err
     } finally {
-      // ── Cleanup. JobsApi has no DELETE today; the per-run RUN_TAG suffix
-      // ensures the next run does not collide on fullName / credential key.
-      // Credentials API does expose DELETE, so we clean that up to keep the
-      // credentials table from growing on repeated runs.
+      // ── Cleanup: credential + the job this spec created (#116 — this spec
+      // used to leak one e2e-simple-build-* job per run). safeDeleteJobCascade
+      // cancels any still-live build via the API and never yanks a leased
+      // task_queue row (#59 ownership rule).
       if (bearer && credentialId) {
         await request
           .delete(`${API_BASE}/api/v1/credentials/${credentialId}`, {
@@ -422,6 +423,11 @@ test.describe('v3 fixture-simple-build @golden', () => {
           .catch(() => {
             /* best-effort */
           })
+      }
+      if (jobId) {
+        await safeDeleteJobCascade(request, jobId).catch(() => {
+          /* best-effort — leftovers are logged by the helper */
+        })
       }
     }
   })
