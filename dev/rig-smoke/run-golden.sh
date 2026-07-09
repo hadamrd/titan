@@ -26,6 +26,8 @@
 #   SPECS_DIR                 specs dir counted for the time budget (default e2e/specs)
 #   TITAN_PW_WORKERS          playwright workers (default 2 — the sanctioned CI value)
 #   TITAN_GLOBAL_TIMEOUT_MS   suite budget; if unset, derived from the @golden count
+#   RIG_SMOKE_SKIP_FRESHNESS  =1 skips the #44 stale-rig probe (check-rig-freshness.sh)
+#   RIG_SMOKE_SKIP_PREWARM    =1 skips the #84 cold-worker pre-warm (prewarm-worker.sh)
 set -euo pipefail
 
 # Repo root is two levels up from dev/rig-smoke/ — resolves correctly no
@@ -64,6 +66,28 @@ if [ -z "${TITAN_GLOBAL_TIMEOUT_MS:-}" ]; then
 fi
 echo "[rig-smoke] budget: ${TITAN_GLOBAL_TIMEOUT_MS}ms for ${GOLDEN_COUNT} golden specs, workers=${TITAN_PW_WORKERS}"
 
+# ── Stale-rig probe (#44) ───────────────────────────────────────────────────
+# `task dev:titan` bakes the checkout HEAD into the titan-server image
+# (build-arg GIT_SHA → OCI revision label). The probe compares that label to
+# HEAD: mismatch (or unprovable provenance) prints a LOUD warning on stderr
+# and lands as `"rigShaMismatch":true` in the telemetry line — warning only,
+# never a hard fail (intentional drift mid-bisect is legitimate). The helper
+# echoes exactly `true`/`false` on stdout and always exits 0.
+if ! RIG_SHA_MISMATCH=$(bash "$REPO_ROOT/dev/rig-smoke/check-rig-freshness.sh"); then
+  RIG_SHA_MISMATCH=false
+fi
+case "$RIG_SHA_MISMATCH" in true|false) ;; *) RIG_SHA_MISMATCH=false ;; esac
+
+# ── Cold-worker pre-warm (#84) ──────────────────────────────────────────────
+# A titan-worker container younger than ~15min has a cold npm cache; the
+# first real build pays a cold `npm ci` and blows the triage spec's 30s
+# product-latency budget (false red on run 1 of every post-rebuild 3-green
+# sequence). Fire one throwaway build and wait for it terminal BEFORE
+# playwright starts. Best-effort: the helper always exits 0; skip with
+# RIG_SMOKE_SKIP_PREWARM=1.
+bash "$REPO_ROOT/dev/rig-smoke/prewarm-worker.sh" \
+  || echo "[rig-smoke] pre-warm helper failed (non-fatal) — continuing" >&2
+
 START_MS=$(date +%s%3N)
 cd "$REPO_ROOT/e2e"
 set +e
@@ -77,5 +101,8 @@ DUR=$((END_MS - START_MS))
 # Parse + append + propagate exit through the unit-tested helper
 # (#1048 adversarial guard — dev/rig-smoke/tests/test_rig_smoke_parse.sh).
 # It appends the telemetry line first, then exits with the playwright exit
-# code, so a red run still leaves its trace in the jsonl.
-bash "$REPO_ROOT/dev/rig-smoke/rig-smoke-parse.sh" "$TEE_FILE" "$EXIT" "$DUR" "$JSONL"
+# code, so a red run still leaves its trace in the jsonl. The #44 probe
+# result rides along as the additive `rigShaMismatch` field (existing fields
+# are untouched — parse-compat for check-3-consecutive.sh and friends).
+RIG_SMOKE_RIG_SHA_MISMATCH="$RIG_SHA_MISMATCH" \
+  bash "$REPO_ROOT/dev/rig-smoke/rig-smoke-parse.sh" "$TEE_FILE" "$EXIT" "$DUR" "$JSONL"

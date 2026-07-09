@@ -18,6 +18,12 @@ classes trace back to its configuration in
    timeout paths in the 2026-07-09 golden smoke).
 3. **Node fixture builds fail fast with exit 127.** Step log shows
    `sh: 1: cd: can't cd to ...` and/or `sh: 1: npm: not found`.
+4. **First build after a worker recreation blows a 30s budget; the rerun
+   is green.** (GH #84.) The container's npm cache is empty after any
+   recreate, so the first `npm ci` in a node fixture pays a cold install
+   and `golden-path-failure-triage`'s 30s trigger→FAILURE budget (a
+   PRODUCT latency property — do not widen it) goes red on run 1 of every
+   post-rebuild 3-green sequence.
 
 ## Diagnosis
 
@@ -66,6 +72,15 @@ classes trace back to its configuration in
   fallback for fixtures without package-lock.json) — subsequent builds
   are no-ops because `node_modules/` persists in the mounted fixture dir
   (gitignored).
+- Cold-cache first-build red (#84): `task rig:smoke` handles this itself —
+  `dev/rig-smoke/prewarm-worker.sh` detects a worker container younger
+  than 15 min (`docker inspect .State.StartedAt`), fires one throwaway
+  `rig-smoke-prewarm` build (the same `npm ci` step the node fixtures
+  run) through the API, and waits for it to finish before Playwright
+  starts — look for `[rig-smoke] pre-warmed worker (Xs)` in the smoke
+  output. Debug escape hatch: `RIG_SMOKE_SKIP_PREWARM=1`. Outside the
+  smoke harness, fire any node-fixture build manually after recreating
+  the worker before trusting first-build latency.
 
 ## Prevention
 

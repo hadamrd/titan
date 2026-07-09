@@ -14,6 +14,14 @@
 # Usage:
 #   rig-smoke-parse.sh <tee-file> <playwright-exit-code> <duration-ms> [jsonl-out]
 #
+# Env:
+#   RIG_SMOKE_RIG_SHA_MISMATCH  "true" when the #44 stale-rig probe
+#     (check-rig-freshness.sh) found the running titan-server image's baked
+#     git SHA differs from checkout HEAD (or provenance is unprovable).
+#     Recorded as the ADDITIVE `rigShaMismatch` field; anything other than
+#     "true" (unset, empty, garbage) records false. Existing fields keep
+#     their exact names/order — parse-compat with check-3-consecutive.sh.
+#
 # Side effects:
 #   - Echoes the JSON line to stdout.
 #   - If jsonl-out is given, appends the JSON line there.
@@ -42,8 +50,15 @@ FAILED=$(grep -oE '[0-9]+ failed' "$TEE" | tail -n1 | grep -oE '[0-9]+' || echo 
 # the telemetry makes an amputated run machine-visible so the 3-consecutive
 # marker (check-3-consecutive.sh) can refuse to count it as green.
 DID_NOT_RUN=$(grep -oE '[0-9]+ did not run' "$TEE" | tail -n1 | grep -oE '[0-9]+' || echo 0)
+# #44 stale-rig telemetry — additive field, sanitized to a strict boolean so
+# a caller typo can never inject arbitrary JSON into the line.
+if [ "${RIG_SMOKE_RIG_SHA_MISMATCH:-false}" = "true" ]; then
+  RIG_SHA_MISMATCH=true
+else
+  RIG_SHA_MISMATCH=false
+fi
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-LINE="{\"ts\":\"$TS\",\"passed\":$PASSED,\"failed\":$FAILED,\"did_not_run\":$DID_NOT_RUN,\"durationMs\":$DUR}"
+LINE="{\"ts\":\"$TS\",\"passed\":$PASSED,\"failed\":$FAILED,\"did_not_run\":$DID_NOT_RUN,\"durationMs\":$DUR,\"rigShaMismatch\":$RIG_SHA_MISMATCH}"
 
 echo "$LINE"
 if [ -n "$OUT" ]; then
