@@ -172,17 +172,18 @@ describe('logPatternDiff + normaliseLogLine', () => {
   it('counts common lines as common, side-only lines correctly', () => {
     const aLines = [
       '2026-05-24T11:00:00Z compiling main.ts',
-      '2026-05-24T11:00:01Z tests passed: 42',
+      '2026-05-24T11:00:01Z tests passed: 421',
       'only-in-a: noisy debug',
     ]
     const bLines = [
       '2026-05-25T08:30:00Z compiling main.ts',
-      '2026-05-25T08:30:01Z tests passed: 99',
+      '2026-05-25T08:30:01Z tests passed: 995',
       'only-in-b: deploy summary',
     ]
     // The first two lines collapse to the same patterns ("compiling main.ts",
     // "tests passed: <num>") after normalisation; the last on each side is
-    // unique.
+    // unique. Note: normaliseLogLine deliberately only collapses 3+-digit
+    // runs, so meaningful small integers ("1 file changed") survive.
     const { aOnly, bOnly, common } = logPatternDiff(aLines, bLines)
     expect(common).toBe(2)
     expect(aOnly).toBe(1)
