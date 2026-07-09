@@ -1,6 +1,13 @@
 /**
  * 16-overview-dashboard — UX guard for the /overview redesign (#1189).
  *
+ * Audit verdict (#138): PROMOTED to @golden as-is. The spec is read-only
+ * (owns no rows, mutates nothing — trivially ownership-clean), deterministic
+ * (no sleeps, viewport/DOM invariants only), and covers a surface the new
+ * data-golden spec (63-overview-stats) deliberately does not: layout + error
+ * hygiene rather than data truth. The pair splits the overview contract:
+ * spec 63 proves the numbers are real, this spec proves the frame holds.
+ *
  * Lightweight checks only (per feedback_playwright_lightweight_checks): we
  * verify layout invariants via the DOM / viewport, NOT a full visual snapshot.
  *
@@ -18,7 +25,10 @@ import { authEnv, loginViaKeycloak } from '../../fixtures/auth-v3'
 
 const ENV = authEnv()
 
-test.describe('Overview dashboard — UX invariants (#1189)', () => {
+// @golden sits BEFORE the parenthetical: dev/rig-smoke/golden-count.sh greps
+// `describe\([^)]*@golden`, so a `)` ahead of the tag would drop this spec
+// from the golden floor.
+test.describe('Overview dashboard — UX invariants @golden (#1189, promoted by #138)', () => {
   test('reflows at 768px with one primary action and the three regions', async ({
     page,
   }) => {
