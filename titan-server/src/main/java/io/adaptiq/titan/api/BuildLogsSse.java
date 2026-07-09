@@ -15,7 +15,9 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.sse.Sse;
 import jakarta.ws.rs.sse.SseEventSink;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Level;
@@ -114,7 +116,16 @@ public class BuildLogsSse {
   // ── polling loop ──────────────────────────────────────────────────────────
 
   private void pollAndStream(long buildId, UUID filterTaskId, SseEventSink sink) {
-    long[] cursor = {0L};
+    // Per-task high-water mark on chunk_index (issue #88). The cursor must NOT be the row
+    // id: ids come from a global sequence shared by every concurrently-writing task, so id
+    // order is not monotonic in chunk_index order (neither across tasks nor, under racing
+    // inserts, within one). The old single max-id watermark advanced past not-yet-emitted
+    // rows whose id happened to be lower, silently dropping those chunks forever.
+    // chunk_index is unique per task ({@code uq_logs_task_chunk}) and listByTask returns
+    // rows in chunk_index order, so "strictly greater than the last emitted chunk_index of
+    // THIS task" is an exact resume point. Initial mark is Integer.MIN_VALUE, not -1:
+    // StepRetryPolicy writes its retry-announcement line at chunk_index = -1.
+    Map<UUID, Integer> lastChunkByTask = new HashMap<>();
 
     try {
       while (!sink.isClosed()) {
@@ -122,35 +133,15 @@ public class BuildLogsSse {
         // When a per-step filter is set, the token list is forced to that single token (the
         // server still checks it belongs to this build by intersection; an unknown token
         // simply yields zero rows).
-        List<UUID> tokens = resolveTokens(buildId, filterTaskId);
-
-        boolean sentAny = false;
-        for (UUID token : tokens) {
-          List<LogRow> rows = stores.logs().listByTask(token);
-          for (LogRow row : rows) {
-            if (row.id > cursor[0]) {
-              sink.send(sse.newEventBuilder().name("log").data(row.data).build());
-              cursor[0] = row.id;
-              sentAny = true;
-            }
-          }
-        }
+        boolean sentAny =
+            drainNewChunks(resolveTokens(buildId, filterTaskId), lastChunkByTask, sink);
 
         // Check build terminal status — if done and logs drained, close the stream.
         var build = stores.builds().findById(buildId).orElse(null);
         if (build != null && TERMINAL_STATUSES.contains(build.status) && !sentAny) {
           // One final drain pass to pick up any logs written between last poll and terminal.
-          boolean hasMore = false;
-          List<UUID> finalTokens = resolveTokens(buildId, filterTaskId);
-          for (UUID token : finalTokens) {
-            for (LogRow row : stores.logs().listByTask(token)) {
-              if (row.id > cursor[0]) {
-                sink.send(sse.newEventBuilder().name("log").data(row.data).build());
-                cursor[0] = row.id;
-                hasMore = true;
-              }
-            }
-          }
+          boolean hasMore =
+              drainNewChunks(resolveTokens(buildId, filterTaskId), lastChunkByTask, sink);
           if (!hasMore) {
             sink.send(sse.newEventBuilder().name("done").data(build.status).build());
             sink.close();
@@ -171,6 +162,31 @@ public class BuildLogsSse {
         sink.close();
       }
     }
+  }
+
+  /**
+   * Emits every not-yet-sent log chunk for the given task tokens, advancing the per-task
+   * chunk_index high-water marks in {@code lastChunkByTask}. Per-task chunk_index order is
+   * preserved on the wire (rows arrive from {@code listByTask} already ordered by chunk_index);
+   * tasks are interleaved in the build's chronological token order, exactly as before.
+   *
+   * @return whether at least one chunk was sent
+   */
+  private boolean drainNewChunks(
+      List<UUID> tokens, Map<UUID, Integer> lastChunkByTask, SseEventSink sink) {
+    boolean sentAny = false;
+    for (UUID token : tokens) {
+      int last = lastChunkByTask.getOrDefault(token, Integer.MIN_VALUE);
+      for (LogRow row : stores.logs().listByTask(token)) {
+        if (row.chunkIndex > last) {
+          sink.send(sse.newEventBuilder().name("log").data(row.data).build());
+          last = row.chunkIndex;
+          sentAny = true;
+        }
+      }
+      lastChunkByTask.put(token, last);
+    }
+    return sentAny;
   }
 
   /**
