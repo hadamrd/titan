@@ -114,7 +114,9 @@ interface FlowNode {
 interface ApprovalRowDb {
   id: number
   build_id: number
-  node_id: string
+  // Live column name — titan.approvals has flow_node_id, NOT node_id
+  // (V26__approvals.sql; verified via \d titan.approvals on the rig). #75.
+  flow_node_id: string
   status: string
 }
 
@@ -215,7 +217,7 @@ async function fetchAllApprovalsForBuild(buildId: number): Promise<ApprovalRowDb
   await client.connect()
   try {
     const res = await client.query<ApprovalRowDb>(
-      `SELECT id, build_id, node_id, status
+      `SELECT id, build_id, flow_node_id, status
          FROM titan.approvals
         WHERE build_id = $1
         ORDER BY id ASC`,
@@ -256,7 +258,7 @@ async function waitForParkedAtApproval(
 
         const rows = await fetchAllApprovalsForBuild(buildId)
         const pending = rows.filter(
-          (r) => r.status === 'PENDING' && r.node_id === APPROVAL_NODE_ID,
+          (r) => r.status === 'PENDING' && r.flow_node_id === APPROVAL_NODE_ID,
         )
         if (pending.length === 1) {
           captured = pending[0]!
@@ -453,7 +455,7 @@ test.describe('v3 approval-flow no-recreate / no-cas-leak @golden', () => {
         `exactly 1 approval row expected while parked, got ${parkedRows.length}: ` +
           JSON.stringify(parkedRows),
       ).toBe(1)
-      expect(parkedRows[0]!.node_id).toBe(APPROVAL_NODE_ID)
+      expect(parkedRows[0]!.flow_node_id).toBe(APPROVAL_NODE_ID)
       expect(parkedRows[0]!.status).toBe('PENDING')
 
       // 6. Approve via the UI banner (covers the ApprovalBanner contract).
@@ -483,7 +485,7 @@ test.describe('v3 approval-flow no-recreate / no-cas-leak @golden', () => {
           JSON.stringify(postRows),
       ).toBe(1)
       expect(postRows[0]!.status).toBe('APPROVED')
-      expect(postRows[0]!.node_id).toBe(APPROVAL_NODE_ID)
+      expect(postRows[0]!.flow_node_id).toBe(APPROVAL_NODE_ID)
 
       // 10. Final defence-in-depth on #908: errorMessage still null on the
       //     terminal build.
@@ -549,7 +551,7 @@ test.describe('v3 approval-flow no-recreate / no-cas-leak @golden', () => {
           JSON.stringify(postRows),
       ).toBe(1)
       expect(postRows[0]!.status).toBe('REJECTED')
-      expect(postRows[0]!.node_id).toBe(APPROVAL_NODE_ID)
+      expect(postRows[0]!.flow_node_id).toBe(APPROVAL_NODE_ID)
 
       // No fresh PENDING anywhere for this build.
       const stillPending = postRows.filter((r) => r.status === 'PENDING')
