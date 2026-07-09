@@ -27,24 +27,28 @@
  *      phase:queued}` arrives for OUR change (PulsarWebhookApi.fireEnqueued →
  *      BuildEnqueuedEvent → PulsarCheckReporter.onBuildEnqueued fires
  *      synchronously inside the webhook request, so it must exist by the 202);
- *   2. a terminal `{conclusion:success}` event with NO phase arrives after
+ *   2. a worker-pickup event `{kind:ci, check:build, conclusion:pending,
+ *      phase:in_progress}` arrives when the bake transaction commits the
+ *      QUEUED→RUNNING flip (TitanFlowExecution.bake → BuildDao.activateIfQueued
+ *      CAS → post-commit BuildStateChangedEvent(RUNNING) →
+ *      PulsarCheckReporter, wired by #100);
+ *   3. a terminal `{conclusion:success}` event with NO phase arrives after
  *      the worker-executed build reaches SUCCESS (BuildCloser fires
  *      BuildStateChangedEvent at close);
- *   3. ordering: queued strictly precedes success; any intermediate events
- *      are pending-only; no failure conclusion ever appears; nothing lands on
- *      any other repo/change path.
+ *   4. the full ledger for OUR change is EXACTLY the ordered three-event
+ *      lifecycle queued → in_progress → success, once each — no dupes (bake
+ *      re-delivery / lost CAS fire nothing, per #100's exactly-once
+ *      construction), no failure conclusion ever, nothing on any other
+ *      repo/change path.
  *
- * Why `phase:in_progress` is NOT asserted here: on the live engine the
- * QUEUED→RUNNING flip is a direct DAO write inside the bake transaction
- * (TitanFlowExecution.bake → BuildDao.activateIfQueued) — no
- * BuildStateChangedEvent is fired for it (only BuildCloser/terminal and
- * BuildAbortService fire; see the "#835 follow-up" note in
- * TitanOrchestrator.advance). The in_progress leg is IT-covered by driving
- * the reporter directly (PulsarCheckLifecycleIT); at the rig seam it simply
- * never fires today, and asserting it would be asserting a fabrication. If
- * the RUNNING emit lands later, the ordering assertion below already admits
- * it (pending-only between queued and success) and a follow-up should then
- * hard-assert it.
+ * History of the `phase:in_progress` leg (issues #99/#101): pre-#100 the
+ * QUEUED→RUNNING flip was a direct DAO write inside the bake transaction and
+ * fired no BuildStateChangedEvent, so this spec deliberately did NOT assert
+ * it (asserting it would have been asserting a fabrication). PR #100 wired
+ * the post-commit RUNNING emit through the production bake path
+ * (PulsarInProgressLifecycleIT proves queued → in_progress → final, exactly
+ * once each), so the leg is now hard-asserted here at the rig seam — this is
+ * the follow-up tightening the previous header documented.
  *
  * ── Rig prerequisites (seeded by rig/local/docker-compose.yml since #97) ───
  *
@@ -139,7 +143,7 @@ async function deleteOwnDedupeRow(eventId: string): Promise<void> {
 }
 
 test.describe('v3 pulsar-check-lifecycle @golden', () => {
-  test('signed pulsar webhook → worker-executed SUCCESS → queued+success checks on the change ledger', async ({
+  test('signed pulsar webhook → worker-executed SUCCESS → ordered queued→in_progress→success checks on the change ledger', async ({
     request,
   }) => {
     test.setTimeout(240_000)
@@ -313,25 +317,28 @@ test.describe('v3 pulsar-check-lifecycle @golden', () => {
         expect(e.body.kind, `non-ci event on the ledger: ${JSON.stringify(e.body)}`).toBe('ci')
         expect(e.body.check, `unexpected check name: ${JSON.stringify(e.body)}`).toBe('build')
       }
-      // First = enqueue-time queued; last = terminal success with NO phase
-      // (a finished build has no in-flight phase).
-      expect(ours[0]!.body.conclusion).toBe('pending')
-      expect(ours[0]!.body.phase).toBe('queued')
-      const last = ours[ours.length - 1]!
-      expect(last.body.conclusion, 'the gate-clearing terminal event must be last').toBe(
-        'success',
-      )
-      expect(last.body.phase, 'terminal success must carry no phase').toBeUndefined()
-      // A SUCCESS build must never have reported failure, and any events
-      // between queued and success must be pending-only (this admits the
-      // in_progress leg if the engine ever starts emitting RUNNING — see the
-      // header note on why it is not hard-asserted today).
-      for (const e of ours.slice(0, -1)) {
-        expect(
-          e.body.conclusion,
-          `non-pending event before the terminal one: ${JSON.stringify(e.body)}`,
-        ).toBe('pending')
-      }
+      // The ledger must be EXACTLY the ordered three-event lifecycle, once
+      // each (#100/#101): enqueue-time queued, bake-time in_progress at the
+      // real worker-pickup CAS, terminal success with NO phase (a finished
+      // build has no in-flight phase). Sequential-equality also proves
+      // no dupes (bake re-delivery must not double-post the in_progress
+      // leg) and that no failure conclusion ever appeared.
+      expect(
+        ours.map((e) => ({ conclusion: e.body.conclusion, phase: e.body.phase })),
+        `ledger for ${REPO}/${CHANGE_ID} is not the exact queued → in_progress → ` +
+          `success lifecycle: ${JSON.stringify(ours.map((e) => e.body))}`,
+      ).toEqual([
+        { conclusion: 'pending', phase: 'queued' },
+        { conclusion: 'pending', phase: 'in_progress' },
+        { conclusion: 'success', phase: undefined },
+      ])
+      // Belt-and-braces on the undefined-key subtlety of toEqual: the
+      // terminal event must genuinely carry NO phase field.
+      expect(
+        ours[2]!.body.phase,
+        'terminal success must carry no phase',
+      ).toBeUndefined()
+      expect('phase' in ours[2]!.body, 'terminal success must omit the phase key').toBe(false)
       // Mis-routing guard: nothing may land on any other repo/change path.
       expect(
         node.events.length,
