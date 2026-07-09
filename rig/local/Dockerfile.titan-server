@@ -7,8 +7,21 @@
 # The Dockerfile does NOT compile Java — `task dev:titan` runs the Gradle build
 # first and then `docker compose up`. Keeping compile out of the image keeps
 # the inner loop fast (no JDK + Gradle cache inside the image).
+#
+# Stale-jar guard (#44): because we COPY a host-built quarkus-app, anyone
+# running `docker compose up -d --build titan-server` directly (bypassing
+# `task dev:titan`'s Gradle step) silently ships whatever is lying around in
+# titan-server/build/quarkus-app — possibly stale. GIT_SHA is baked in at
+# build time (label + file) so `task rig:smoke` can compare the running
+# image's provenance against the checkout HEAD (dev/rig-smoke/
+# check-rig-freshness.sh) and warn loudly on drift. The default "unknown"
+# is deliberate: an image built without the arg (i.e. not via `task
+# dev:titan`) is exactly the footgun case and must be flagged.
 
 FROM eclipse-temurin:21-jre
+
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
 
 # curl is used by the docker-compose healthcheck (the base image's /bin/sh is
 # dash, no /dev/tcp). Cheaper than wget here.
@@ -28,6 +41,11 @@ COPY titan-server/build/quarkus-app/lib/      /app/lib/
 COPY titan-server/build/quarkus-app/app/      /app/app/
 COPY titan-server/build/quarkus-app/quarkus/  /app/quarkus/
 COPY titan-server/build/quarkus-app/quarkus-run.jar /app/quarkus-run.jar
+
+# In-container copy of the provenance SHA (#44) — `docker exec <c> cat
+# /app/TITAN_GIT_SHA` works even when the docker CLI label probe is
+# unavailable (e.g. exec-only access). The label above is the canonical probe.
+RUN echo "${GIT_SHA}" > /app/TITAN_GIT_SHA
 
 EXPOSE 8080
 

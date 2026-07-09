@@ -56,7 +56,10 @@ make_specs "$TMP/specs43" 43
 make_specs "$TMP/specs5" 5
 
 run_golden() { # extra env via caller's `env ... run_golden` — args: none
-  RIG_SMOKE_PLAYWRIGHT_CMD="$TMP/pw-capture.sh" \
+  # #44/#84 probes skipped — hermetic (no docker/rig); covered by their own tests.
+  RIG_SMOKE_SKIP_FRESHNESS=1 \
+    RIG_SMOKE_SKIP_PREWARM=1 \
+    RIG_SMOKE_PLAYWRIGHT_CMD="$TMP/pw-capture.sh" \
     RIG_SMOKE_JSONL="$JSONL" \
     RIG_SMOKE_TEE="$TEE" \
     bash "$SCRIPT"

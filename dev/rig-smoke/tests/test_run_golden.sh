@@ -52,6 +52,12 @@ chmod +x "$TMP/pw-pass.sh"
 PRESEED='{"ts":"2026-07-01T00:00:00Z","passed":14,"failed":0,"durationMs":1}'
 echo "$PRESEED" > "$JSONL"
 
+# The #44 freshness probe and #84 pre-warm are skipped here to keep this test
+# hermetic (no docker/rig dependency) — they have their own dedicated tests:
+# test_check_rig_freshness.sh / test_prewarm_worker.sh / test_run_golden_freshness.sh.
+export RIG_SMOKE_SKIP_FRESHNESS=1
+export RIG_SMOKE_SKIP_PREWARM=1
+
 # ── Case 1: ADVERSARIAL — failing run → non-zero exit AND line appended ───
 set +e
 RIG_SMOKE_PLAYWRIGHT_CMD="$TMP/pw-fail.sh" \

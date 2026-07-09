@@ -138,5 +138,37 @@ if ! tail -n 1 "$TMP/jsonl" | grep -q '"did_not_run":23'; then
 fi
 echo "ok: ADVERSARIAL — amputated run ('23 did not run') recorded as did_not_run=23"
 
+# ── Case 8: #44 — rigShaMismatch defaults to false when env unset ─────────
+OUT=$(bash "$SCRIPT" "$TMP/green.txt" 0 12345)
+if ! echo "$OUT" | grep -q '"rigShaMismatch":false'; then
+  echo "FAIL: unset RIG_SMOKE_RIG_SHA_MISMATCH should record rigShaMismatch=false: $OUT" >&2
+  exit 1
+fi
+echo "ok: rigShaMismatch defaults to false"
+
+# ── Case 9: #44 — env 'true' records the stale-rig flag in the telemetry ──
+OUT=$(RIG_SMOKE_RIG_SHA_MISMATCH=true bash "$SCRIPT" "$TMP/green.txt" 0 12345 "$TMP/jsonl")
+if ! echo "$OUT" | grep -q '"rigShaMismatch":true'; then
+  echo "FAIL: RIG_SMOKE_RIG_SHA_MISMATCH=true not recorded: $OUT" >&2
+  exit 1
+fi
+if ! tail -n 1 "$TMP/jsonl" | grep -q '"rigShaMismatch":true'; then
+  echo "FAIL: appended jsonl line lost rigShaMismatch: $(tail -n1 "$TMP/jsonl")" >&2
+  exit 1
+fi
+echo "ok: stale-rig flag (rigShaMismatch=true) recorded in output + jsonl"
+
+# ── Case 10: ADVERSARIAL — garbage env can never inject JSON into the line ─
+OUT=$(RIG_SMOKE_RIG_SHA_MISMATCH='},"passed":999,"x":{' bash "$SCRIPT" "$TMP/green.txt" 0 12345)
+if ! echo "$OUT" | grep -q '"rigShaMismatch":false'; then
+  echo "FAIL: garbage RIG_SMOKE_RIG_SHA_MISMATCH must sanitize to false: $OUT" >&2
+  exit 1
+fi
+if echo "$OUT" | grep -q '"passed":999'; then
+  echo "FAIL: env value injected JSON into the telemetry line: $OUT" >&2
+  exit 1
+fi
+echo "ok: ADVERSARIAL — non-boolean env sanitized (no JSON injection)"
+
 echo ""
 echo "PASS: all rig-smoke-parse.sh cases (including adversarial breakage guard)"

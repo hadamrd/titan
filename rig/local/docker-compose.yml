@@ -72,6 +72,12 @@ services:
     build:
       context: ../..
       dockerfile: rig/local/Dockerfile.titan-server
+      args:
+        # Stale-jar guard (#44): `task dev:titan` exports GIT_SHA=<checkout
+        # HEAD> before `docker compose up --build`. A direct `docker compose
+        # up --build titan-server` leaves it unset → the image is labelled
+        # "unknown" and dev/rig-smoke/check-rig-freshness.sh flags it.
+        GIT_SHA: "${GIT_SHA:-unknown}"
     depends_on:
       postgres:
         condition: service_healthy
