@@ -66,7 +66,11 @@ export const PageHeader = React.forwardRef<HTMLElement, PageHeaderProps>(
       <div className="min-w-0">
         <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">{title}</h1>
         {description ? (
-          <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+          // Stable hook for e2e header-copy oracles (e.g. the /builds
+          // jobs-vs-builds-count guard in 21-builds-page-no-rot.spec.ts).
+          <p className="mt-1 text-sm text-muted-foreground" data-testid="page-description">
+            {description}
+          </p>
         ) : null}
       </div>
       {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}

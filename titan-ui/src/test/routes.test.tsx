@@ -335,11 +335,13 @@ describe('Builds route /builds', () => {
 describe('Builds route /builds — global view regression (#442)', () => {
   it('renders the global-view subtitle, not a job-pinned one', async () => {
     renderBuildsAt('/builds')
-    // Calm-editorial redesign: subtitle reads "Pipeline runs on <workspace>"
-    // and the toolbar carries the row count via tab badges. Either signal is
-    // valid evidence the page is the global view.
+    // #77 (defect-6 no-rot): the subtitle now leads with the BUILDS total —
+    // "<n> builds across <m> jobs" — never a bare jobs count masquerading as
+    // the page's numeral. Still global (spans jobs), still not job-pinned.
     await waitFor(() =>
-      expect(screen.getByText(/pipeline runs/i)).toBeInTheDocument(),
+      expect(screen.getByTestId('page-description')).toHaveTextContent(
+        /\d+\s+builds?\s+across\s+\d+\s+jobs?/i,
+      ),
     )
     // The old bug rendered "Showing builds for Main Pipeline · 1 jobs total".
     // Specifically guard the "for <name>" phrasing being gone — the global page

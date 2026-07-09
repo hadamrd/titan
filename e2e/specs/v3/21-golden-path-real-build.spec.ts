@@ -198,20 +198,48 @@ test.describe('v3 golden-path-real-build @golden', () => {
       // 2. Find titan-hello jobId.
       const jobId = await findTitanHelloJobId(request, bearer)
 
-      // 3. Navigate to /jobs/$id, click "Run pipeline", capture the trigger
-      //    response.
+      // 3. Navigate to /jobs/$id (redirects to /pipelines/$id), click
+      //    "Run pipeline". The UI now interposes a confirmation dialog
+      //    ("About to run pipeline for …", TriggerPreviewModal — #641/#77):
+      //    the POST fires only on Confirm.
       await page.goto(`${ENV.uiBaseUrl}/jobs/${jobId}`)
-      await expect(page.getByRole('button', { name: /run pipeline/i })).toBeVisible({
-        timeout: 10_000,
+      const runBtn = page.getByRole('button', { name: /run pipeline/i })
+      await expect(runBtn).toBeVisible({ timeout: 10_000 })
+
+      // Record every trigger POST so the Cancel path below can prove NONE fired.
+      let triggerPostCount = 0
+      const isTriggerPost = (u: string, m: string) =>
+        u.includes(`/api/v1/jobs/${jobId}/builds`) && m === 'POST'
+      page.on('request', (r) => {
+        if (isTriggerPost(r.url(), r.method())) triggerPostCount++
       })
 
+      const confirmDialog = page.locator(
+        '[data-testid="trigger-preview-backdrop"] [role="dialog"]',
+      )
+
+      // 3a. ADVERSARIAL: open the dialog, Cancel — the dialog closes and NO
+      //     build is triggered. A Cancel that fires a POST is a sev1.
+      await runBtn.click()
+      await expect(confirmDialog).toBeVisible({ timeout: 10_000 })
+      await expect(confirmDialog).toContainText(/about to run pipeline/i)
+      await page.getByTestId('trigger-preview-cancel').click()
+      await expect(confirmDialog).toBeHidden({ timeout: 5_000 })
+      expect(
+        triggerPostCount,
+        'Cancel on the run-confirmation dialog fired a trigger POST — a build was queued without consent',
+      ).toBe(0)
+
+      // 3b. Re-open and Confirm — NOW the POST fires; capture its response.
+      await runBtn.click()
+      await expect(confirmDialog).toBeVisible({ timeout: 10_000 })
       const triggerRespPromise = page.waitForResponse(
         (r) =>
           r.url().includes(`/api/v1/jobs/${jobId}/builds`) &&
           r.request().method() === 'POST',
         { timeout: 10_000 },
       )
-      await page.getByRole('button', { name: /run pipeline/i }).click()
+      await page.getByTestId('trigger-preview-confirm').click()
       const triggerResp = await triggerRespPromise
       expect(
         triggerResp.ok(),

@@ -317,8 +317,15 @@ function BuildsPage() {
           isLoading ? (
             <>&nbsp;</>
           ) : (
+            // #77 (defect-6 no-rot): the header's leading count MUST be the
+            // builds total — a bare jobs count as the page's only numeral
+            // reintroduces the jobs/builds-count confusion (#825 defect 6).
+            // The em-dash covers the brief window where the cheap all-count
+            // query is still in flight (same neutral-dash rule as BuildsSummary).
             <>
-              Pipeline runs across <span className="mono">{jobsPage?.total ?? 0}</span> job
+              <span className="mono">{allCount?.total ?? '—'}</span> build
+              {allCount?.total === 1 ? '' : 's'} across{' '}
+              <span className="mono">{jobsPage?.total ?? 0}</span> job
               {(jobsPage?.total ?? 0) === 1 ? '' : 's'}
             </>
           )

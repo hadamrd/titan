@@ -186,6 +186,19 @@ describe('/builds — page frame (H1/H5/H6)', () => {
     expect(screen.getByTestId('builds-new-build').textContent).toBe('New build')
   })
 
+  it('header subtitle leads with the BUILDS total, never a bare jobs count (#825 defect 6 / #77)', async () => {
+    mountBuilds('/builds', [buildsHandler(), jobsHandler()])
+    const desc = await screen.findByTestId('page-description')
+    // Both counts, both labeled: "<builds> build(s) across <jobs> job(s)".
+    await waitFor(() =>
+      expect(desc.textContent).toMatch(/^\s*\d+\s+builds?\s+across\s+\d+\s+jobs?\s*$/),
+    )
+    const m = desc.textContent!.match(/(\d+)\s+builds?\s+across\s+(\d+)\s+jobs?/)!
+    // The count labeled "build(s)" is the builds total; "job(s)" the jobs total.
+    expect(Number(m[1])).toBe(SEED_BUILDS_PAGE.total)
+    expect(Number(m[2])).toBe(SEED_JOBS_PAGE.total)
+  })
+
   it('renders the at-a-glance summary strip (passing / failed / running)', async () => {
     mountBuilds('/builds', [buildsHandler(), jobsHandler()])
     await waitFor(() => expect(screen.getByTestId('builds-summary')).toBeInTheDocument())
