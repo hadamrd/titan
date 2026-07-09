@@ -207,5 +207,56 @@ if ! echo "$OUT" | grep -q '"failed":1'; then
 fi
 echo "ok: ADVERSARIAL — non-boolean mount env sanitized (no JSON injection)"
 
+# ── Case 14: #151 — triage_latency_ms line in tee → additive triageLatencyMs ─
+cat > "$TMP/triage.txt" <<'EOF'
+Running 14 tests using 2 workers
+[triage-telemetry] triage_latency_ms=18432 budget_ms=45000 build_id=77 status=FAILED
+  14 passed (92s)
+EOF
+OUT=$(bash "$SCRIPT" "$TMP/triage.txt" 0 12345 "$TMP/jsonl")
+if ! echo "$OUT" | grep -q '"triageLatencyMs":18432'; then
+  echo "FAIL: triage latency line not lifted into triageLatencyMs: $OUT" >&2
+  exit 1
+fi
+if ! tail -n 1 "$TMP/jsonl" | grep -q '"triageLatencyMs":18432'; then
+  echo "FAIL: appended jsonl line lost triageLatencyMs: $(tail -n1 "$TMP/jsonl")" >&2
+  exit 1
+fi
+# Additive only: every pre-#151 field must ride along untouched.
+if ! echo "$OUT" | grep -q '"passed":14'; then
+  echo "FAIL: triageLatencyMs must not disturb passed: $OUT" >&2
+  exit 1
+fi
+if ! echo "$OUT" | grep -q '"rigMountIssue":false'; then
+  echo "FAIL: triageLatencyMs must not disturb rigMountIssue: $OUT" >&2
+  exit 1
+fi
+echo "ok: #151 — triage_latency_ms lifted into additive triageLatencyMs field"
+
+# ── Case 15: #151 — no triage line → field OMITTED (pre-#151 line shape) ───
+OUT=$(bash "$SCRIPT" "$TMP/green.txt" 0 12345)
+if echo "$OUT" | grep -q 'triageLatencyMs'; then
+  echo "FAIL: tee without triage line must omit triageLatencyMs: $OUT" >&2
+  exit 1
+fi
+echo "ok: #151 — triageLatencyMs omitted when the triage spec did not run"
+
+# ── Case 16: ADVERSARIAL — garbage around the number can never inject JSON ─
+cat > "$TMP/triage-evil.txt" <<'EOF'
+triage_latency_ms=1},"passed":999,"x":{
+[triage-telemetry] triage_latency_ms=20001 budget_ms=45000
+  14 passed (92s)
+EOF
+OUT=$(bash "$SCRIPT" "$TMP/triage-evil.txt" 0 12345)
+if ! echo "$OUT" | grep -q '"triageLatencyMs":20001'; then
+  echo "FAIL: last triage line should win with digits-only extraction: $OUT" >&2
+  exit 1
+fi
+if echo "$OUT" | grep -q '"passed":999'; then
+  echo "FAIL: tee content injected JSON into the telemetry line: $OUT" >&2
+  exit 1
+fi
+echo "ok: ADVERSARIAL — triage latency extraction is digits-only (no JSON injection)"
+
 echo ""
 echo "PASS: all rig-smoke-parse.sh cases (including adversarial breakage guard)"

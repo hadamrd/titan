@@ -17,8 +17,9 @@
  * Strategy:
  *   1. Create a job from the `e2e/pipelines/node-app-with-failing-test/`
  *      fixture (vitest suite where exactly ONE test fails on purpose).
- *   2. Trigger a build, assert it terminates as FAILURE within 30 s
- *      (configurable via TITAN_FAILURE_TRIAGE_TIMEOUT_MS).
+ *   2. Trigger a build, assert it terminates as FAILURE within the triage
+ *      budget (default 30 s; configurable via TITAN_E2E_TRIAGE_BUDGET_MS —
+ *      see #151 and the WHY note on FAILURE_TIMEOUT_MS below).
  *   3. Open the build-detail page, assert the failing step renders with a
  *      red/error accessible status (role + data-status, NOT pixel colour).
  *   4. Click the failing step, assert the log viewer renders and contains a
@@ -54,7 +55,22 @@ import { safeDeleteJobCascade } from '../fixtures/teardown-v3'
 const ENV = authEnv()
 const API_BASE = process.env.TITAN_API_URL ?? 'http://localhost:18080'
 
-const FAILURE_TIMEOUT_MS = Number(process.env.TITAN_FAILURE_TRIAGE_TIMEOUT_MS ?? 30_000)
+// #151: trigger→FAILURE budget. The DEFAULT stays 30_000 — the strict canary
+// for every non-smoke context. PR #146 proved product latency healthy (engine
+// overhead ~3s, verdict fold ~1.5s); the residual intermittent misses were
+// npm/vitest EXECUTION time under suite-start CPU contention on the local
+// rig, so dev/rig-smoke/run-golden.sh exports TITAN_E2E_TRIAGE_BUDGET_MS=45000
+// for the smoke ONLY. The legacy TITAN_FAILURE_TRIAGE_TIMEOUT_MS name is
+// honored as a fallback (it predates #151 and was only ever read here).
+const FAILURE_TIMEOUT_MS = Number(
+  process.env.TITAN_E2E_TRIAGE_BUDGET_MS
+    ?? process.env.TITAN_FAILURE_TRIAGE_TIMEOUT_MS
+    ?? 30_000,
+)
+// #151: keep polling past the budget so a miss records its REAL observed
+// latency (the elapsed <= budget assertion below stays the oracle) instead of
+// aborting blind at the deadline with no measurement.
+const TRIAGE_POLL_GRACE_MS = 45_000
 const SUCCESS_TIMEOUT_MS = Number(process.env.TITAN_FAILURE_TRIAGE_SUCCESS_TIMEOUT_MS ?? 60_000)
 
 const TERMINAL = new Set(['SUCCESS', 'FAILED', 'FAILURE', 'ABORTED', 'UNSTABLE', 'ERROR'])
@@ -184,14 +200,30 @@ test.describe('golden-path-failure-triage @golden @sre', () => {
     }
   })
 
-  test('1. push -> red build: FAILURE within 30s of trigger', async ({ request }) => {
-    test.setTimeout(FAILURE_TIMEOUT_MS + 60_000)
+  test('1. push -> red build: FAILURE within the triage budget (default 30s)', async ({ request }) => {
+    test.setTimeout(FAILURE_TIMEOUT_MS + TRIAGE_POLL_GRACE_MS + 60_000)
 
     const t0 = Date.now()
     failingBuildId = await triggerBuild(request, bearer, jobId)
 
-    const { status, observedStatuses } = await pollTerminal(request, bearer, failingBuildId, FAILURE_TIMEOUT_MS)
+    const { status, observedStatuses } = await pollTerminal(
+      request,
+      bearer,
+      failingBuildId,
+      FAILURE_TIMEOUT_MS + TRIAGE_POLL_GRACE_MS,
+    )
     const elapsed = Date.now() - t0
+
+    // #151 latency telemetry: record the observed trigger→terminal latency as
+    // a test annotation (visible in the HTML/JUnit reports) AND as a
+    // grep-able console line (rig-smoke-parse.sh lifts it into the smoke
+    // JSONL as the additive `triageLatencyMs` field). Budget drift becomes
+    // visible in data instead of as flakes.
+    test.info().annotations.push({ type: 'triage-latency-ms', description: String(elapsed) })
+    console.log(
+      `[triage-telemetry] triage_latency_ms=${elapsed} budget_ms=${FAILURE_TIMEOUT_MS} ` +
+        `build_id=${failingBuildId} status=${status}`,
+    )
 
     expect(
       FAILED.has(status),
