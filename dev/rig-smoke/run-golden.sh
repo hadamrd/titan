@@ -68,6 +68,17 @@ if [ -z "${TITAN_GLOBAL_TIMEOUT_MS:-}" ]; then
 fi
 echo "[rig-smoke] budget: ${TITAN_GLOBAL_TIMEOUT_MS}ms for ${GOLDEN_COUNT} golden specs, workers=${TITAN_PW_WORKERS}"
 
+# ── Failure-triage budget (#151) ────────────────────────────────────────────
+# WHY 45000 here while the spec default stays 30000: PR #146 proved product
+# latency healthy (engine overhead ~3s, verdict fold ~1.5s; timeline-proven),
+# yet the triage spec still missed intermittently by seconds — the residue is
+# npm/vitest EXECUTION time under suite-start CPU contention (2 PW workers +
+# 5 containers on WSL2). 45s is exec-contention headroom for THIS smoke
+# harness ONLY, and still catches the #106/#145-class 6-12s engine inflations
+# at p95. Every non-smoke context keeps the strict 30s canary (spec default).
+# Explicit operator overrides win, same as the other knobs above.
+export TITAN_E2E_TRIAGE_BUDGET_MS="${TITAN_E2E_TRIAGE_BUDGET_MS:-45000}"
+
 # ── Stale-rig probe (#44) ───────────────────────────────────────────────────
 # `task dev:titan` bakes the checkout HEAD into the titan-server image
 # (build-arg GIT_SHA → OCI revision label). The probe compares that label to

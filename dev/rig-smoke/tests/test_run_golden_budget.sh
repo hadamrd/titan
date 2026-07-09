@@ -36,7 +36,7 @@ ENV_CAPTURE="$TMP/env-capture.txt"
 # Stub playwright: record the env it inherited, emit a green reporter line.
 cat > "$TMP/pw-capture.sh" <<EOF
 #!/usr/bin/env bash
-echo "workers=\${TITAN_PW_WORKERS:-unset} budget=\${TITAN_GLOBAL_TIMEOUT_MS:-unset}" > "$ENV_CAPTURE"
+echo "workers=\${TITAN_PW_WORKERS:-unset} budget=\${TITAN_GLOBAL_TIMEOUT_MS:-unset} triage=\${TITAN_E2E_TRIAGE_BUDGET_MS:-unset}" > "$ENV_CAPTURE"
 echo "  14 passed (90s)"
 exit 0
 EOF
@@ -117,6 +117,33 @@ if ! grep -q 'TITAN_GLOBAL_TIMEOUT_MS ?? 20 \* 60 \* 1000' "$REPO_ROOT/e2e/playw
   exit 1
 fi
 echo "ok: playwright.config.ts defaults untouched (budget lives in the harness)"
+
+# ── Case 7: #151 — smoke exports the 45s triage budget to playwright ──────
+# The spec's DEFAULT stays 30s (the strict canary for non-smoke contexts);
+# the smoke harness alone widens it to 45s for exec-contention headroom.
+SPECS_DIR="$TMP/specs43" run_golden > "$TMP/c7.out" 2>&1
+if ! grep -q 'triage=45000' "$ENV_CAPTURE"; then
+  echo "FAIL: run-golden.sh should export TITAN_E2E_TRIAGE_BUDGET_MS=45000, got: $(cat "$ENV_CAPTURE")" >&2
+  exit 1
+fi
+echo "ok: #151 — smoke exports TITAN_E2E_TRIAGE_BUDGET_MS=45000"
+
+# ── Case 8: #151 — explicit TITAN_E2E_TRIAGE_BUDGET_MS override always wins ─
+SPECS_DIR="$TMP/specs43" TITAN_E2E_TRIAGE_BUDGET_MS=31000 run_golden > "$TMP/c8.out" 2>&1
+if ! grep -q 'triage=31000' "$ENV_CAPTURE"; then
+  echo "FAIL: explicit TITAN_E2E_TRIAGE_BUDGET_MS was clobbered, got: $(cat "$ENV_CAPTURE")" >&2
+  exit 1
+fi
+echo "ok: #151 — explicit TITAN_E2E_TRIAGE_BUDGET_MS override respected"
+
+# ── Case 9: #151 — the spec's default budget literal stays 30_000 ─────────
+# Guard the non-smoke canary: the widened budget must live in run-golden.sh
+# ONLY, never as a weakened default inside the spec.
+if ! grep -q '?? 30_000' "$REPO_ROOT/e2e/specs/golden-path-failure-triage.spec.ts"; then
+  echo "FAIL: triage spec default budget is no longer 30_000 — the strict canary was weakened" >&2
+  exit 1
+fi
+echo "ok: #151 — spec default budget literal is still 30_000 (canary intact)"
 
 echo ""
 echo "PASS: all run-golden.sh budget-derivation cases (#45)"

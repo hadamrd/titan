@@ -27,6 +27,12 @@
 #     footgun). Recorded as the ADDITIVE `rigMountIssue` field with the same
 #     strict-boolean sanitization; existing fields untouched.
 #
+# Tee-derived fields:
+#   triageLatencyMs (#151) — lifted from the failure-triage spec's grep-able
+#     `triage_latency_ms=<N>` console line when present in the tee (digits
+#     only; no injection surface). Omitted entirely when absent, so lines
+#     from runs without the triage spec keep the exact pre-#151 shape.
+#
 # Side effects:
 #   - Echoes the JSON line to stdout.
 #   - If jsonl-out is given, appends the JSON line there.
@@ -69,8 +75,20 @@ if [ "${RIG_SMOKE_RIG_MOUNT_ISSUE:-false}" = "true" ]; then
 else
   RIG_MOUNT_ISSUE=false
 fi
+# #151 triage-latency telemetry — the failure-triage spec console-logs a
+# grep-able `triage_latency_ms=<N>` line (trigger→FAILURE ms, observed even
+# when the budget assertion reds). When present in the tee, it rides along as
+# the ADDITIVE trailing `triageLatencyMs` field. Digits-only extraction — the
+# tee content can never inject JSON into the line. Absent (triage spec
+# filtered out / older suite) → field omitted entirely, so existing lines and
+# non-triage runs stay byte-compatible for check-3-consecutive.sh and friends.
+TRIAGE_LATENCY=$(grep -oE 'triage_latency_ms=[0-9]+' "$TEE" | tail -n1 | grep -oE '[0-9]+$' || true)
+TRIAGE_FIELD=""
+if [ -n "$TRIAGE_LATENCY" ]; then
+  TRIAGE_FIELD=",\"triageLatencyMs\":$TRIAGE_LATENCY"
+fi
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-LINE="{\"ts\":\"$TS\",\"passed\":$PASSED,\"failed\":$FAILED,\"did_not_run\":$DID_NOT_RUN,\"durationMs\":$DUR,\"rigShaMismatch\":$RIG_SHA_MISMATCH,\"rigMountIssue\":$RIG_MOUNT_ISSUE}"
+LINE="{\"ts\":\"$TS\",\"passed\":$PASSED,\"failed\":$FAILED,\"did_not_run\":$DID_NOT_RUN,\"durationMs\":$DUR,\"rigShaMismatch\":$RIG_SHA_MISMATCH,\"rigMountIssue\":$RIG_MOUNT_ISSUE$TRIAGE_FIELD}"
 
 echo "$LINE"
 if [ -n "$OUT" ]; then
