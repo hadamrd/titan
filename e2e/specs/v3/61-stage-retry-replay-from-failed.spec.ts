@@ -17,13 +17,13 @@
  * ── What the engine promises ────────────────────────────────────────────────
  * stage-retry (in-place, same build row):
  *   200 { type:"applied", buildId, stageId, resetNodeIds:[stage first, then
- *   descendants], taskId } — stage + DAG descendants reset to QUEUED, build
- *   flips FAILED→RUNNING (finishedAt cleared), ORCHESTRATE/ADVANCE enqueued,
- *   prior successful stages untouched. Retrying a non-FAILED stage → 409.
- *   NOTE: the engine does NOT promise `attempt` increments here — flow_nodes
- *   .attempt is design/44 step-retry-policy bookkeeping (StepRetryPolicy is
- *   its only writer); manual stage-retry leaves it alone. We therefore assert
- *   re-execution via fresh timestamps + verdict recomputation, not attempt.
+ *   descendants], taskId } — stage nodes reset to QUEUED, step nodes to
+ *   PENDING with a bumped `attempt` (the #125 dispatch-generation supersede),
+ *   build flips FAILED→RUNNING (finishedAt cleared), ORCHESTRATE/ADVANCE
+ *   enqueued, prior successful stages untouched. Retrying a non-FAILED stage
+ *   → 409. We assert re-execution via fresh timestamps + verdict
+ *   recomputation — the observable contract — rather than internal attempt
+ *   bookkeeping.
  *
  * replay-from-failed (fork, NEW build):
  *   201 full BuildDto of a fresh build of the same job, triggerType "replay",
@@ -32,29 +32,29 @@
  *   and the anchor onward re-executes from the parent's baked pipeline model.
  *   The parent build is never mutated.
  *
- * ── Known engine bugs pinned by this spec ──────────────────────────────────
- * #125 — stage-retry never actually re-executes the step: the orchestrator's
- *   reconciler folds the PREVIOUS attempt's archived FAILED task straight back
- *   onto the freshly-reset QUEUED node (no new EXECUTE_COMMAND is dispatched;
- *   the step's startedAt stays NULL). The honest re-execution assertion lives
- *   in the `test.fixme` below — un-fixme it when #125 lands. The wire-contract
- *   leg (reset shape, sibling untouched, verdict recomputed) holds today and
- *   is asserted green; it stays green after the #125 fix too (the step still
- *   deterministically exits 1 on re-run).
- * #126 — BUILD_RERUN authority (the replay endpoints' inner Authz gate) reads
- *   the v1 `titan.user_roles` table, which nothing on the rig seeds and which
- *   the AdminUsersApi grant path cannot reach (it writes rbac_user_role). The
- *   replay test seeds `user_roles ('dev','MAINTAINER')` pg-direct in setup and
- *   removes exactly what it inserted in teardown (spec-ownership rule). Delete
- *   that workaround when #126 lands.
+ * ── Engine bugs this spec caught (both FIXED — the tests below are their
+ *    standing acceptance) ─────────────────────────────────────────────────
+ * #125 (fixed) — stage-retry used to never re-execute the step: the
+ *   reconciler folded the previous attempt's archived FAILED task back onto
+ *   the freshly-reset node. Fixed by dispatch-generation supersede keyed on
+ *   flow_nodes.attempt (retryStage now resets step nodes to PENDING and
+ *   bumps attempt). The third test asserts honest re-execution via fresh
+ *   startedAt timestamps.
+ * #126 (fixed) — BUILD_RERUN used to read only the legacy flat
+ *   `titan.user_roles` table, 403ing everyone on a fresh rig. It now
+ *   resolves through the canonical ScopedAuthz chain (rbac_user_role →
+ *   legacy fallback → realm floor from the JWT), so the rig dev user's
+ *   ADMIN group clears the gate with ZERO DB seeds — this spec's old
+ *   pg-direct user_roles seed/revoke workaround has been deleted, and its
+ *   absence is itself the #126 regression oracle (a 403 on replay means
+ *   the canonical chain broke again).
  *
  * Ownership + teardown: per-run unique job names; safeDeleteJobCascade (#59)
- * in finally; the RBAC seed row is removed only if this spec inserted it.
- * Deterministic waits only (bounded poll loops — house style of specs 25/44).
+ * in finally. Deterministic waits only (bounded poll loops — house style of
+ * specs 25/44).
  */
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { authEnv, fetchBearerToken } from '../../fixtures/auth-v3'
-import { pgClient } from '../../fixtures/seed-v3'
 import { safeDeleteJobCascade } from '../../fixtures/teardown-v3'
 
 const ENV = authEnv()
@@ -214,42 +214,6 @@ function nodeById(nodes: FlowNodeDto[], nodeId: string): FlowNodeDto {
   return n!
 }
 
-/**
- * #126 workaround: the replay endpoints' inner BUILD_RERUN gate reads the v1
- * `titan.user_roles` table, which has no product-side seeding path on the rig
- * (the grants API writes rbac_user_role). Seed MAINTAINER for the dev user
- * pg-direct; return a revoke fn that deletes the row ONLY if this call
- * inserted it (never yank a grant somebody else owns). Remove when #126 lands.
- */
-async function grantBuildRerunAuthority(): Promise<() => Promise<void>> {
-  const user = ENV.username
-  const client = pgClient()
-  await client.connect()
-  let inserted = false
-  try {
-    const res = await client.query(
-      `INSERT INTO titan.user_roles (user_id, role) VALUES ($1, 'MAINTAINER')
-       ON CONFLICT DO NOTHING`,
-      [user],
-    )
-    inserted = (res.rowCount ?? 0) > 0
-  } finally {
-    await client.end()
-  }
-  return async () => {
-    if (!inserted) return
-    const c = pgClient()
-    await c.connect()
-    try {
-      await c.query(`DELETE FROM titan.user_roles WHERE user_id = $1 AND role = 'MAINTAINER'`, [
-        user,
-      ])
-    } finally {
-      await c.end()
-    }
-  }
-}
-
 /** Run one failing build to terminal FAILED and return its pre-restart state. */
 async function failedParentBuild(
   request: APIRequestContext,
@@ -389,15 +353,13 @@ test.describe('v3 stage-retry + replay-from-failed @golden (closes #122)', () =>
     }
   })
 
-  // Engine bug #125: stage-retry resets the node + enqueues ADVANCE, but the
-  // orchestrator's reconciler re-folds the PREVIOUS attempt's archived FAILED
-  // task onto the reset node — no new EXECUTE_COMMAND is ever dispatched, the
-  // step's startedAt stays NULL and its log shows a single execution. The
-  // javadoc contract ("the orchestrator re-dispatches the work") does not
-  // hold, so the honest re-execution assertion lives here as fixme.
-  // Un-fixme when #125 lands — the body is ready to run as-is.
-  test.fixme(
-    'stage-retry actually RE-EXECUTES the failed stage (engine bug #125 — reconciler re-folds the stale FAILED task)',
+  // Acceptance for the #125 fix: pre-fix, the orchestrator's reconciler
+  // re-folded the PREVIOUS attempt's archived FAILED task onto the reset node
+  // (no new EXECUTE_COMMAND, startedAt stayed NULL). Now the retry bumps the
+  // node's dispatch generation and the stale task is superseded — the step
+  // genuinely re-executes, proven by fresh startedAt timestamps below.
+  test(
+    'stage-retry actually RE-EXECUTES the failed stage — fresh dispatch, stale archived task superseded, not re-folded',
     async ({ request }) => {
       test.setTimeout(4 * 60_000)
       const runTag = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`
@@ -454,7 +416,6 @@ test.describe('v3 stage-retry + replay-from-failed @golden (closes #122)', () =>
     test.setTimeout(4 * 60_000)
     const runTag = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`
     const bearer = await fetchBearerToken(ENV)
-    const revokeRerunAuthority = await grantBuildRerunAuthority() // #126 workaround
     let jobId: number | undefined
     try {
       jobId = await createFailingJob(request, bearer, `e2e-replay-failed-${runTag}`)
@@ -474,7 +435,9 @@ test.describe('v3 stage-retry + replay-from-failed @golden (closes #122)', () =>
       expect(
         replayResp.status,
         `POST /replay-from-failed must 201: HTTP ${replayResp.status} ` +
-          `${replayResp.raw.slice(0, 300)}. A 403 here means the #126 user_roles seed regressed.`,
+          `${replayResp.raw.slice(0, 300)}. A 403 here means BUILD_RERUN's canonical ` +
+          `rbac_user_role/realm-floor resolution regressed (#126) — this test runs with ` +
+          `ZERO DB role seeds on purpose.`,
       ).toBe(201)
       const replay = replayResp.body!
       expect(replay.id, 'replay must be a NEW build, never the parent').not.toBe(parentId)
@@ -521,7 +484,6 @@ test.describe('v3 stage-retry + replay-from-failed @golden (closes #122)', () =>
       ).toBe(parent.build.finishedAt)
     } finally {
       if (jobId !== undefined) await safeDeleteJobCascade(request, jobId)
-      await revokeRerunAuthority()
     }
   })
 })
