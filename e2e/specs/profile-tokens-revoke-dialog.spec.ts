@@ -7,16 +7,14 @@
  *   - Cancel closes the dialog without firing the DELETE
  *   - Confirm fires the DELETE and the row reflects revoked state
  *
- * KNOWN-BLOCKED (#113): before #109 this spec never ran its body — its
- * `beforeAll` seed 400'd on illegal PAT scopes ('builds:read'). With the
- * seed made honest (#109) the body now runs and deterministically wedges
- * clicking Cancel/Confirm: ConfirmDialog is rendered inline (not portaled)
- * inside `.tab-pane`, and `.btn:active { transform: translateY(0.5px) }`
- * micro-shifts the button on mousedown so the `click` resolves to
- * `.gate-modal-backdrop` instead. That is a titan-ui defect (#113), not a
- * test issue — the ORACLE below is left INTACT (never force:true / never
- * weakened). Marked `test.fixme` so the suite stays honest; delete the
- * fixme line when #113 lands and the buttons are reliably clickable.
+ * History: before #109 this spec never ran its body — its `beforeAll` seed
+ * 400'd on illegal PAT scopes ('builds:read'). Once the seed was made honest
+ * (#109), the body wedged on clicking Cancel/Confirm because ConfirmDialog
+ * rendered inline (not portaled) inside `.tab-pane` while
+ * `.btn:active { transform: translateY(0.5px) }` micro-shifted the button
+ * between mousedown and click (#113). Fixed product-side by portaling
+ * ConfirmDialog to <body> and neutralizing the :active translate inside
+ * modals — the oracle below runs unmodified (never force:true).
  */
 import { test, expect } from '@playwright/test'
 import { authEnv, loginViaKeycloak } from '../fixtures/auth-v3'
@@ -36,11 +34,6 @@ test.describe('Profile / Access tokens — revoke uses themed ConfirmDialog', ()
   })
 
   test('Cancel closes the dialog without firing DELETE; Confirm fires it', async ({ page }) => {
-    // KNOWN-BLOCKED by titan-ui #113 (un-portaled ConfirmDialog + .btn:active
-    // transform steals the click to the backdrop). Remove this line when #113
-    // lands; the assertions below are the real, unmodified oracle.
-    test.fixme(true, 'blocked by titan-ui #113')
-
     // If the page ever fell back to native window.confirm, this listener
     // would auto-dismiss it and the test would still drive forward — that
     // would hide a regression. We REJECT native dialogs by failing the test

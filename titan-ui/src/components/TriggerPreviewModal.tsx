@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/Button'
 
 interface TriggerPreviewModalProps {
@@ -36,7 +37,9 @@ export function TriggerPreviewModal({
 
   const hasScript = typeof pipelineScript === 'string' && pipelineScript.length > 0
 
-  return (
+  // Portal to <body> (#113): keeps the fixed backdrop viewport-relative even
+  // when the modal is mounted under a transformed/animated ancestor.
+  return createPortal(
     <div
       className="gate-modal-backdrop"
       role="presentation"
@@ -123,6 +126,7 @@ export function TriggerPreviewModal({
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

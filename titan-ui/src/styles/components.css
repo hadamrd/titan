@@ -331,6 +331,14 @@
   from { opacity: 0; transform: scale(0.96); }
   to { opacity: 1; transform: scale(1); }
 }
+/* #113: the global `.btn:active { transform: translateY(0.5px) }` press
+   feedback micro-shifts modal action buttons between mousedown and mouseup,
+   so the resulting `click` can hit-test to the backdrop and dismiss the
+   dialog instead of firing the action. Inside modals, correctness of the
+   click beats the press affordance — no transform. */
+.gate-modal .btn:active {
+  transform: none;
+}
 .gate-modal-head { padding: 18px 18px 8px; }
 .gate-modal-foot {
   padding: 12px 18px;

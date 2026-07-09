@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { useGithubWebhookCredentials, useUpdateJobScript } from '@/api/hooks'
@@ -83,7 +84,9 @@ export function TriggerEditor({ jobId, pipelineScript, onClose, onSaved }: Trigg
     )
   }
 
-  return (
+  // Portal to <body> (#113): keeps the fixed backdrop viewport-relative even
+  // when the modal is mounted under a transformed/animated ancestor.
+  return createPortal(
     <div
       className="gate-modal-backdrop"
       role="presentation"
@@ -179,7 +182,8 @@ export function TriggerEditor({ jobId, pipelineScript, onClose, onSaved }: Trigg
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
