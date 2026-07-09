@@ -14,19 +14,21 @@ export interface SeededToken {
   scopes: string[] | null
 }
 
-interface CreateResponse {
+export interface CreateResponse {
   id: string
   name: string
   prefix: string
   token: string
   scopes?: string[] | null
+  jobPattern?: string | null
 }
 
-interface ListEntry {
+export interface ListEntry {
   id: string
   name: string
   prefix: string
   scopes?: string[] | null
+  jobPattern?: string | null
   revokedAt?: string | null
 }
 
@@ -39,9 +41,11 @@ export async function createToken(
   scopes: string[] | undefined,
   bearer: string,
   env: AuthEnv = authEnv(),
+  extra?: { jobPattern?: string },
 ): Promise<CreateResponse> {
   const body: Record<string, unknown> = { name }
   if (scopes !== undefined) body.scopes = scopes
+  if (extra?.jobPattern !== undefined) body.jobPattern = extra.jobPattern
   const res = await fetch(`${baseUrl(env)}/api/v1/me/tokens`, {
     method: 'POST',
     headers: {
