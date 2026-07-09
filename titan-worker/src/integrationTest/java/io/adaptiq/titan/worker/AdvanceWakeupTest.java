@@ -166,6 +166,10 @@ class AdvanceWakeupTest {
    * available_at <= now} — the whole point: no 5s poll delay), an {@code
    * {"action":"ADVANCE","buildId":N}} payload, the build id on the row for the terminal-build fuse
    * and per-build dispatch grouping, and the trace context carried across the hop.
+   *
+   * <p>#147: completion + wake now commit in ONE transaction ({@code completeAndWakeOrchestrator}),
+   * so the wake row can never be claimable before the completion's terminal status is visible — the
+   * ordering is structural, not call-order.
    */
   @Test
   void completedStepEnqueuesImmediateAdvanceForItsBuild() throws Exception {
@@ -175,9 +179,14 @@ class AdvanceWakeupTest {
     WorkerDb.ClaimedTask task = db.claim("wake-worker", "default").orElseThrow();
     db.markProcessing(task.id(), task.claimToken());
     // A FAILED verdict must wake the orchestrator too — that IS the failure-triage path.
-    assertTrue(db.complete(task.id(), task.claimToken(), "FAILED", "{\"exitCode\":1}"));
-
-    db.enqueueAdvanceWakeup(task.buildId(), task.traceParent());
+    assertTrue(
+        db.completeAndWakeOrchestrator(
+            task.id(),
+            task.claimToken(),
+            "FAILED",
+            "{\"exitCode\":1}",
+            task.buildId(),
+            task.traceParent()));
 
     try (Connection c = conn();
         PreparedStatement ps =
@@ -210,6 +219,52 @@ class AdvanceWakeupTest {
       try (ResultSet rs = ps.executeQuery()) {
         assertTrue(rs.next());
         assertEquals("FAILED", rs.getString(1));
+      }
+    }
+  }
+
+  /**
+   * Adversarial (#147): a REJECTED completion (stale claim token — the zombie-worker case) must
+   * enqueue NO wake row. Waking the orchestrator for a verdict that was never accepted would make
+   * it reconcile against a task that is still legitimately in flight under another lease.
+   */
+  @Test
+  void staleCompletionEnqueuesNoWake() throws Exception {
+    long buildId = insertBuild("wake/stale-completion-no-wake");
+    enqueueStepTask(buildId, null);
+    WorkerDb.ClaimedTask task = db.claim("wake-worker", "default").orElseThrow();
+    db.markProcessing(task.id(), task.claimToken());
+
+    boolean accepted =
+        db.completeAndWakeOrchestrator(
+            task.id(),
+            java.util.UUID.randomUUID(), // stale/foreign token — must be rejected
+            "FAILED",
+            "{\"exitCode\":1}",
+            buildId,
+            null);
+    assertTrue(!accepted, "a completion with a stale claim token must be rejected");
+
+    try (Connection c = conn();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT COUNT(*) FROM titan.task_queue WHERE type='ORCHESTRATE' "
+                    + "AND build_id=?")) {
+      ps.setLong(1, buildId);
+      try (ResultSet rs = ps.executeQuery()) {
+        assertTrue(rs.next());
+        assertEquals(0, rs.getInt(1), "a rejected completion must not wake the orchestrator");
+      }
+    }
+
+    // The task row is untouched — still PROCESSING under the real lease.
+    try (Connection c = conn();
+        PreparedStatement ps =
+            c.prepareStatement("SELECT status FROM titan.task_queue WHERE id=?")) {
+      ps.setLong(1, task.id());
+      try (ResultSet rs = ps.executeQuery()) {
+        assertTrue(rs.next());
+        assertEquals("PROCESSING", rs.getString(1));
       }
     }
   }

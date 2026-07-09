@@ -312,18 +312,23 @@ public final class TitanWorker {
       // reaped while it ran — because it outran its visibility timeout —
       // and re-claimed by a peer, the stale token is rejected here and the
       // peer's run is authoritative. No double *write*.
-      boolean accepted = db.complete(task.id(), task.claimToken(), status, resultJson);
+      //
+      // Event-driven orchestrator wake-up (issue #145): a step verdict must
+      // not wait for the controller's 5s delayed ADVANCE re-poll — losing
+      // that race cost ~6s PER STEP and blew the failure-triage 30s budget
+      // under concurrent load. Steps only: synthesis completion is observed
+      // by the SYNTHESIZE poll, whose done-branch enqueues BAKE — an
+      // unconditional ADVANCE there could double-BAKE the DAG.
+      //
+      // #147: completion + wake commit in ONE transaction so the wake row can
+      // never be claimable before the completion is visible — provable by
+      // construction, not by call ordering. See completeStepAndWake.
+      boolean accepted =
+          (!synthesisTask && task.buildId() != null)
+              ? completeStepAndWake(task, status, resultJson)
+              : db.complete(task.id(), task.claimToken(), status, resultJson);
       if (accepted) {
         LOG.info("task {} -> {}", task.id(), status);
-        // Event-driven orchestrator wake-up (issue #145): a step verdict must
-        // not wait for the controller's 5s delayed ADVANCE re-poll — losing
-        // that race cost ~6s PER STEP and blew the failure-triage 30s budget
-        // under concurrent load. Steps only: synthesis completion is observed
-        // by the SYNTHESIZE poll, whose done-branch enqueues BAKE — an
-        // unconditional ADVANCE there could double-BAKE the DAG.
-        if (!synthesisTask) {
-          wakeOrchestrator(task);
-        }
       } else {
         // Diagnose the REAL cause (issue #57): only one of the four rejection causes is
         // the reaper; blaming them all on "reaped and re-claimed" mis-directed a whole
@@ -340,24 +345,33 @@ public final class TitanWorker {
   }
 
   /**
-   * Best-effort enqueue of an immediate {@code ORCHESTRATE/ADVANCE} for the completed step task's
-   * build (issue #145) — see {@link WorkerDb#enqueueAdvanceWakeup}. A failure here is logged and
-   * swallowed: the controller's delayed ADVANCE re-poll (#827 backoff ladder) still observes the
-   * completion, just up to one poll cycle later — the pre-#145 behaviour.
+   * Complete a step task and wake the orchestrator atomically (issues #145 + #147) — see {@link
+   * WorkerDb#completeAndWakeOrchestrator}. If the atomic write fails (transient DB error), the
+   * completion must not be lost with the wake: fall back to the plain token-guarded {@code
+   * complete}. The verdict is then observed by the controller's delayed ADVANCE re-poll (#827
+   * backoff ladder) — the pre-#145 latency, never a wrong verdict. In the rare case where the
+   * atomic path actually committed before the failure surfaced, the fallback's token-guarded UPDATE
+   * matches 0 rows and this returns {@code false}; the caller's rejection diagnostics then name the
+   * row's real (terminal) state.
    */
-  private void wakeOrchestrator(WorkerDb.ClaimedTask task) {
-    if (task.buildId() == null) {
-      return;
-    }
+  private boolean completeStepAndWake(WorkerDb.ClaimedTask task, String status, String resultJson)
+      throws java.sql.SQLException {
     try {
-      db.enqueueAdvanceWakeup(task.buildId(), task.traceParent());
-      LOG.debug("task {} completion woke orchestrator for build {}", task.id(), task.buildId());
-    } catch (Exception e) {
+      boolean accepted =
+          db.completeAndWakeOrchestrator(
+              task.id(), task.claimToken(), status, resultJson, task.buildId(), task.traceParent());
+      if (accepted) {
+        LOG.debug("task {} completion woke orchestrator for build {}", task.id(), task.buildId());
+      }
+      return accepted;
+    } catch (java.sql.SQLException e) {
       LOG.warn(
-          "orchestrator wake-up enqueue failed for build {} — "
-              + "the delayed ADVANCE poll will fold the verdict instead",
+          "atomic completion+wake failed for task {} (build {}) — retrying completion without "
+              + "the wake; the delayed ADVANCE poll will fold the verdict instead",
+          task.id(),
           task.buildId(),
           e);
+      return db.complete(task.id(), task.claimToken(), status, resultJson);
     }
   }
 
