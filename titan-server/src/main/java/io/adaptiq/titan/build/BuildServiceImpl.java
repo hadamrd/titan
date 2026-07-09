@@ -481,13 +481,27 @@ public class BuildServiceImpl implements BuildService {
     long taskId =
         stores.withTransaction(
             conn -> {
-              // Reset stage + descendants: status → QUEUED and clear the previous attempt's
-              // outcome (timing + result + failure stamps) via raw SQL so a single round-trip per
-              // node touches every "previous attempt" column. updateStatus() uses COALESCE which
-              // would refuse to overwrite started_at / completed_at with NULL.
+              // Reset stage + descendants and clear the previous attempt's outcome (timing +
+              // result + failure stamps) via raw SQL so a single round-trip per node touches every
+              // "previous attempt" column. updateStatus() uses COALESCE which would refuse to
+              // overwrite started_at / completed_at with NULL.
+              //
+              // Step nodes go back to PENDING — the pristine never-dispatched state — and their
+              // attempt (dispatch generation) is bumped (#125). Both halves matter: PENDING routes
+              // the node through the orchestrator's normal dispatch leg (fresh `when:` evaluation,
+              // control-plane steps re-park, started_at re-stamped by the PENDING→QUEUED CAS), and
+              // the attempt bump is what tells the reconciler that the previous attempt's archived
+              // terminal EXECUTE_COMMAND is SUPERSEDED — pre-#125 it folded that stale FAILED task
+              // straight back onto the reset node and the stage was never re-executed. Stage /
+              // group nodes keep the pre-#125 QUEUED reset (attempt is a step-node concept; the
+              // advance loop CASes any non-terminal stage to RUNNING regardless).
               try (var ps =
                   conn.prepareStatement(
-                      "UPDATE titan.flow_nodes SET status = 'QUEUED', "
+                      "UPDATE titan.flow_nodes SET "
+                          + "status = CASE WHEN node_type = 'STEP' THEN 'PENDING' "
+                          + "ELSE 'QUEUED' END, "
+                          + "attempt = CASE WHEN node_type = 'STEP' THEN attempt + 1 "
+                          + "ELSE attempt END, "
                           + "started_at = NULL, completed_at = NULL, duration_ms = NULL, "
                           + "result_json = NULL, failure_category = NULL, failure_reason = NULL "
                           + "WHERE build_id = ? AND node_id = ?")) {

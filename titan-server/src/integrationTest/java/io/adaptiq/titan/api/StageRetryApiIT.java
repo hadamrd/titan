@@ -42,8 +42,12 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * <p>Scenarios pinned:
  *
  * <ul>
- *   <li>retry a FAILED stage → 200, stage + descendants flipped to QUEUED, build flipped to
- *       RUNNING, audit row STAGE_RETRIED emitted, ORCHESTRATE/ADVANCE enqueued
+ *   <li>retry a FAILED stage → 200, stage descendants reset (stages → QUEUED; steps → PENDING with
+ *       a bumped attempt, #125, so the reconciler treats the previous attempt's archived task as
+ *       superseded), build flipped to RUNNING, audit row STAGE_RETRIED emitted, ORCHESTRATE/ADVANCE
+ *       enqueued. The orchestrator half of the seam — the fresh EXECUTE_COMMAND actually being
+ *       re-dispatched and the new verdict recomputed — is pinned by {@link
+ *       io.adaptiq.titan.flow.StageRetryReExecutionIT}.
  *   <li>retry a SUCCEEDED stage → {@link RetryStagePreconditionException} (409 at the REST layer)
  *   <li>retry a RUNNING stage → {@link RetryStagePreconditionException} (409)
  *   <li>retry on unknown build → {@link ApiNotFoundException} (404)
@@ -102,7 +106,7 @@ class StageRetryApiIT {
   @Test
   void retryFailedStage_resetsStageAndDescendants_flipsBuildRunning_enqueuesAdvance_audits() {
     // Build: stage-1 (SUCCESS) → stage-2 (FAILED) → step-2a (FAILED, child of stage-2).
-    // Retrying stage-2 must reset stage-2 + step-2a to QUEUED but leave stage-1 SUCCESS.
+    // Retrying stage-2 must reset stage-2 + step-2a but leave stage-1 SUCCESS.
     long buildId = freshFailedBuild();
     seedStageNode(buildId, "stage-1", "SUCCESS", null);
     seedStageNode(buildId, "stage-2", "FAILED", null);
@@ -129,15 +133,24 @@ class StageRetryApiIT {
     // Stage-1 untouched.
     assertEquals(
         "SUCCESS", stores.flowNodes().findByBuildAndNode(buildId, "stage-1").orElseThrow().status);
-    // Stage-2 + descendants reset to QUEUED with cleared timing/result.
+    // Stage-2 + descendant stages reset to QUEUED with cleared timing/result.
     FlowNodeRow s2 = stores.flowNodes().findByBuildAndNode(buildId, "stage-2").orElseThrow();
     assertEquals("QUEUED", s2.status);
     assertNull(s2.startedAt);
     assertNull(s2.completedAt);
     assertNull(s2.failureCategory);
     assertNull(s2.failureReason);
-    assertEquals(
-        "QUEUED", stores.flowNodes().findByBuildAndNode(buildId, "step-2a").orElseThrow().status);
+    assertEquals(1, s2.attempt, "attempt is a step-node concept — stages keep theirs");
+    // Step nodes reset to PENDING (the pristine dispatchable state) with the attempt (dispatch
+    // generation) bumped — #125: the bump is what makes the reconciler treat the previous
+    // attempt's archived EXECUTE_COMMAND as superseded instead of folding its stale FAILED back.
+    FlowNodeRow s2a = stores.flowNodes().findByBuildAndNode(buildId, "step-2a").orElseThrow();
+    assertEquals("PENDING", s2a.status);
+    assertEquals(2, s2a.attempt, "step reset must bump the dispatch generation (#125)");
+    assertNull(s2a.startedAt);
+    assertNull(s2a.completedAt);
+    assertNull(s2a.failureCategory);
+    assertNull(s2a.failureReason);
     assertEquals(
         "QUEUED", stores.flowNodes().findByBuildAndNode(buildId, "stage-3").orElseThrow().status);
 

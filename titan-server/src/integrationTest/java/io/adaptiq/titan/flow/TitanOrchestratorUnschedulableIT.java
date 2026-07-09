@@ -98,7 +98,8 @@ class TitanOrchestratorUnschedulableIT {
     // Back-date the task's created_at past the grace window — simulates a real 60s wait without
     // sleeping the test for a minute.
     backdateTaskCreatedAt(
-        latestExecuteTask().id, TitanOrchestrator.UNSCHEDULABLE_GRACE_SECONDS + 5);
+        latestExecuteTask().id,
+        io.adaptiq.titan.flow.orch.UnschedulableStepGuard.GRACE_SECONDS + 5);
 
     TitanOrchestrator.AdvanceResult r = orch.advance();
 
@@ -131,7 +132,8 @@ class TitanOrchestratorUnschedulableIT {
     TitanOrchestrator orch = new TitanOrchestrator(stores, buildId);
     orch.advance();
     backdateTaskCreatedAt(
-        latestExecuteTask().id, TitanOrchestrator.UNSCHEDULABLE_GRACE_SECONDS + 5);
+        latestExecuteTask().id,
+        io.adaptiq.titan.flow.orch.UnschedulableStepGuard.GRACE_SECONDS + 5);
     orch.advance();
 
     FlowNodeRow after = stepNode();

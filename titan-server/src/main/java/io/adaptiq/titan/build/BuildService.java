@@ -132,9 +132,12 @@ public interface BuildService {
 
   /**
    * Retry a single failed stage in place — #744. Unlike {@link #replay} which forks a fresh build,
-   * this resets the named stage's flow node (and every DAG descendant) back to {@code QUEUED},
-   * flips the build row from {@code FAILED} back to {@code RUNNING}, and enqueues an {@code
-   * ORCHESTRATE/ADVANCE} so the orchestrator re-dispatches the work in the same build row.
+   * this resets the named stage's flow node (and every DAG descendant) in the same build row: stage
+   * nodes go back to {@code QUEUED}, step nodes back to {@code PENDING} with their {@code attempt}
+   * (dispatch generation) bumped so the reconciler treats the previous attempt's archived {@code
+   * EXECUTE_COMMAND} as superseded (#125). The build row is flipped from {@code FAILED} back to
+   * {@code RUNNING} and an {@code ORCHESTRATE/ADVANCE} is enqueued so the orchestrator
+   * re-dispatches the work.
    *
    * <p>Strict preconditions, fail-fast in declared order:
    *

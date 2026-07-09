@@ -2,7 +2,6 @@ package io.adaptiq.titan.flow;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.annotations.Nullable;
 import io.adaptiq.titan.flow.expr.WhenEvaluator;
@@ -17,16 +16,16 @@ import io.adaptiq.titan.flow.orch.GateEvaluator;
 import io.adaptiq.titan.flow.orch.MatrixCoordinator;
 import io.adaptiq.titan.flow.orch.OutputContext;
 import io.adaptiq.titan.flow.orch.PipelineNodes;
-import io.adaptiq.titan.flow.orch.QueueSubscriptions;
 import io.adaptiq.titan.flow.orch.StageTeardownService;
 import io.adaptiq.titan.flow.orch.StepDispatcher;
 import io.adaptiq.titan.flow.orch.StepRetryPolicy;
 import io.adaptiq.titan.flow.orch.StructuredWhenGate;
+import io.adaptiq.titan.flow.orch.TaskAttempts;
 import io.adaptiq.titan.flow.orch.TimeoutEnforcer;
+import io.adaptiq.titan.flow.orch.UnschedulableStepGuard;
 import io.adaptiq.titan.observability.StepMetrics;
 import io.adaptiq.titan.store.FlowNodeDao;
 import io.adaptiq.titan.store.TitanStores;
-import io.adaptiq.titan.store.rows.AgentRow;
 import io.adaptiq.titan.store.rows.ApprovalRow;
 import io.adaptiq.titan.store.rows.FlowNodeRow;
 import io.adaptiq.titan.store.rows.TaskQueueRow;
@@ -84,19 +83,6 @@ public final class TitanOrchestrator {
   private static final Set<String> TASK_TERMINAL =
       Set.of("COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED");
   private static final Set<String> DEP_SATISFIED = Set.of("SUCCESS", "SKIPPED");
-
-  /**
-   * Grace window before an unclaimed {@code QUEUED} EXECUTE_COMMAND is declared unschedulable
-   * (#824). A real worker claim is sub-second on a healthy rig; 60s comfortably covers a worker
-   * restart / heartbeat blip without spuriously failing a step.
-   */
-  static final long UNSCHEDULABLE_GRACE_SECONDS = 60L;
-
-  /**
-   * Liveness window matching {@code AgentDao#listOnline} elsewhere in the orchestrator — a worker
-   * is "subscribed" only if its last heartbeat is this fresh.
-   */
-  private static final int AGENT_LIVENESS_SECONDS = 30;
 
   private final TitanStores daos;
   private final long buildId;
@@ -229,6 +215,14 @@ public final class TitanOrchestrator {
     List<TaskQueueRow> tasks = daos.taskQueue().listByBuildIncludingArchive(buildId);
 
     int reconciled = reconcileFinishedSteps(flowNodes, model, tasks);
+    if (reconciled > 0) {
+      // The reconcile leg can MUTATE the queue: StepRetryPolicy#retryStep enqueues the next
+      // attempt's backed-off EXECUTE_COMMAND. The advance leg below must see it, or the
+      // attempt-aware lost-dispatch self-heal (#125) reads the pre-reconcile snapshot — where the
+      // only task for the node carries the superseded attempt — and immediately dispatches a
+      // duplicate task for the attempt the retry policy just re-enqueued with backoff.
+      tasks = daos.taskQueue().listByBuildIncludingArchive(buildId);
+    }
     wakeSleepingNodes(flowNodes);
     timeoutEnforcer.enforceTimeouts(flowNodes, tasks);
 
@@ -296,77 +290,10 @@ public final class TitanOrchestrator {
     // targets a queue NO live worker subscribes to is structurally unschedulable — fail it
     // fast with a clear customer-facing reason rather than letting the orchestrator tight-loop
     // forever. Runs after dispatch so a JUST-enqueued task has a tick to be claimed before we
-    // even look at it.
-    failUnschedulableSteps(flowNodes, tasks);
+    // even look at it. Extracted to UnschedulableStepGuard (#125 size-cap follow-through).
+    new UnschedulableStepGuard(daos, buildId).failUnschedulableSteps(flowNodes, tasks);
 
     return finishIfDone(flowNodes, model, dispatched, reconciled);
-  }
-
-  /**
-   * Fail every {@code EXECUTE_COMMAND} task that is structurally unschedulable: still {@code
-   * QUEUED}, still unclaimed, older than {@link #UNSCHEDULABLE_GRACE_SECONDS}, and routed to a
-   * queue that no ONLINE worker currently subscribes to (#824).
-   *
-   * <p>Without this guard the bug from #824 — a worker that does not poll the {@code agent:}
-   * label's queue — manifests as a step parked QUEUED forever and the orchestrator tight-looping on
-   * every tick. The fix on the worker side (poll all label queues) covers the common case; this
-   * guard covers the configuration error (operator typoed {@code agent: linxu} or there is
-   * genuinely no worker for that label) and surfaces the failure where the customer can see it: the
-   * step's {@code failure_category=DISPATCH} + a sentence naming the missing queue.
-   *
-   * <p>Idempotent: a step already moved to {@code FAILED} by an earlier pass is skipped on the CAS;
-   * a later pass with a worker that came online never sees the task because the previous pass
-   * already terminated it. The DAG's normal failure-policy machinery handles the rest.
-   */
-  private void failUnschedulableSteps(
-      @NonNull FlowNodeDao flowNodes, @NonNull List<TaskQueueRow> tasks) {
-    Instant now = Instant.now();
-    Instant cutoff = now.minusSeconds(UNSCHEDULABLE_GRACE_SECONDS);
-    List<TaskQueueRow> candidates =
-        tasks.stream()
-            .filter(t -> "EXECUTE_COMMAND".equals(t.type))
-            .filter(t -> "QUEUED".equals(t.status))
-            .filter(t -> t.claimedAt == null)
-            .filter(t -> t.createdAt != null && t.createdAt.isBefore(cutoff))
-            .filter(t -> t.nodeId != null && t.queueName != null)
-            .toList();
-    if (candidates.isEmpty()) {
-      return;
-    }
-    // One agent-list read per tick (only when a candidate exists) — kept off the hot path.
-    List<AgentRow> online = daos.agents().listOnline(AGENT_LIVENESS_SECONDS);
-    Set<String> served = QueueSubscriptions.servedQueues(online);
-    for (TaskQueueRow t : candidates) {
-      if (served.contains(t.queueName)) {
-        continue;
-      }
-      String reason =
-          "No worker subscribes to queue '"
-              + t.queueName
-              + "' (no ONLINE agent advertises a matching label). "
-              + "Either add a label '"
-              + t.queueName
-              + "' to a running worker (set TITAN_LABELS) or change the stage's `agent:` to a "
-              + "served label.";
-      flowNodes.updateFailure(buildId, t.nodeId, "DISPATCH", reason);
-      ObjectNode result = JSON.createObjectNode();
-      result.put("exitCode", -1);
-      result.put("error", reason);
-      int won =
-          flowNodes.compareAndSetStatus(
-              buildId, t.nodeId, "QUEUED", "FAILED", null, now, null, result.toString());
-      if (won == 1) {
-        LOGGER.log(
-            Level.WARNING,
-            "[titan] build {0}: step {1} failed UNSCHEDULABLE — queue ''{2}'' has no subscriber",
-            new Object[] {buildId, t.nodeId, t.queueName});
-        // Cancel the underlying task so the queue feed / depth gauges stop showing a row that
-        // can never run. The cancel is independent of the step CAS — if the cancel races a
-        // late worker claim and loses, that worker will run + complete the task normally; the
-        // step is already FAILED so the result is folded as a no-op on the next reconcile.
-        daos.taskQueue().cancel(t.id);
-      }
-    }
   }
 
   // ── 1. reconcile ──────────────────────────────────────────────────────
@@ -384,6 +311,18 @@ public final class TitanOrchestrator {
    * <p>For a FAILED current task the orchestrator consults the step's retry policy: if attempts
    * remain and the failure is retryable (design/44 §3) it re-dispatches with backoff instead of
    * folding the node to {@code FAILED} (see {@code StepRetryPolicy#retryStep}).
+   *
+   * <p><strong>Superseded tasks are never folded (#125).</strong> "Latest per node" is not enough
+   * once an in-place stage retry ({@code BuildServiceImpl#retryStage}) has reset the node: the
+   * previous attempt's archived FAILED task is still the chronologically-latest task for the node,
+   * and pre-#125 the reconciler folded that stale failure straight back onto the freshly-reset node
+   * — the stage was never re-executed. Every {@code EXECUTE_COMMAND} payload therefore carries the
+   * node's {@code attempt} at dispatch time ({@link StepDispatcher#stepPayload}); a terminal task
+   * whose stamped attempt is older than the node's current {@code flow_nodes.attempt} belongs to a
+   * superseded generation and is skipped, leaving the dispatch leg's lost-dispatch self-heal to
+   * enqueue a fresh task for the current attempt. Payloads with no stamp (pre-#125 tasks) default
+   * to attempt 1 — identical folding for never-retried nodes, so re-delivered archives stay
+   * idempotent.
    */
   private int reconcileFinishedSteps(
       @NonNull FlowNodeDao flowNodes,
@@ -396,8 +335,19 @@ public final class TitanOrchestrator {
         latestByNode.put(t.nodeId, t); // chronological — last write wins
       }
     }
+    // Node snapshot for the generation check below — one read per pass, only taken when there is
+    // at least one observed task to reconcile.
+    Map<String, FlowNodeRow> nodesById =
+        latestByNode.isEmpty() ? Map.of() : PipelineNodes.byId(flowNodes.listByBuild(buildId));
     int reconciled = 0;
     for (TaskQueueRow t : latestByNode.values()) {
+      FlowNodeRow node = nodesById.get(t.nodeId);
+      if (node != null && TaskAttempts.attemptOf(t.payloadJson) < node.attempt) {
+        // #125: this task belongs to a superseded dispatch generation (the node was reset by an
+        // in-place stage retry after the task ran). Do not fold its outcome, do not re-point the
+        // log at it — the dispatch leg enqueues a fresh task for the current attempt.
+        continue;
+      }
       // issue #508: wire the EXECUTE_COMMAND task_token into flow_nodes.log_task_id so the
       // UI's per-node Logs panel can join titan.logs by task_id. Done for EVERY observed task
       // (including non-terminal RUNNING ones) so live builds also light up. Idempotent — the
@@ -647,8 +597,10 @@ public final class TitanOrchestrator {
           timeoutEnforcer.armTimeout(step);
           dispatched++;
         }
-      } else if ("QUEUED".equals(status) && !hasExecuteTask(tasks, step.getId())) {
-        // a dispatch was lost (crash between CAS and enqueue) — self-heal.
+      } else if ("QUEUED".equals(status) && !hasExecuteTask(tasks, step.getId(), sn.attempt)) {
+        // a dispatch was lost (crash between CAS and enqueue) — self-heal. Attempt-aware (#125):
+        // a task from a SUPERSEDED generation (stage retry reset the node, bumping its attempt)
+        // does not count as "the dispatch happened" — the current attempt still needs its task.
         // Defense-in-depth: don't re-dispatch a control-plane step that was wrongly QUEUED.
         if (ControlPlaneSteps.isControlPlane(step.getDescriptorId())) {
           String msg =
@@ -924,9 +876,20 @@ public final class TitanOrchestrator {
     return true;
   }
 
-  private static boolean hasExecuteTask(@NonNull List<TaskQueueRow> tasks, @NonNull String nodeId) {
+  /**
+   * True if some {@code EXECUTE_COMMAND} task for {@code nodeId} belongs to the node's current
+   * dispatch generation ({@code attempt}) or newer (#125). Tasks stamped with an older attempt were
+   * superseded by an in-place stage retry and must not satisfy the "dispatch happened" check — the
+   * self-heal then enqueues the current attempt's task, exactly once.
+   */
+  private static boolean hasExecuteTask(
+      @NonNull List<TaskQueueRow> tasks, @NonNull String nodeId, int attempt) {
     return tasks.stream()
-        .anyMatch(t -> "EXECUTE_COMMAND".equals(t.type) && nodeId.equals(t.nodeId));
+        .anyMatch(
+            t ->
+                "EXECUTE_COMMAND".equals(t.type)
+                    && nodeId.equals(t.nodeId)
+                    && TaskAttempts.attemptOf(t.payloadJson) >= attempt);
   }
 
   private static boolean exitCodeOk(@Nullable String resultJson) {
