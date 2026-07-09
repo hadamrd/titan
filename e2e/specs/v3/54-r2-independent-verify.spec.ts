@@ -23,10 +23,14 @@
  *   1. Clones hadamrd/titan-e2e-fixture, cuts a unique timestamped branch.
  *   2. Writes .titan/pipelines/archive-artifacts.yml — emits a sentinel whose
  *      bytes are unique per run (so the SHA-256 oracle is independent).
- *   3. Real-commits + pushes; polls the rig for the build → SUCCESS.
+ *   3. Real-commits + pushes; polls the rig for the build → SUCCESS. Every
+ *      /builds?search=<sha> hit is verified against the detail endpoint's
+ *      triggerMeta.commitSha before adoption (#118 — never trust items[0]).
  *   4. Connects to R2 DIRECTLY and asserts: object exists under the build's
  *      prefix, ContentLength == sentinel length, SHA-256(bytes) == sentinel SHA.
- *   5. finally{} deletes the R2 objects under the prefix AND the job row
+ *   5. finally{} deletes the R2 objects under the prefix AND — only when the
+ *      job provably belongs to this run (its name carries the unique branch
+ *      marker; see deleteJobIfOwned, #118) — the job row
  *      (`DELETE /api/v1/jobs/{jobId}` cascades to its builds) AND the branch.
  *
  * Test matrix:
@@ -67,6 +71,15 @@ interface BuildDto {
   status: string
   buildNumber?: number
   jobId?: number
+  /** Present on the DETAIL endpoint; carries the triggering commit SHA. */
+  triggerMeta?: { commitSha?: string | null } | null
+}
+
+/** Job detail shape — only the bits the ownership guard reads. */
+interface JobDto {
+  id: number
+  fullName?: string | null
+  displayName?: string | null
 }
 
 interface BuildsPage {
@@ -274,6 +287,14 @@ function deleteRemoteBranch(branch: string): void {
 
 // ── rig API helpers ────────────────────────────────────────────────────
 
+/**
+ * Find the build triggered by OUR pushed commit — and only ours. The list
+ * item DTO does not carry the commit SHA, so every search hit is verified
+ * against its DETAIL endpoint (`triggerMeta.commitSha`) before being
+ * returned (#118: `items[0]` used to be trusted blind — if the `search`
+ * matcher ever loosened, the spec would adopt and later DELETE someone
+ * else's build/job). A hit whose SHA does not equal `sha` is skipped.
+ */
 async function findBuildByHeadSha(bearer: string, sha: string): Promise<BuildDto | null> {
   const url = new URL(`${RIG_BASE_URL}/api/v1/builds`)
   url.searchParams.set('search', sha)
@@ -283,7 +304,16 @@ async function findBuildByHeadSha(bearer: string, sha: string): Promise<BuildDto
   })
   if (!res.ok) return null
   const page = (await res.json()) as BuildsPage
-  return page.items[0] ?? null
+  for (const candidate of page.items) {
+    const detail = await readBuild(bearer, candidate.id)
+    if (detail?.triggerMeta?.commitSha === sha) return detail
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[spec-54] search=${sha} returned build ${candidate.id} whose ` +
+        `triggerMeta.commitSha=${detail?.triggerMeta?.commitSha ?? 'absent'} — NOT ours, skipping`,
+    )
+  }
+  return null
 }
 
 async function readBuild(bearer: string, id: number): Promise<BuildDto | null> {
@@ -294,15 +324,46 @@ async function readBuild(bearer: string, id: number): Promise<BuildDto | null> {
   return (await res.json()) as BuildDto
 }
 
-/** Best-effort row cleanup: deleting the job cascades to its builds (ON DELETE CASCADE). */
-function deleteJob(bearer: string, jobId: number | undefined): void {
+/**
+ * Best-effort row cleanup, scoped to PROVABLY-OWN rows (#118): deleting the
+ * job cascades to its builds (ON DELETE CASCADE), so we must never delete a
+ * job this spec did not create. The job the rig discovers for our push is
+ * named after the branch we cut (`spec-54/<label>-<timestamp>` — unique per
+ * run); the guard reads the job and only DELETEs when its fullName or
+ * displayName carries that unique branch marker. Anything else (a shared /
+ * pre-existing repo job) is left in place with a loud note — losing one row
+ * of cleanup beats deleting someone else's job.
+ *
+ * Fetches a fresh bearer: the token minted at test start may be past
+ * Keycloak's 5-min TTL by teardown time (same reasoning as the poll-loop
+ * token factory, critic #1231).
+ */
+async function deleteJobIfOwned(jobId: number | undefined, branchMarker: string): Promise<void> {
   if (jobId === undefined) return
-  void fetch(`${RIG_BASE_URL}/api/v1/jobs/${jobId}`, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${bearer}` },
-  }).catch(() => {
+  try {
+    const bearer = await fetchBearerToken(ENV)
+    const res = await fetch(`${RIG_BASE_URL}/api/v1/jobs/${jobId}`, {
+      headers: { Authorization: `Bearer ${bearer}`, Accept: 'application/json' },
+    })
+    if (!res.ok) return
+    const job = (await res.json()) as JobDto
+    const name = `${job.fullName ?? ''} ${job.displayName ?? ''}`
+    if (!name.includes(branchMarker)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[spec-54] job ${jobId} (fullName="${job.fullName ?? ''}") does not carry the ` +
+          `run's branch marker "${branchMarker}" — it pre-exists or is shared. ` +
+          `Skipping delete (never remove rows this spec did not create).`,
+      )
+      return
+    }
+    await fetch(`${RIG_BASE_URL}/api/v1/jobs/${jobId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${bearer}` },
+    })
+  } catch {
     /* best-effort */
-  })
+  }
 }
 
 function sha256Hex(buf: Buffer | string): string {
@@ -314,6 +375,8 @@ function sha256Hex(buf: Buffer | string): string {
 interface DrivenBuild {
   build: BuildDto
   sha: string
+  /** The unique branch this run cut — the ownership marker for teardown. */
+  branch: string
   sentinelPath: string
   content: string
   expectedSha: string
@@ -378,6 +441,7 @@ async function driveSuccessfulBuild(
   return {
     build: final!,
     sha,
+    branch: checkout.branch,
     sentinelPath,
     content,
     expectedSha,
@@ -451,7 +515,7 @@ test.describe('@real-commit v3 r2-independent-verify', () => {
     } finally {
       await r2!.deletePrefix(driven.prefix).catch(() => {})
       r2!.close()
-      deleteJob(bearer!, driven.build.jobId)
+      await deleteJobIfOwned(driven.build.jobId, driven.branch)
       driven.cleanup()
     }
   })
@@ -508,8 +572,8 @@ test.describe('@real-commit v3 r2-independent-verify', () => {
       await r2!.deletePrefix(first.prefix).catch(() => {})
       if (secondRef) await r2!.deletePrefix(secondRef.prefix).catch(() => {})
       r2!.close()
-      deleteJob(bearer!, first.build.jobId)
-      if (secondRef) deleteJob(bearer!, secondRef.build.jobId)
+      await deleteJobIfOwned(first.build.jobId, first.branch)
+      if (secondRef) await deleteJobIfOwned(secondRef.build.jobId, secondRef.branch)
       first.cleanup()
       if (secondRef) secondRef.cleanup()
     }
