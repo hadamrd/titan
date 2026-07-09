@@ -3,6 +3,7 @@ package io.adaptiq.titan.store;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.annotations.Nullable;
 import io.adaptiq.titan.api.dto.BuildsQuery;
+import io.adaptiq.titan.db.TitanDataException;
 import io.adaptiq.titan.store.rows.ActiveBuildRow;
 import io.adaptiq.titan.store.rows.BuildRow;
 import java.sql.Connection;
@@ -473,12 +474,45 @@ public interface BuildDao extends SqlObject {
   // ---------------------------------------------------------------
   //  Build number allocation (standalone + transactional)
   // ---------------------------------------------------------------
-  /** Returns the next build number for a job (max + 1, or 1 if none). */
+  /**
+   * Returns the next build number for a job (max + 1, or 1 if none) — <strong>read-only, NOT an
+   * allocation</strong>. Runs on an autocommit connection with no lock, so two concurrent callers
+   * can observe the same value. Use it for display/diagnostics/tests; every real allocation must go
+   * through {@link #nextBuildNumber(Connection, long)} inside a transaction (issue #69).
+   */
   @SqlQuery("SELECT COALESCE(MAX(build_number), 0) + 1 FROM titan.builds WHERE job_id = :jobId")
   int nextBuildNumber(@Bind("jobId") long jobId);
 
-  /** Transaction-safe variant that uses the provided connection. Caller manages the transaction. */
+  /**
+   * Allocate the next build number for a job inside the caller's transaction — atomic under
+   * concurrency (closes #69).
+   *
+   * <p>First acquires the {@code FOR UPDATE} row lock on the {@code titan.jobs} row (the design/50
+   * D4 per-job mutex the trigger firing engine already holds via {@code JobDao.lockForUpdate}),
+   * then computes {@code MAX(build_number) + 1} on the same connection. A concurrent allocator for
+   * the same job blocks on the row lock until this transaction commits, then sees the committed
+   * insert — so numbers are unique and contiguous with no retry loop. Without the lock, two
+   * concurrent webhook deliveries both read the same max and one insert dies on {@code
+   * uq_builds_job_number} (issue #69: silent build drop).
+   *
+   * <p>Re-acquiring the lock in a transaction that already holds it (the trigger engine path) is a
+   * no-op. Portable across PostgreSQL and the H2 PG-mode test harness — both support {@code SELECT
+   * ... FOR UPDATE}.
+   *
+   * <p>The caller must insert the build on the SAME connection before committing; the allocation is
+   * only atomic while the transaction (and thus the lock) is open.
+   *
+   * @throws TitanDataException if the job row no longer exists — allocating a number for a deleted
+   *     job would only defer the failure to the FK on insert.
+   */
   default int nextBuildNumber(@NonNull Connection conn, long jobId) {
+    boolean jobRowLocked =
+        TitanStores.onConnection(conn, JobDao.class, dao -> dao.selectIdForUpdate(jobId))
+            .isPresent();
+    if (!jobRowLocked) {
+      throw new TitanDataException(
+          "cannot allocate build number: job " + jobId + " no longer exists");
+    }
     return TitanStores.onConnection(conn, BuildDao.class, dao -> dao.nextBuildNumber(jobId));
   }
 

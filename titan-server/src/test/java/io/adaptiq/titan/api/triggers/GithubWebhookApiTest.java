@@ -145,6 +145,85 @@ class GithubWebhookApiTest {
     assertTrue(stores.builds().listByJob(jobId).isEmpty());
   }
 
+  // ── #69: enqueue failure must NEVER be swallowed into a 2xx ─────────────────
+
+  @Test
+  void enqueueFailure_returns500_andLogsSevere() {
+    // A job the JobService knows about but whose DB row is gone — the allocation inside
+    // enqueueBuild throws. Any insert failure takes the same path; a missing row is the
+    // deterministic stand-in for the unique-violation race that #69 documents.
+    seedPhantomJob(999_999L, "kmajdoub/repo-phantom", "trunk");
+    creds.put("github-webhook", "gh-secret", SECRET);
+
+    List<java.util.logging.LogRecord> records = new java.util.ArrayList<>();
+    java.util.logging.Logger logger =
+        java.util.logging.Logger.getLogger(GithubWebhookApi.class.getName());
+    java.util.logging.Handler capture = recordingHandler(records);
+    logger.addHandler(capture);
+    Response resp;
+    try {
+      byte[] body = pushBody("refs/heads/trunk");
+      resp = api.receive(headers("sha256=" + hmac(SECRET, body), "push"), body);
+    } finally {
+      logger.removeHandler(capture);
+    }
+
+    assertEquals(
+        500,
+        resp.getStatus(),
+        "an enqueue failure must surface as non-2xx so GitHub retries the delivery (#69)");
+    assertTrue(
+        records.stream()
+            .anyMatch(r -> r.getLevel() == java.util.logging.Level.SEVERE && r.getThrown() != null),
+        "an enqueue failure must be logged at SEVERE with the cause chain (#69)");
+  }
+
+  @Test
+  void partialEnqueueFailure_returns500_butSiblingBuildStillEnqueued() {
+    long goodJob = seedJob("kmajdoub/repo-good", "trunk");
+    seedPhantomJob(999_998L, "kmajdoub/repo-phantom-2", "trunk");
+    creds.put("github-webhook", "gh-secret", SECRET);
+
+    byte[] body = pushBody("refs/heads/trunk");
+    Response resp = api.receive(headers("sha256=" + hmac(SECRET, body), "push"), body);
+
+    assertEquals(500, resp.getStatus(), "any failed candidate poisons the delivery to non-2xx");
+    assertEquals(
+        1,
+        stores.builds().listByJob(goodJob).size(),
+        "one candidate's failure must not starve its verified siblings");
+  }
+
+  /** Register a job in the {@link JobService} only — its {@code titan.jobs} row does NOT exist. */
+  private void seedPhantomJob(long id, @NonNull String fullName, @NonNull String branch) {
+    String configJson =
+        "{\"triggers\":[{\"type\":\"github\","
+            + "\"id\":\"trig-1\","
+            + "\"branches\":[\""
+            + branch
+            + "\"],"
+            + "\"events\":[\"push\"],"
+            + "\"credentialsId\":\"gh-secret\"}]}";
+    jobs.add(new Job(id, fullName, null, null, "", configJson, null, null, null, true));
+  }
+
+  @NonNull
+  private static java.util.logging.Handler recordingHandler(
+      @NonNull List<java.util.logging.LogRecord> sink) {
+    return new java.util.logging.Handler() {
+      @Override
+      public void publish(java.util.logging.LogRecord record) {
+        sink.add(record);
+      }
+
+      @Override
+      public void flush() {}
+
+      @Override
+      public void close() {}
+    };
+  }
+
   // ── helpers ─────────────────────────────────────────────────────────────────
 
   /** Seed a job whose {@code config_json} carries a github trigger for the given branch. */

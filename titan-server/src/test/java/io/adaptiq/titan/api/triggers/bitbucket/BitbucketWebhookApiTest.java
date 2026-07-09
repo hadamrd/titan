@@ -286,6 +286,56 @@ class BitbucketWebhookApiTest {
     assertFalse(BitbucketWebhookApi.refMatches(List.of("v*-rc"), "v2-final"));
   }
 
+  // ── #69: enqueue failure must NEVER be swallowed into a 2xx ─────────────────
+
+  @Test
+  void enqueueFailure_returns500_andLogsSevere() {
+    // Job known to the JobService but with no titan.jobs row — allocation inside enqueueBuild
+    // throws. Mirrors GithubWebhookApiTest; a 2xx would silently drop the event.
+    String configJson =
+        "{\"triggers\":[{\"type\":\"bitbucket\",\"id\":\"trig-1\",\"branches\":[\"trunk\"],"
+            + "\"events\":[\"push\"],\"credentialsId\":\"bb-secret\"}]}";
+    jobs.add(
+        new Job(999_999L, "team/repo-phantom", null, null, "", configJson, null, null, null, true));
+    creds.put("bitbucket-webhook", "bb-secret", SECRET);
+
+    List<LogRecord> records = new java.util.ArrayList<>();
+    Logger logger = Logger.getLogger(BitbucketWebhookApi.class.getName());
+    Handler capture = recordingHandler(records);
+    logger.addHandler(capture);
+    Response resp;
+    try {
+      byte[] body = pushBody("trunk", "deadbeefcafedeadbeefcafedeadbeefcafe1234");
+      resp = api.receive(headers(sign(SECRET, body), "repo:push"), body);
+    } finally {
+      logger.removeHandler(capture);
+    }
+
+    assertEquals(
+        500,
+        resp.getStatus(),
+        "enqueue failure must surface as non-2xx so the sender retries (#69)");
+    assertTrue(
+        records.stream().anyMatch(r -> r.getLevel() == Level.SEVERE && r.getThrown() != null),
+        "enqueue failure must be logged at SEVERE with the cause chain (#69)");
+  }
+
+  @NonNull
+  private static Handler recordingHandler(@NonNull List<LogRecord> sink) {
+    return new Handler() {
+      @Override
+      public void publish(LogRecord record) {
+        sink.add(record);
+      }
+
+      @Override
+      public void flush() {}
+
+      @Override
+      public void close() {}
+    };
+  }
+
   // ── helpers ──────────────────────────────────────────────────────────────────
 
   private long seedJob(@NonNull String fullName, @NonNull String ref, @NonNull String eventName) {

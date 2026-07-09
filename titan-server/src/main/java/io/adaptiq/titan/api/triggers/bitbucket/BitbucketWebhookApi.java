@@ -143,6 +143,7 @@ public class BitbucketWebhookApi {
     String triggerMetaJson = buildTriggerMetaJson(parsed);
 
     int enqueued = 0;
+    int enqueueFailures = 0;
     boolean anyVerified = false;
     for (JobTriggerMatch m : candidates) {
       Optional<String> secret =
@@ -175,13 +176,38 @@ public class BitbucketWebhookApi {
           continue;
         }
       }
-      enqueueBuild(m.job.id(), triggerMetaJson);
-      enqueued++;
+      // NEVER swallow an enqueue failure into a 2xx (issue #69): Bitbucket treats 2xx as
+      // delivered, so a swallowed insert failure is a silently lost event. Log at SEVERE with
+      // the cause chain, keep trying the remaining candidates, and answer 500 below.
+      try {
+        enqueueBuild(m.job.id(), triggerMetaJson);
+        enqueued++;
+      } catch (RuntimeException e) {
+        enqueueFailures++;
+        LOGGER.log(
+            Level.SEVERE,
+            "[bitbucket-webhook] failed to enqueue build for job "
+                + m.job.fullName()
+                + " —"
+                + " delivery will be answered 500 so the sender retries (issue #69)",
+            e);
+      }
     }
 
     if (!anyVerified) {
       return unauthorized(
           "X-Hub-Signature did not match any configured secret", "invalid_signature");
+    }
+    if (enqueueFailures > 0) {
+      return problem(
+          500,
+          "Webhook build enqueue failed",
+          "failed to enqueue "
+              + enqueueFailures
+              + " build(s) ("
+              + enqueued
+              + " enqueued) — retry the delivery",
+          "enqueue_failed");
     }
     return ok(enqueued > 0, "enqueued " + enqueued + " build(s)", eventKey);
   }
