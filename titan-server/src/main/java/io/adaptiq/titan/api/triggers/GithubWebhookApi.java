@@ -6,14 +6,13 @@ import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.annotations.Nullable;
 import io.adaptiq.titan.api.WebhookPayloadParams;
 import io.adaptiq.titan.api.WebhookTriggerMatcher;
+import io.adaptiq.titan.build.BuildEnqueuer;
 import io.adaptiq.titan.credentials.CredentialsService;
 import io.adaptiq.titan.job.Job;
 import io.adaptiq.titan.job.JobService;
-import io.adaptiq.titan.store.TaskQueueDao;
 import io.adaptiq.titan.store.TitanStores;
 import io.adaptiq.titan.store.rows.BuildRow;
 import io.adaptiq.titan.store.rows.JobRow;
-import io.adaptiq.titan.store.rows.TaskQueueRow;
 import io.adaptiq.titan.trigger.GithubTrigger;
 import io.adaptiq.titan.trigger.Trigger;
 import io.adaptiq.titan.trigger.TriggerCodec;
@@ -455,19 +454,7 @@ public class GithubWebhookApi {
           build.queuedAt = Instant.now();
           build.triggerMetaJson = triggerMetaJson;
           long buildId = stores.builds().insert(conn, build);
-
-          TaskQueueRow task = new TaskQueueRow();
-          task.type = "ORCHESTRATE";
-          task.queueName = "default";
-          task.status = "QUEUED";
-          task.priority = 0;
-          task.payloadJson = "{\"action\":\"SYNTHESIZE\",\"buildId\":" + buildId + "}";
-          task.attempts = 0;
-          task.maxAttempts = 3;
-          task.visibilityTimeoutSeconds = 3600;
-          task.buildId = buildId;
-          task.availableAt = Instant.now();
-          TitanStores.onConnection(conn, TaskQueueDao.class, dao -> dao.insert(task));
+          BuildEnqueuer.enqueueSynthesizeEntryTask(conn, buildId);
           return buildId;
         });
   }
