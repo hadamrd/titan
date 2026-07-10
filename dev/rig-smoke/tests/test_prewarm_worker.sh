@@ -231,7 +231,16 @@ if ! grep -q '/api/v1/jobs?search=' "$TMP/curl-calls.log"; then
   cat "$TMP/curl-calls.log" >&2
   exit 1
 fi
-echo "ok: idempotent — 409 on create resolves the existing warm-up job"
+# #157: a reused job may hold a STALE pipeline (observed live: a pre-#157 job
+# still ran the in-place `cd /titan/fixtures` install, which fails against the
+# read-only mount — the "warm-up" warmed nothing). The 409 path must PATCH the
+# stored pipelineScript back to the current one.
+if ! grep -qE -- '-X PATCH .*/api/v1/jobs/77' "$TMP/curl-calls.log"; then
+  echo "FAIL: 409 path must rotate the reused job's pipelineScript via PATCH /api/v1/jobs/77 (#157):" >&2
+  cat "$TMP/curl-calls.log" >&2
+  exit 1
+fi
+echo "ok: idempotent — 409 on create resolves the existing warm-up job and rotates its stale pipeline (#157)"
 
 # ── Case 5: build never terminal → warning but exit 0 (never fails smoke) ──
 reset_state

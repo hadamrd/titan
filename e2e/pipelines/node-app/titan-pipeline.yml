@@ -31,14 +31,21 @@
 # bindings), not here — the previous `${{ secrets.NPM_TOKEN }}` spelling was
 # never part of the PDL grammar.
 
-# Source location: the local rig bind-mounts the repo's e2e/pipelines/ at
-# /titan/fixtures inside the worker (rig/local/docker-compose.yml); see the
-# node-app-with-failing-test sibling for the full rationale.
+# Source location + isolation (#157): the local rig bind-mounts the repo's
+# e2e/pipelines/ READ-ONLY at /titan/fixtures inside the worker
+# (rig/local/docker-compose.yml). The install stage copies the fixture into
+# the build's OWN workspace (/titan/worker/build-<id> — design/43) and every
+# later stage runs there — real CI checkout semantics. Never run npm inside
+# the shared mount: concurrent builds of one fixture racing on a shared
+# node_modules produced a phantom SUCCESS on a should-fail build (#157). See
+# the node-app-with-failing-test sibling for the full rationale.
 agent: linux
 
 env:
   NODE_ENV: production
   REGISTRY_URL: https://registry.npmjs.org
+  # Shared npm cache on the titan-ws volume (#157) — cache dir ≠ workspace.
+  npm_config_cache: /titan/npm-cache
 
 parameters:
   - name: deployEnv
@@ -54,32 +61,38 @@ parameters:
 stages:
   - stage: install
     steps:
-      - sh: cd /titan/fixtures/node-app && npm ci --no-audit --no-fund || npm install --no-audit --no-fund --no-package-lock
+      # Copy-into-workspace-then-run (#157) — same pattern as the
+      # node-app-with-failing-test sibling. Later stages inherit the cwd
+      # (design/43: all stages of one build share the workspace), so no cd.
+      - sh: |
+          set -e
+          tar -C /titan/fixtures/node-app --exclude=./node_modules --exclude=./dist -cf - . | tar -xf -
+          npm ci --prefer-offline --no-audit --no-fund || npm install --prefer-offline --no-audit --no-fund --no-package-lock
 
   - stage: lint
     dependsOn: [install]
     steps:
       # Per-step env override — proves step-wins merge order.
-      - sh: cd /titan/fixtures/node-app && node -e "console.log('lint NODE_ENV=' + process.env.NODE_ENV)"
+      - sh: node -e "console.log('lint NODE_ENV=' + process.env.NODE_ENV)"
         env:
           NODE_ENV: development
 
   - stage: unit-test
     dependsOn: [lint]
     steps:
-      - sh: cd /titan/fixtures/node-app && npm test --silent
+      - sh: npm test --silent
 
   - stage: build
     dependsOn: [unit-test]
     steps:
-      - sh: cd /titan/fixtures/node-app && npm run build
+      - sh: npm run build
 
   - stage: deploy-staging
     dependsOn: [build]
     # Bake-time guard: stage-level when: reads params.* only (docs/reference/pdl.md).
     when: "params.deployEnv == 'staging'"
     steps:
-      - sh: cd /titan/fixtures/node-app && echo "would publish to $REGISTRY_URL"
+      - sh: echo "would publish to $REGISTRY_URL"
 
   - stage: smoke-test
     # No `when:` needed — default blockOnFailure skips this stage if
@@ -87,4 +100,4 @@ stages:
     # bake-time SKIP of deploy-staging does not block it — see header note.
     dependsOn: [deploy-staging]
     steps:
-      - sh: cd /titan/fixtures/node-app && node -e "console.log('smoke OK')"
+      - sh: node -e "console.log('smoke OK')"

@@ -10,21 +10,46 @@
 #   * after the spec patches the failing test to passing and re-triggers,
 #     the build terminates as SUCCESS.
 
-# Source location: the local rig bind-mounts the repo's e2e/pipelines/ at
-# /titan/fixtures inside the worker (rig/local/docker-compose.yml). Steps cd
-# into the mounted dir — node_modules persists there across builds, so the
-# `npm install` fallback is a fast no-op after the first run, and the triage
-# spec's patch-source-then-retrigger leg (#1130 test 4) sees host edits live.
+# Source location + isolation (#157): the local rig bind-mounts the repo's
+# e2e/pipelines/ READ-ONLY at /titan/fixtures inside the worker
+# (rig/local/docker-compose.yml). Steps start in the build's OWN workspace
+# (/titan/worker/build-<id> — design/43 build-scoped workspaces), so the
+# install stage copies the fixture source INTO that workspace and every later
+# stage runs there — real CI checkout semantics. Running npm in the shared
+# mount (the pre-#157 design) let two concurrent builds of this fixture race
+# on one node_modules: one build's `npm ci` wiped node_modules mid-vitest of
+# the other, vitest found zero tests, exited 0, and a should-fail build went
+# PHANTOM SUCCESS. The live bind mount stays (read-only) because the triage
+# spec's patch-source-then-retrigger leg (#1130 test 4) edits the fixture on
+# the HOST and the next build's fresh copy must pick the change up.
+#
+# Warm-run speed: node_modules can no longer persist in the (read-only)
+# fixture dir, so the shared npm CACHE at /titan/npm-cache (titan-ws volume —
+# cache dir, NOT workspace; survives container recreation, unlike the
+# pre-#157 /root/.npm) is what keeps installs fast (~3s warm, measured). The
+# rig-smoke pre-warm job (dev/rig-smoke/prewarm-worker.sh, #84/#153) warms
+# exactly that cache.
 agent: linux
 
 env:
   NODE_ENV: test
   CI: "true"
+  # Shared npm cache on the titan-ws volume (#157) — cache dir ≠ workspace:
+  # npm's content-addressed cacache tolerates concurrent readers/writers,
+  # unlike a shared node_modules.
+  npm_config_cache: /titan/npm-cache
 
 stages:
   - stage: install
     steps:
-      - sh: cd /titan/fixtures/node-app-with-failing-test && npm ci --no-audit --no-fund || npm install --no-audit --no-fund --no-package-lock
+      # Copy-into-workspace-then-run (#157). tar --exclude skips any
+      # node_modules/dist a developer's local sanity run (README) left in the
+      # checked-out fixture dir; the workspace install below is the only
+      # node_modules this build ever sees.
+      - sh: |
+          set -e
+          tar -C /titan/fixtures/node-app-with-failing-test --exclude=./node_modules --exclude=./dist -cf - . | tar -xf -
+          npm ci --prefer-offline --no-audit --no-fund || npm install --prefer-offline --no-audit --no-fund --no-package-lock
 
   - stage: unit-test
     dependsOn: [install]
@@ -32,7 +57,9 @@ stages:
       # vitest exits 1 when any test fails; the engine maps that to FAILURE.
       # The worker captures stdout/stderr verbatim — vitest's "FAIL " prefix
       # is what the UI log viewer scrolls to on click.
-      - sh: cd /titan/fixtures/node-app-with-failing-test && npx vitest run --reporter=default
+      # cwd is the workspace the install stage populated (design/43: all
+      # stages of one build share /titan/worker/build-<id>).
+      - sh: npx vitest run --reporter=default
 
   - stage: build
     dependsOn: [unit-test]
@@ -47,4 +74,4 @@ stages:
     # the engine now rejects with a precise message instead of the opaque
     # "Transaction failed" abort.
     steps:
-      - sh: cd /titan/fixtures/node-app-with-failing-test && npm run build
+      - sh: npm run build
