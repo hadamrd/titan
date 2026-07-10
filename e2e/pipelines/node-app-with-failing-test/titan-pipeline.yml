@@ -19,9 +19,20 @@
 # mount (the pre-#157 design) let two concurrent builds of this fixture race
 # on one node_modules: one build's `npm ci` wiped node_modules mid-vitest of
 # the other, vitest found zero tests, exited 0, and a should-fail build went
-# PHANTOM SUCCESS. The live bind mount stays (read-only) because the triage
-# spec's patch-source-then-retrigger leg (#1130 test 4) edits the fixture on
-# the HOST and the next build's fresh copy must pick the change up.
+# PHANTOM SUCCESS.
+#
+# HOST SOURCE IS IMMUTABLE AT RUN TIME (#161). The second phantom-SUCCESS
+# mechanism (post-#158) was NOT a copy failure: the triage spec's leg 4 used
+# to patch src/sum.test.js to passing ON THE HOST, trigger, and restore ~20s
+# later. The :ro mount does not protect against that — host edits pass
+# straight through the bind mount — so any CONCURRENT spec (golden-path
+# surface A, TITAN_PW_WORKERS=2) whose install tar-copied inside that window
+# got the passing source and its should-fail build went SUCCESS (observed
+# live: builds 3110 FAILED / 3111 patched-SUCCESS / 3112 phantom-SUCCESS,
+# 2026-07-10 06:57 UTC). Leg 4 now patches BUILD-SCOPED instead: it rewrites
+# the job's pipelineScript (PATCH /api/v1/jobs/{id}) at the E2E_PATCH_POINT
+# anchor below, so the sed runs inside the build's own workspace copy. NOBODY
+# may mutate e2e/pipelines/** while a rig is up — specs patch via the anchor.
 #
 # Warm-run speed: node_modules can no longer persist in the (read-only)
 # fixture dir, so the shared npm CACHE at /titan/npm-cache (titan-ws volume —
@@ -49,6 +60,7 @@ stages:
       - sh: |
           set -e
           tar -C /titan/fixtures/node-app-with-failing-test --exclude=./node_modules --exclude=./dist -cf - . | tar -xf -
+          true # E2E_PATCH_POINT (#161): specs rewrite this single line via PATCH /api/v1/jobs/{id} to patch the WORKSPACE copy (never the host fixture)
           npm ci --prefer-offline --no-audit --no-fund || npm install --prefer-offline --no-audit --no-fund --no-package-lock
 
   - stage: unit-test
@@ -59,7 +71,18 @@ stages:
       # is what the UI log viewer scrolls to on click.
       # cwd is the workspace the install stage populated (design/43: all
       # stages of one build share /titan/worker/build-<id>).
-      - sh: npx vitest run --reporter=default
+      #
+      # Structural guards (#161): this fixture's oracle depends on the suite
+      # EXECUTING, so it must be INCAPABLE of succeeding via test-absence:
+      #   * test -f fails the step loudly if the workspace copy lost the file
+      #     (tar failure, cwd drift, partial copy — whatever the mechanism).
+      #   * --passWithNoTests=false pins vitest's fail-on-zero-tests default
+      #     (verified on vitest 2.1.9: absent OR empty test file exits 1;
+      #     `=false` parses — the bare flag flips exit to 0, `=false` keeps 1).
+      - sh: |
+          set -e
+          test -f src/sum.test.js || { echo "GUARD(#161): src/sum.test.js missing from workspace copy — failing loud, never pass-by-absence"; exit 1; }
+          npx vitest run --reporter=default --passWithNoTests=false
 
   - stage: build
     dependsOn: [unit-test]
