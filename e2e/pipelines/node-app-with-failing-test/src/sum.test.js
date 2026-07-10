@@ -5,10 +5,15 @@
 //   * build transitions to FAILURE within 30s of trigger
 //   * the failing-step log contains a line matching /FAIL /
 //   * after the spec patches `expect(1 + 1).toBe(3)` -> `.toBe(2)`, the next
-//     build is SUCCESS
+//     build is SUCCESS. The patch is applied to the BUILD's workspace copy
+//     via the pipeline's E2E_PATCH_POINT anchor (#161) — THIS file on disk is
+//     never edited at run time. A host-side edit here raced concurrent specs'
+//     tar copies and produced a phantom SUCCESS on a should-fail build.
 //
 // Do NOT add extra failing tests here — the spec asserts "exactly one failing
-// test". Add new passing cases freely.
+// test". Add new passing cases freely. The sed in the triage spec's leg 4 and
+// the unit-test stage's guards match this file's exact text — keep the
+// intentional assertion literally `expect(sum(1, 1)).toBe(3);`.
 
 import { describe, it, expect } from 'vitest';
 import { sum } from './sum.js';

@@ -80,7 +80,14 @@ stages:
   - stage: unit-test
     dependsOn: [lint]
     steps:
-      - sh: npm test --silent
+      # Structural guard (#161): the golden-path SUCCESS oracle depends on
+      # this suite EXECUTING. If the workspace copy lost the test file, the
+      # build must FAIL loudly — a green verdict that ran zero tests is the
+      # same phantom class as the should-fail sibling's.
+      - sh: |
+          set -e
+          test -f src/index.test.js || { echo "GUARD(#161): src/index.test.js missing from workspace copy — failing loud, never pass-by-absence"; exit 1; }
+          npm test --silent
 
   - stage: build
     dependsOn: [unit-test]

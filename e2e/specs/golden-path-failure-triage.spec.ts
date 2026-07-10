@@ -25,8 +25,17 @@
  *   4. Click the failing step, assert the log viewer renders and contains a
  *      line matching /FAIL / (vitest's failure prefix).
  *   5. (test.fixme) per-step re-run affordance — see #1130 follow-up. For
- *      now we exercise a full job re-trigger after patching the fixture
- *      source to passing and assert SUCCESS.
+ *      now we exercise a full job re-trigger after patching the failing test
+ *      to passing and assert SUCCESS. The patch is BUILD-SCOPED (#161): leg 4
+ *      rewrites this job's pipelineScript (PATCH /api/v1/jobs/{id}) at the
+ *      fixture's E2E_PATCH_POINT anchor so the sed runs inside the build's
+ *      own workspace copy. It must NEVER touch the host fixture tree: the
+ *      previous host-side fs.writeFileSync patch window (~20s) raced every
+ *      concurrent spec that tar-copies the same fixture (TITAN_PW_WORKERS=2),
+ *      and a should-fail build that copied inside the window went phantom
+ *      SUCCESS (#161, observed live 2026-07-10 06:57: builds 3110 FAILED /
+ *      3111 patched-SUCCESS / 3112 phantom-SUCCESS — the :ro mount does not
+ *      stop host-side edits passing through the bind mount).
  *
  * What's deferred (test.fixme + follow-up issue) — out-of-scope per #1130:
  *   * GitHub PR check status transition (requires real GitHub repo + webhook
@@ -77,7 +86,12 @@ const TERMINAL = new Set(['SUCCESS', 'FAILED', 'FAILURE', 'ABORTED', 'UNSTABLE',
 const SUCCESSFUL = new Set(['SUCCESS'])
 const FAILED = new Set(['FAILED', 'FAILURE', 'ERROR'])
 
-const FIXTURE_TEST_FILE = 'src/sum.test.js'
+// #161: the fixture's install stage carries a single-line no-op anchor
+// (`true # E2E_PATCH_POINT …`) that specs rewrite via PATCH
+// /api/v1/jobs/{id} to alter the BUILD's workspace copy. Rewriting the job's
+// pipelineScript is the only sanctioned way to vary this fixture's behaviour
+// — the host fixture tree under e2e/pipelines/ is immutable at run time.
+const PATCH_POINT_RE = /^([ \t]*)true # E2E_PATCH_POINT.*$/m
 
 interface JobCreateResp { id: number }
 interface BuildTriggerResp { buildId: number; buildNumber: number }
@@ -381,28 +395,37 @@ test.describe('golden-path-failure-triage @golden @sre', () => {
     },
   )
 
-  test('4. patch failing test -> re-run -> SUCCESS', async ({ request }) => {
+  test('4. patch failing test -> re-run -> SUCCESS (build-scoped patch, #161)', async ({ request }) => {
     test.skip(!failingBuildId, 'prior failing-build test did not complete')
     test.setTimeout(SUCCESS_TIMEOUT_MS + 60_000)
 
-    const testFile = path.join(fixtureRoot(), FIXTURE_TEST_FILE)
-    const original = fs.readFileSync(testFile, 'utf8')
-
-    // Patch the intentional failure to a passing expectation. We DO NOT git
-    // commit — this test mutates the working tree only and restores it after.
-    const patched = original.replace(
-      'expect(sum(1, 1)).toBe(3);',
-      'expect(sum(1, 1)).toBe(2); // patched by #1130 e2e to drive SUCCESS',
+    // BUILD-SCOPED patch (#161): rewrite THIS job's pipelineScript so the
+    // install stage flips the intentional regression to passing INSIDE the
+    // build's own workspace copy. The host fixture tree is never touched, so
+    // a concurrent spec's tar copy can never observe a passing source (the
+    // #161 phantom-SUCCESS mechanism). The chained grep makes the sed
+    // self-verifying: if the fixture's assertion text drifts, sed no-ops,
+    // grep exits 1, install FAILS — never a silent no-op.
+    const baseYaml = readPipelineYaml()
+    const patchedYaml = baseYaml.replace(
+      PATCH_POINT_RE,
+      "$1sed -i 's/expect(sum(1, 1)).toBe(3);/expect(sum(1, 1)).toBe(2);/' src/sum.test.js && grep -qF 'expect(sum(1, 1)).toBe(2);' src/sum.test.js # leg-4 patch (#1130/#161): workspace-scoped, host untouched",
     )
-    expect(patched, 'failing assertion not found in fixture source — refusing to silently no-op').not.toBe(original)
+    expect(
+      patchedYaml,
+      'E2E_PATCH_POINT anchor not found in the fixture pipeline yaml — refusing to silently no-op',
+    ).not.toBe(baseYaml)
+
+    const patchResp = await request.patch(`${API_BASE}/api/v1/jobs/${jobId}`, {
+      headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
+      data: { pipelineScript: patchedYaml },
+    })
+    expect(
+      patchResp.status(),
+      `PATCH /jobs/${jobId} pipelineScript failed: ${await patchResp.text()}`,
+    ).toBe(200)
 
     try {
-      fs.writeFileSync(testFile, patched, 'utf8')
-
-      // Republish the pipeline source (the engine reads pipelineScript at job
-      // create time; the fixture source is mounted into the worker workspace
-      // by the rig's docker-compose, so the worker picks up the file change
-      // on the next build).
       const t0 = Date.now()
       const successBuildId = await triggerBuild(request, bearer, jobId)
       expect(successBuildId).not.toBe(failingBuildId)
@@ -437,10 +460,17 @@ test.describe('golden-path-failure-triage @golden @sre', () => {
         ).toBeGreaterThanOrEqual(t0 - 5_000)
       }
     } finally {
-      // Always restore — never leave the fixture tree in a "passing" state on
-      // disk; the next session's `pnpm test` sanity check must still see one
-      // failing test.
-      fs.writeFileSync(testFile, original, 'utf8')
+      // Defensive hygiene: point the job back at the pristine should-fail
+      // pipeline so even a failed afterAll delete can never leave a job that
+      // produces SUCCESS builds from the should-fail fixture. Best-effort —
+      // teardown must not mask the test's own verdict. NOTE: nothing on the
+      // host was mutated, so there is nothing to restore on disk (#161).
+      await request
+        .patch(`${API_BASE}/api/v1/jobs/${jobId}`, {
+          headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
+          data: { pipelineScript: baseYaml },
+        })
+        .catch(() => undefined)
     }
   })
 })

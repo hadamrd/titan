@@ -48,7 +48,13 @@ stages:
     dependsOn: [Backend Lint]
     image: "maven:3.9-eclipse-temurin-17"
     steps:
-      - sh: "mvn -B -ntp -Dmaven.repo.local=backend/.m2-repo -f backend/pom.xml test"
+      # Evidence-of-execution guard (#161): surefire exits 0 when it finds
+      # ZERO test classes, so "tests passed" alone can be a phantom. Require
+      # at least one report file — an absent/empty test tree fails loud.
+      - sh: |
+          set -e
+          mvn -B -ntp -Dmaven.repo.local=backend/.m2-repo -f backend/pom.xml test
+          ls backend/target/surefire-reports/TEST-*.xml >/dev/null 2>&1 || { echo "GUARD(#161): no surefire reports — zero tests executed, refusing pass-by-absence"; exit 1; }
       - junit:
           testResults: "backend/target/surefire-reports/TEST-*.xml"
 
@@ -73,7 +79,13 @@ stages:
     dependsOn: [Frontend Lint]
     image: "node:20-alpine"
     steps:
-      - sh: "cd frontend && npm test"
+      # Evidence-of-execution guard (#161): the junit step below needs the
+      # report the test run writes. Require it to exist and be non-empty so
+      # a runner that silently collected zero tests cannot go green.
+      - sh: |
+          set -e
+          cd frontend && npm test
+          test -s test-results/junit.xml || { echo "GUARD(#161): frontend/test-results/junit.xml absent/empty — zero tests executed, refusing pass-by-absence"; exit 1; }
       - junit:
           testResults: "frontend/test-results/junit.xml"
 
