@@ -221,10 +221,11 @@ tasks:
     dir: rig/local
     cmds:
       - test -f .env || cp .env.example .env
-      # GIT_SHA is baked into the titan-server image (OCI revision label +
-      # /app/TITAN_GIT_SHA) so rig:smoke can flag a stale rig (#44). A direct
-      # `docker compose up --build` without this env yields the "unknown"
-      # label — deliberately: that IS the footgun being flagged.
+      # GIT_SHA is baked into the titan-server AND titan-worker images (OCI
+      # revision label + /app/TITAN_GIT_SHA) so rig:smoke can flag a stale rig
+      # (#44, worker parity #155). A direct `docker compose up --build`
+      # without this env yields the "unknown" label — deliberately: that IS
+      # the footgun being flagged.
       - GIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo unknown) docker compose --env-file .env up -d --build
       - bash seed-data.sh
       - 'echo "Titan UI  : http://localhost:5180"'
