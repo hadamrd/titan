@@ -323,16 +323,23 @@ services:
       TITAN_ARTIFACT_ROOT: "/titan/artifacts"
     volumes:
       - titan-ws:/titan
-      # Vendored e2e fixture sources (GH #73). The legacy golden-path fixtures
-      # (e2e/pipelines/*/titan-pipeline.yml) cd into /titan/fixtures/<name> —
-      # their specs document that "the fixture source is mounted into the
-      # worker workspace by the rig's docker-compose", and the failure-triage
-      # spec (#1130 test 4) patches a fixture file ON THE HOST and expects the
-      # next build to pick the change up, so this must be a live bind mount,
-      # not a copy. Mounted rw: npm writes node_modules/ into the fixture dirs
-      # (gitignored), which is what keeps `npm install` a no-op after the
-      # first build and the triage spec inside its 30s FAILURE budget.
-      - ../../e2e/pipelines:/titan/fixtures
+      # Vendored e2e fixture sources (GH #73). The golden-path fixture
+      # pipelines (e2e/pipelines/*/titan-pipeline.yml) COPY the fixture from
+      # /titan/fixtures/<name> into the build's own workspace and run there
+      # (#157 — checkout semantics). The failure-triage spec (#1130 test 4)
+      # patches a fixture file ON THE HOST and expects the next build to pick
+      # the change up, so this must stay a live bind mount, not a baked copy.
+      #
+      # READ-ONLY (#157): the pre-#157 rw mount let fixture pipelines run npm
+      # IN PLACE in the shared dir, so two concurrent builds of one fixture
+      # shared a mutable node_modules — one build's `npm ci` wiped it
+      # mid-vitest of the other, vitest found zero tests and exited 0, and a
+      # should-fail build reported phantom SUCCESS. :ro makes in-place
+      # mutation structurally impossible; warm-run speed now comes from the
+      # shared npm cache at /titan/npm-cache on the titan-ws volume (a cache
+      # dir, NOT a workspace), which the rig-smoke pre-warm job (#84/#153)
+      # keeps hot.
+      - ../../e2e/pipelines:/titan/fixtures:ro
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     networks: [titan]

@@ -33,9 +33,13 @@
 #         page) also errs toward warming.
 #   2. If cold, fire ONE throwaway warm-up build through the public API and
 #      wait for it to reach a terminal status before returning. The warm-up
-#      job (`rig-smoke-prewarm`) runs the SAME `npm ci` install step as the
-#      node fixtures (e2e/pipelines/node-app-with-failing-test), so the
-#      worker's npm/page cache is genuinely hot afterwards — not just the JVM.
+#      job (`rig-smoke-prewarm`) runs the SAME copy-into-workspace + `npm ci`
+#      install stage as the node fixtures
+#      (e2e/pipelines/node-app-with-failing-test), so the SHARED npm cache at
+#      /titan/npm-cache (#157 — the fixtures mount is :ro now, node_modules
+#      no longer persists in the fixture dir; the cache is what keeps warm
+#      installs fast) plus the node/npm page cache are genuinely hot
+#      afterwards — not just the JVM.
 #   3. Logs `[rig-smoke] pre-warmed worker (Xs)` on success.
 #
 # Contract:
@@ -155,13 +159,21 @@ T0=$(date +%s)
 
 # ── 4. Ensure the warm-up job exists (idempotent; 409 → reuse) ──────────────
 # The pipeline mirrors the install stage of the node fixture the triage spec
-# uses (e2e/pipelines/node-app-with-failing-test/titan-pipeline.yml), so the
-# warm-up populates the exact npm cache the first real build needs.
+# uses (e2e/pipelines/node-app-with-failing-test/titan-pipeline.yml) — same
+# copy-into-workspace isolation (#157: the /titan/fixtures mount is read-only
+# and must never be mutated in place) and the same shared npm cache
+# (npm_config_cache=/titan/npm-cache), so the warm-up populates the exact
+# cache the first real build's `npm install` resolves from.
 PIPELINE='agent: linux
+env:
+  npm_config_cache: /titan/npm-cache
 stages:
   - stage: warm
     steps:
-      - sh: cd /titan/fixtures/node-app-with-failing-test && (npm ci --no-audit --no-fund || npm install --no-audit --no-fund --no-package-lock)
+      - sh: |
+          set -e
+          tar -C /titan/fixtures/node-app-with-failing-test --exclude=./node_modules --exclude=./dist -cf - . | tar -xf -
+          npm ci --prefer-offline --no-audit --no-fund || npm install --prefer-offline --no-audit --no-fund --no-package-lock
 '
 JOB_BODY=$(jq -nc \
   --arg fullName "$PREWARM_JOB" \
@@ -188,6 +200,20 @@ case "$CREATE_CODE" in
     JOB_ID=$($CURL -fsS "${TITAN_API_URL}/api/v1/jobs?search=${PREWARM_JOB}" \
       -H "Authorization: Bearer ${BEARER}" 2>/dev/null \
       | jq -r --arg n "$PREWARM_JOB" '.items[] | select(.fullName == $n) | .id' | head -n 1) || JOB_ID=""
+    # #157: the stored job may hold a STALE pipeline — observed live: a job
+    # seeded pre-#157 still ran the in-place `cd /titan/fixtures && npm ci`,
+    # which FAILS against the now read-only mount, so the "warm-up" warmed
+    # nothing while logging success. Rotate the stored script to THIS
+    # script's pipeline so a reused job always runs the current pattern.
+    if [ -n "${JOB_ID:-}" ]; then
+      PATCH_BODY=$(jq -nc --arg pipelineScript "$PIPELINE" '{pipelineScript:$pipelineScript}')
+      # shellcheck disable=SC2086
+      $CURL -fsS -X PATCH "${TITAN_API_URL}/api/v1/jobs/${JOB_ID}" \
+        -H "Authorization: Bearer ${BEARER}" \
+        -H 'Content-Type: application/json' \
+        --data-binary "$PATCH_BODY" >/dev/null 2>&1 \
+        || log "pre-warm: WARNING — could not rotate warm-up job ${JOB_ID}'s pipeline; a stale definition may fail the warm-up build"
+    fi
     ;;
   *)
     bail "pre-warm: WARNING — POST /api/v1/jobs returned HTTP ${CREATE_CODE}; skipping"
