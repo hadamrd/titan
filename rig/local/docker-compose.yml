@@ -250,6 +250,12 @@ services:
     build:
       context: ../..
       dockerfile: rig/local/Dockerfile.titan-worker
+      args:
+        # Stale-jar guard, worker parity (#155): same GIT_SHA export from
+        # `task dev:titan` as the titan-server build above. Unset → the image
+        # is labelled "unknown" and check-rig-freshness.sh falls back to the
+        # #154 creation-time skew heuristic.
+        GIT_SHA: "${GIT_SHA:-unknown}"
     depends_on:
       postgres:
         condition: service_healthy

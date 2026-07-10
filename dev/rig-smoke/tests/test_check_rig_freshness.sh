@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # Adversarial unit test for dev/rig-smoke/check-rig-freshness.sh (#44).
 #
-# Acceptance criterion under test (issue #44; worker-skew extension #153):
+# Acceptance criterion under test (issue #44; worker-skew extension #153;
+# worker label parity #155):
 #   - STALE image (label sha != checkout HEAD) → the STALE RIG flag appears
 #     (adversarial: assert the warning IS printed and stdout is `true`).
 #   - FRESH image (label sha == HEAD) → the flag does NOT appear.
 #   - Image without a provenance label (built via direct `docker compose up
 #     --build`, the original footgun) → flagged as stale.
-#   - Fresh server + WORKER image built long before the server image (#153:
-#     the label-less worker COPYs a pre-built jar; a recompose that cache-hit
-#     a stale jar shipped a pre-#146 engine undetected) → flagged as stale.
-#   - Fresh server + worker built within the tolerated skew → false.
+#   - #155 three-case worker contract:
+#       labeled-fresh  → silent `false` — even with a huge image-age skew
+#                        (the byte-identical-jar cache-hit that false-
+#                        positived the #154 heuristic on 2026-07-10);
+#       labeled-stale  → flagged `true` — even with zero image-age skew;
+#       unlabeled      → falls back to the #153/#154 skew heuristic.
+#   - Unlabeled fallback: fresh server + WORKER image built long before the
+#     server image (#153: a recompose that cache-hit a stale jar shipped a
+#     pre-#146 engine undetected) → flagged as stale; within tolerated skew
+#     → false.
 #   - No rig / no docker / explicit skip → quiet `false`, exit 0.
 #   - The script NEVER exits non-zero — stale is a warning, not a hard fail
 #     (intentional drift mid-bisect is legitimate).
@@ -33,16 +40,18 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 # Stub docker: `ps` answers per the name= filter; `inspect` dispatches on the
-# full arg string — the provenance label comes from $TMP/label.txt (empty
-# file = no label), image ids are fixed, image Created timestamps come from
-# $TMP/server-created.txt / $TMP/worker-created.txt (#153 skew probe).
+# full arg string — server / worker provenance labels come from $TMP/label.txt
+# / $TMP/worker-label.txt (empty file = no label; #155 gave the worker its own
+# label), image ids are fixed, image Created timestamps come from
+# $TMP/server-created.txt / $TMP/worker-created.txt (#153 skew fallback).
 cat > "$TMP/docker-stub.sh" <<EOF
 #!/usr/bin/env bash
 args="\$*"
 case "\$args" in
   ps*name=titan-server*) echo "local-titan-server-1" ;;
   ps*name=titan-worker*) cat "$TMP/worker-name.txt" 2>/dev/null ;;
-  *"index .Config.Labels"*)                 cat "$TMP/label.txt" ;;
+  *"index .Config.Labels"*local-titan-server-1) cat "$TMP/label.txt" ;;
+  *"index .Config.Labels"*local-titan-worker-1) cat "$TMP/worker-label.txt" ;;
   *"{{.Image}} local-titan-server-1"*)      echo "sha256:srvimg" ;;
   *"{{.Image}} local-titan-worker-1"*)      echo "sha256:wrkimg" ;;
   *"{{.Created}} sha256:srvimg"*)           cat "$TMP/server-created.txt" ;;
@@ -56,9 +65,11 @@ iso_utc_ago() { # <seconds-ago> → docker-style RFC3339 timestamp
   date -u -d "@$(( $(date +%s) - $1 ))" +%Y-%m-%dT%H:%M:%S.000000000Z
 }
 
-# Default fixture state: worker present, both images built ~now (no skew).
+# Default fixture state: worker present but UNLABELED (pre-#155 image → the
+# skew-fallback path), both images built ~now (no skew).
 reset_stub_state() {
   echo "local-titan-worker-1" > "$TMP/worker-name.txt"
+  : > "$TMP/worker-label.txt"
   iso_utc_ago 60 > "$TMP/server-created.txt"
   iso_utc_ago 120 > "$TMP/worker-created.txt"
 }
@@ -148,14 +159,14 @@ if [ "$OUT" != "false" ]; then
 fi
 echo "ok: RIG_SMOKE_SKIP_FRESHNESS=1 → false (docker never invoked)"
 
-# ── Case 7: #153 ADVERSARIAL — fresh server label, worker image 18h older ───
+# ── Case 7: #153/#155 — UNLABELED worker 18h older → skew fallback flags it ─
 reset_stub_state
 echo "cccccccccccccccccccccccccccccccccccccccc" > "$TMP/label.txt"
 iso_utc_ago 60 > "$TMP/server-created.txt"
 iso_utc_ago $((18 * 3600)) > "$TMP/worker-created.txt" # the observed 17.7h incident skew
 OUT=$(run_check "$TMP/docker-stub.sh" "cccccccccccccccccccccccccccccccccccccccc")
 if [ "$OUT" != "true" ] || ! grep -q 'STALE RIG' "$TMP/stderr.txt"; then
-  echo "FAIL: worker image built 18h before a fresh server image must be flagged stale (#153); got '$OUT'" >&2
+  echo "FAIL: unlabeled worker image built 18h before a fresh server image must be flagged stale (#153); got '$OUT'" >&2
   cat "$TMP/stderr.txt" >&2
   exit 1
 fi
@@ -164,7 +175,12 @@ if ! grep -q 'titan-worker' "$TMP/stderr.txt"; then
   cat "$TMP/stderr.txt" >&2
   exit 1
 fi
-echo "ok: #153 ADVERSARIAL — fresh server + 18h-older worker image → flagged stale"
+if ! grep -q 'falling back' "$TMP/stderr.txt"; then
+  echo "FAIL: an unlabeled worker must announce the skew FALLBACK (#155 case 3):" >&2
+  cat "$TMP/stderr.txt" >&2
+  exit 1
+fi
+echo "ok: #153/#155 — unlabeled worker + 18h skew → fallback heuristic flags stale"
 
 # ── Case 8: #153 — worker image within tolerated skew → false ───────────────
 reset_stub_state
@@ -191,5 +207,58 @@ if [ "$OUT" != "false" ] || grep -q 'STALE RIG' "$TMP/stderr.txt"; then
 fi
 echo "ok: #153 — no titan-worker container → skew check skipped, false"
 
+# ── Case 10: #155 — LABELED-FRESH worker → silent false DESPITE huge skew ───
+# Adversarial against the #154 heuristic: a byte-identical jar cache-hit
+# leaves an old-Created but content-correct image (the observed 2026-07-10
+# false positive, 6.6h). With a matching label, the skew math must never run.
+reset_stub_state
+echo "cccccccccccccccccccccccccccccccccccccccc" > "$TMP/label.txt"
+echo "cccccccccccccccccccccccccccccccccccccccc" > "$TMP/worker-label.txt"
+iso_utc_ago 60 > "$TMP/server-created.txt"
+iso_utc_ago $((18 * 3600)) > "$TMP/worker-created.txt" # would trip the skew fallback
+OUT=$(run_check "$TMP/docker-stub.sh" "cccccccccccccccccccccccccccccccccccccccc")
+if [ "$OUT" != "false" ] || grep -q 'STALE RIG' "$TMP/stderr.txt"; then
+  echo "FAIL: labeled-fresh worker must be silent 'false' even with 18h image-age skew (#155 case 1); got '$OUT'" >&2
+  cat "$TMP/stderr.txt" >&2
+  exit 1
+fi
+if grep -q 'falling back' "$TMP/stderr.txt"; then
+  echo "FAIL: a labeled worker must NOT hit the skew fallback:" >&2
+  cat "$TMP/stderr.txt" >&2
+  exit 1
+fi
+echo "ok: #155 case 1 — labeled-fresh worker → silent false (skew heuristic bypassed)"
+
+# ── Case 11: #155 ADVERSARIAL — LABELED-STALE worker → flagged, zero skew ───
+# Fresh server, worker label carries a DIFFERENT sha, images built minutes
+# apart (the skew heuristic would say fresh). The label verdict must win.
+reset_stub_state
+echo "cccccccccccccccccccccccccccccccccccccccc" > "$TMP/label.txt"
+echo "dddddddddddddddddddddddddddddddddddddddd" > "$TMP/worker-label.txt"
+OUT=$(run_check "$TMP/docker-stub.sh" "cccccccccccccccccccccccccccccccccccccccc")
+if [ "$OUT" != "true" ] || ! grep -q 'STALE RIG' "$TMP/stderr.txt"; then
+  echo "FAIL: labeled-stale worker must be flagged 'true' even with zero image-age skew (#155 case 2); got '$OUT'" >&2
+  cat "$TMP/stderr.txt" >&2
+  exit 1
+fi
+if ! grep -q 'titan-worker' "$TMP/stderr.txt"; then
+  echo "FAIL: the #155 label-mismatch warning should name the worker:" >&2
+  cat "$TMP/stderr.txt" >&2
+  exit 1
+fi
+echo "ok: #155 case 2 ADVERSARIAL — labeled-stale worker → flagged despite zero skew"
+
+# ── Case 12: #155 — worker label 'unknown' (compose default) → fallback ─────
+reset_stub_state
+echo "cccccccccccccccccccccccccccccccccccccccc" > "$TMP/label.txt"
+echo "unknown" > "$TMP/worker-label.txt" # direct `docker compose up --build titan-worker`
+OUT=$(run_check "$TMP/docker-stub.sh" "cccccccccccccccccccccccccccccccccccccccc")
+if [ "$OUT" != "false" ] || ! grep -q 'falling back' "$TMP/stderr.txt"; then
+  echo "FAIL: worker label 'unknown' must route to the skew fallback (#155 case 3); got '$OUT'" >&2
+  cat "$TMP/stderr.txt" >&2
+  exit 1
+fi
+echo "ok: #155 case 3 — worker label 'unknown' → skew fallback (no skew → false)"
+
 echo ""
-echo "PASS: all check-rig-freshness.sh cases (including adversarial stale-image + #153 worker-skew guards)"
+echo "PASS: all check-rig-freshness.sh cases (adversarial stale-image, #153 worker-skew fallback, #155 worker label parity)"

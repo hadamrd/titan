@@ -3,6 +3,15 @@
 # Input (build context = repo root):
 #   titan-worker/build/libs/titan-worker.jar - shadow / fat jar produced by
 #                                              `./gradlew :titan-worker:shadowJar`.
+#
+# Stale-jar guard (#44 / #153 / #155): like the server image, we COPY a
+# host-built jar, so a recompose can silently cache-hit a stale layer. GIT_SHA
+# is baked in at build time (label + file) so dev/rig-smoke/
+# check-rig-freshness.sh can compare the running image's provenance against
+# the checkout HEAD — the creation-time skew heuristic from #154
+# false-positives on byte-identical jar cache-hits, so the label is the
+# preferred oracle. The default "unknown" is deliberate: an image built
+# without the arg (i.e. not via `task dev:titan`) is exactly the footgun case.
 
 FROM eclipse-temurin:21-jre
 
@@ -20,6 +29,12 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git docker.io nodejs npm python3 \
  && rm -rf /var/lib/apt/lists/*
 
+# Provenance (#155). Declared AFTER the apt layer on purpose: Docker exposes
+# ARG values to every subsequent RUN's environment, so an earlier declaration
+# would cache-bust the (slow) apt-get install on every new commit.
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
+
 WORKDIR /opt/titan
 
 # shadowJar emits `titan-worker-<version>.jar`. Copy the whole libs/ tree —
@@ -30,6 +45,12 @@ WORKDIR /opt/titan
 # was bumped) doesn't win the alphabetical race against the current jar.
 # Lost ~2h of debugging on this on 2026-05-24 (#867); not again.
 COPY titan-worker/build/libs/ /opt/titan/lib/
+
+# In-container copy of the provenance SHA (#155, mirrors the server image) —
+# `docker exec <c> cat /app/TITAN_GIT_SHA` works even when the docker CLI
+# label probe is unavailable (e.g. exec-only access). Same /app path as the
+# server so one probe recipe covers both. The label above is canonical.
+RUN mkdir -p /app && echo "${GIT_SHA}" > /app/TITAN_GIT_SHA
 
 ENV JAVA_OPTS=""
 ENTRYPOINT ["sh", "-c", "JAR=$(ls -t /opt/titan/lib/titan-worker-*.jar | grep -v sources | head -1); exec java $JAVA_OPTS -jar \"$JAR\""]

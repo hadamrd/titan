@@ -79,10 +79,11 @@ echo "[rig-smoke] budget: ${TITAN_GLOBAL_TIMEOUT_MS}ms for ${GOLDEN_COUNT} golde
 # Explicit operator overrides win, same as the other knobs above.
 export TITAN_E2E_TRIAGE_BUDGET_MS="${TITAN_E2E_TRIAGE_BUDGET_MS:-45000}"
 
-# ── Stale-rig probe (#44) ───────────────────────────────────────────────────
-# `task dev:titan` bakes the checkout HEAD into the titan-server image
-# (build-arg GIT_SHA → OCI revision label). The probe compares that label to
-# HEAD: mismatch (or unprovable provenance) prints a LOUD warning on stderr
+# ── Stale-rig probe (#44 / #155) ────────────────────────────────────────────
+# `task dev:titan` bakes the checkout HEAD into the titan-server AND
+# titan-worker images (build-arg GIT_SHA → OCI revision label). The probe
+# compares those labels to HEAD (skew-heuristic fallback for unlabeled worker
+# images): mismatch (or unprovable provenance) prints a LOUD warning on stderr
 # and lands as `"rigShaMismatch":true` in the telemetry line — warning only,
 # never a hard fail (intentional drift mid-bisect is legitimate). The helper
 # echoes exactly `true`/`false` on stdout and always exits 0.

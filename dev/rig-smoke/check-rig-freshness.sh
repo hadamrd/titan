@@ -18,25 +18,32 @@
 #   engine logic, works even when titan-server is unhealthy.
 #
 #   #153 extension — the WORKER can be stale while the server is fresh:
-#   rig/local/Dockerfile.titan-worker COPYs a pre-built fat jar and carries
-#   NO provenance label, so a recompose that rebuilds titan-server from
-#   source but cache-hits the worker's stale-jar COPY layer ships an old
-#   ENGINE half with a fresh-looking rig. This bit live on 2026-07-09/10:
-#   the deployed worker image (built 01:19 UTC) predated the #146
-#   wake-ADVANCE fix while titan-server carried the #148 sha — invisible to
-#   the server-only probe, costing +12s poll dead time on the triage canary
-#   (issue #153, task_archive-proven). Cheapest oracle needing no compose /
-#   Dockerfile changes: image-created-time skew. A healthy `task dev:titan`
-#   builds both images minutes apart (and the worker jar is not
-#   byte-reproducible, so its COPY layer misses cache on every real
-#   rebuild); the incident skew was 17.7h.
+#   rig/local/Dockerfile.titan-worker COPYs a pre-built fat jar, so a
+#   recompose that rebuilds titan-server from source but cache-hits the
+#   worker's stale-jar COPY layer ships an old ENGINE half with a
+#   fresh-looking rig. This bit live on 2026-07-09/10: the deployed worker
+#   image (built 01:19 UTC) predated the #146 wake-ADVANCE fix while
+#   titan-server carried the #148 sha — invisible to the server-only probe,
+#   costing +12s poll dead time on the triage canary (issue #153,
+#   task_archive-proven).
+#
+#   #155 refinement — since PR #155 Dockerfile.titan-worker carries the same
+#   GIT_SHA provenance label as the server, so the PREFERRED worker oracle is
+#   label-vs-HEAD (exact, no false positives). The #154 image-created-time
+#   skew heuristic remains ONLY as the fallback for unlabeled worker images
+#   (pre-#155 builds, or a direct `docker compose up --build titan-worker`):
+#   it false-positives when a byte-identical jar cache-hits (observed
+#   2026-07-10: content-correct worker flagged 6.6h stale). Worker cases:
+#     1. label present, == HEAD  → fresh, silent.
+#     2. label present, != HEAD  → flagged stale (label wins, no skew math).
+#     3. label missing/unknown   → fall back to the skew heuristic.
 #
 # Contract (consumed by run-golden.sh and `task rig:smoke`):
-#   - stdout: EXACTLY `true` (server label mismatch / unprovable provenance /
-#     worker image older than the server image by more than
-#     RIG_SMOKE_WORKER_SKEW_MAX_S, while the respective container is
-#     running) or `false` (fresh, or no rig to check). This feeds the
-#     `rigShaMismatch` telemetry field.
+#   - stdout: EXACTLY `true` (server label mismatch / unprovable server
+#     provenance / worker label mismatch / unlabeled worker image older than
+#     the server image by more than RIG_SMOKE_WORKER_SKEW_MAX_S, while the
+#     respective container is running) or `false` (fresh, or no rig to
+#     check). This feeds the `rigShaMismatch` telemetry field.
 #   - stderr: human-readable log lines, including the loud STALE RIG warning.
 #   - exit code: ALWAYS 0. A stale rig is a warning, not a hard fail —
 #     intentional drift is legitimate mid-bisect (#44).
@@ -124,20 +131,46 @@ fi
 
 note "[rig-smoke] freshness: titan-server image matches checkout HEAD (${EXPECTED_SHA})"
 
-# ── #153: worker image-age skew check ────────────────────────────────────────
-# The worker image is label-less (COPYs a pre-built jar), so provenance can't
-# be compared to HEAD directly. Instead: a worker image created substantially
-# BEFORE the (just-proven-fresh) server image means the pair was not built
-# together — the recompose cache-hit a stale jar layer (the exact 2026-07-10
-# incident: worker 01:19 UTC vs server 18:59 UTC, shipping a pre-#146 engine).
+# ── #153/#155: worker freshness check ───────────────────────────────────────
+# Preferred oracle (#155): the worker image carries the same GIT_SHA
+# provenance label as the server — compare it to HEAD exactly like the
+# server check above. Fallback (#153/#154, unlabeled images only): a worker
+# image created substantially BEFORE the (just-proven-fresh) server image
+# means the pair was not built together — the recompose cache-hit a stale
+# jar layer (the exact 2026-07-10 incident: worker 01:19 UTC vs server
+# 18:59 UTC, shipping a pre-#146 engine). The skew heuristic false-positives
+# on byte-identical jar cache-hits, hence label-first.
 # Indeterminate lookups skip quietly — this probe must never invent staleness.
 # shellcheck disable=SC2086
 WORKER_CONTAINER=$($DOCKER ps --filter name=titan-worker --format '{{.Names}}' 2>/dev/null | head -n 1 || true)
 if [ -z "$WORKER_CONTAINER" ]; then
-  note "[rig-smoke] freshness: no titan-worker container running — skipping worker skew check"
+  note "[rig-smoke] freshness: no titan-worker container running — skipping worker check"
   echo "false"
   exit 0
 fi
+
+# shellcheck disable=SC2086
+WORKER_SHA=$($DOCKER inspect --format "{{ index .Config.Labels \"$LABEL_KEY\" }}" "$WORKER_CONTAINER" 2>/dev/null || true)
+
+if [ -n "$WORKER_SHA" ] && [ "$WORKER_SHA" != "unknown" ] && [ "$WORKER_SHA" != "<no value>" ]; then
+  # Case 1/2: labeled worker — the label verdict is final, no skew math.
+  if [ "$WORKER_SHA" != "$EXPECTED_SHA" ]; then
+    stale_banner \
+      "container ${WORKER_CONTAINER} image sha : ${WORKER_SHA}" \
+      "checkout HEAD sha           : ${EXPECTED_SHA}" \
+      "(#155: the worker image ships a stale ENGINE while titan-server looks fresh)"
+    echo "true"
+    exit 0
+  fi
+  note "[rig-smoke] freshness: titan-worker image matches checkout HEAD (${EXPECTED_SHA})"
+  echo "false"
+  exit 0
+fi
+
+# Case 3: unlabeled worker image (pre-#155 build, or a direct `docker compose
+# up --build titan-worker`) — fall back to the #153/#154 creation-time skew
+# heuristic.
+note "[rig-smoke] freshness: titan-worker image carries no provenance label — falling back to image-age skew heuristic (#154)"
 
 SERVER_CREATED=""
 WORKER_CREATED=""
@@ -171,7 +204,7 @@ SKEW_S=$(( SERVER_CREATED_S - WORKER_CREATED_S ))
 if [ "$SKEW_S" -gt "$WORKER_SKEW_MAX_S" ]; then
   stale_banner \
     "titan-worker image (${WORKER_CONTAINER}) was built ${SKEW_S}s BEFORE the titan-server image (max tolerated skew ${WORKER_SKEW_MAX_S}s)" \
-    "the worker image COPYs a pre-built fat jar and carries no provenance label — it likely ships a stale ENGINE" \
+    "the worker image COPYs a pre-built fat jar and carries no provenance label (pre-#155 build?) — it likely ships a stale ENGINE" \
     "(#153: a pre-#146 wake-less worker ran undetected while the server looked fresh, +12s poll dead time on the triage canary)" \
     "worker image created: ${WORKER_CREATED}" \
     "server image created: ${SERVER_CREATED}"

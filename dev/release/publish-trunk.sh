@@ -156,13 +156,14 @@ build_and_push() {
   fi
 
   echo "==> ${image}:${SHA_TAG}  (+ :${FLOATING_TAG})"
-  # GIT_SHA (full sha) is baked into the server image as provenance (#44 —
-  # OCI revision label + /app/TITAN_GIT_SHA) so the stale-jar guard
+  # GIT_SHA (full sha) is baked into the server and worker images as
+  # provenance (#44 server, #155 worker parity — OCI revision label +
+  # /app/TITAN_GIT_SHA) so the stale-jar guard
   # (dev/rig-smoke/check-rig-freshness.sh) can verify a rig built from
-  # published images too. Only Dockerfile.titan-server declares the ARG;
-  # passing it elsewhere would just emit unconsumed-build-arg warnings.
+  # published images too. The ui Dockerfile does not declare the ARG;
+  # passing it there would just emit an unconsumed-build-arg warning.
   local build_args=()
-  if [[ "$component" == "server" ]]; then
+  if [[ "$component" == "server" || "$component" == "worker" ]]; then
     build_args+=(--build-arg "GIT_SHA=$(git rev-parse HEAD)")
   fi
   run docker build -f "$dockerfile" \
