@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Adversarial unit test for dev/rig-smoke/check-rig-freshness.sh (#44).
 #
-# Acceptance criterion under test (issue #44):
+# Acceptance criterion under test (issue #44; worker-skew extension #153):
 #   - STALE image (label sha != checkout HEAD) → the STALE RIG flag appears
 #     (adversarial: assert the warning IS printed and stdout is `true`).
 #   - FRESH image (label sha == HEAD) → the flag does NOT appear.
 #   - Image without a provenance label (built via direct `docker compose up
 #     --build`, the original footgun) → flagged as stale.
+#   - Fresh server + WORKER image built long before the server image (#153:
+#     the label-less worker COPYs a pre-built jar; a recompose that cache-hit
+#     a stale jar shipped a pre-#146 engine undetected) → flagged as stale.
+#   - Fresh server + worker built within the tolerated skew → false.
 #   - No rig / no docker / explicit skip → quiet `false`, exit 0.
 #   - The script NEVER exits non-zero — stale is a warning, not a hard fail
 #     (intentional drift mid-bisect is legitimate).
@@ -28,17 +32,37 @@ fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# Stub docker: `ps` prints the container name, `inspect` prints whatever sha
-# the case under test wrote to $TMP/label.txt (empty file = no label).
+# Stub docker: `ps` answers per the name= filter; `inspect` dispatches on the
+# full arg string — the provenance label comes from $TMP/label.txt (empty
+# file = no label), image ids are fixed, image Created timestamps come from
+# $TMP/server-created.txt / $TMP/worker-created.txt (#153 skew probe).
 cat > "$TMP/docker-stub.sh" <<EOF
 #!/usr/bin/env bash
-case "\$1" in
-  ps)      echo "local-titan-server-1" ;;
-  inspect) cat "$TMP/label.txt" ;;
-  *)       exit 1 ;;
+args="\$*"
+case "\$args" in
+  ps*name=titan-server*) echo "local-titan-server-1" ;;
+  ps*name=titan-worker*) cat "$TMP/worker-name.txt" 2>/dev/null ;;
+  *"index .Config.Labels"*)                 cat "$TMP/label.txt" ;;
+  *"{{.Image}} local-titan-server-1"*)      echo "sha256:srvimg" ;;
+  *"{{.Image}} local-titan-worker-1"*)      echo "sha256:wrkimg" ;;
+  *"{{.Created}} sha256:srvimg"*)           cat "$TMP/server-created.txt" ;;
+  *"{{.Created}} sha256:wrkimg"*)           cat "$TMP/worker-created.txt" ;;
+  *) exit 1 ;;
 esac
 EOF
 chmod +x "$TMP/docker-stub.sh"
+
+iso_utc_ago() { # <seconds-ago> → docker-style RFC3339 timestamp
+  date -u -d "@$(( $(date +%s) - $1 ))" +%Y-%m-%dT%H:%M:%S.000000000Z
+}
+
+# Default fixture state: worker present, both images built ~now (no skew).
+reset_stub_state() {
+  echo "local-titan-worker-1" > "$TMP/worker-name.txt"
+  iso_utc_ago 60 > "$TMP/server-created.txt"
+  iso_utc_ago 120 > "$TMP/worker-created.txt"
+}
+reset_stub_state
 
 # Stub docker with NO containers running.
 cat > "$TMP/docker-empty.sh" <<'EOF'
@@ -124,5 +148,48 @@ if [ "$OUT" != "false" ]; then
 fi
 echo "ok: RIG_SMOKE_SKIP_FRESHNESS=1 → false (docker never invoked)"
 
+# ── Case 7: #153 ADVERSARIAL — fresh server label, worker image 18h older ───
+reset_stub_state
+echo "cccccccccccccccccccccccccccccccccccccccc" > "$TMP/label.txt"
+iso_utc_ago 60 > "$TMP/server-created.txt"
+iso_utc_ago $((18 * 3600)) > "$TMP/worker-created.txt" # the observed 17.7h incident skew
+OUT=$(run_check "$TMP/docker-stub.sh" "cccccccccccccccccccccccccccccccccccccccc")
+if [ "$OUT" != "true" ] || ! grep -q 'STALE RIG' "$TMP/stderr.txt"; then
+  echo "FAIL: worker image built 18h before a fresh server image must be flagged stale (#153); got '$OUT'" >&2
+  cat "$TMP/stderr.txt" >&2
+  exit 1
+fi
+if ! grep -q 'titan-worker' "$TMP/stderr.txt"; then
+  echo "FAIL: the #153 skew warning should name the worker image:" >&2
+  cat "$TMP/stderr.txt" >&2
+  exit 1
+fi
+echo "ok: #153 ADVERSARIAL — fresh server + 18h-older worker image → flagged stale"
+
+# ── Case 8: #153 — worker image within tolerated skew → false ───────────────
+reset_stub_state
+echo "cccccccccccccccccccccccccccccccccccccccc" > "$TMP/label.txt"
+iso_utc_ago 60 > "$TMP/server-created.txt"
+iso_utc_ago 600 > "$TMP/worker-created.txt" # 10min apart — a normal dev:titan build
+OUT=$(run_check "$TMP/docker-stub.sh" "cccccccccccccccccccccccccccccccccccccccc")
+if [ "$OUT" != "false" ] || grep -q 'STALE RIG' "$TMP/stderr.txt"; then
+  echo "FAIL: worker/server images built minutes apart must NOT be flagged; got '$OUT'" >&2
+  cat "$TMP/stderr.txt" >&2
+  exit 1
+fi
+echo "ok: #153 — worker image within tolerated skew (10min) → false"
+
+# ── Case 9: #153 — no worker container → server verdict stands, quiet skip ──
+reset_stub_state
+: > "$TMP/worker-name.txt"
+echo "cccccccccccccccccccccccccccccccccccccccc" > "$TMP/label.txt"
+OUT=$(run_check "$TMP/docker-stub.sh" "cccccccccccccccccccccccccccccccccccccccc")
+if [ "$OUT" != "false" ] || grep -q 'STALE RIG' "$TMP/stderr.txt"; then
+  echo "FAIL: fresh server + no worker container should emit 'false' quietly; got '$OUT'" >&2
+  cat "$TMP/stderr.txt" >&2
+  exit 1
+fi
+echo "ok: #153 — no titan-worker container → skew check skipped, false"
+
 echo ""
-echo "PASS: all check-rig-freshness.sh cases (including adversarial stale-image guard)"
+echo "PASS: all check-rig-freshness.sh cases (including adversarial stale-image + #153 worker-skew guards)"

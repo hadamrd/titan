@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 # Adversarial unit test for dev/rig-smoke/prewarm-worker.sh (#84).
 #
-# Acceptance criteria under test (issue #84):
+# Acceptance criteria under test (issue #84; idle-cold extension #153):
 #   - FRESH worker (StartedAt < 15min ago) → ONE throwaway build is fired via
 #     the API, the script waits for a terminal status, and logs
 #     '[rig-smoke] pre-warmed worker (Xs)'.
-#   - OLD worker (StartedAt >= 15min ago) → NO pre-warm (adversarial: assert
-#     the API was never touched — the curl call log stays empty).
+#   - OLD worker (StartedAt >= 15min ago) + RECENT build activity → NO
+#     pre-warm (adversarial: assert no warm-up build was ever triggered).
+#     #153 revised the #84 contract here: container age alone no longer proves
+#     warmth, so the script now legitimately touches the API (token + builds
+#     page) to REACH the no-pre-warm decision — the oracle is "no build
+#     triggered", not "curl never called".
+#   - OLD worker + IDLE rig (newest persisted build older than the threshold)
+#     → pre-warm fires (#153: WSL2 page-cache reclaim made the first no-op
+#     npm install 18-24s vs 2.5s warm; both 2026-07-09/10 triage-latency
+#     misses followed a >2h idle gap).
+#   - OLD worker + UNKNOWABLE activity (empty builds page) → errs cold:
+#     pre-warm fires.
 #   - RIG_SMOKE_SKIP_PREWARM=1 → skipped entirely, docker never invoked.
 #   - Warm-up build never terminal → loud warning, but STILL exit 0 (a
 #     best-effort helper must never turn a smoke run red by itself).
@@ -50,6 +60,7 @@ chmod +x "$TMP/docker-stub.sh"
 #   POST …/api/v1/jobs                      → TriggerBuild flow: body + \n + http_code
 #   GET  …/api/v1/jobs?search=…             → jobs page (used on 409 reuse)
 #   POST …/api/v1/jobs/<id>/builds          → {"buildId":4242,…}
+#   GET  …/api/v1/builds?limit=…            → newest-build page from $TMP/latest-build.txt (#153 idle probe)
 #   GET  …/api/v1/builds/4242               → RUNNING on 1st poll, then $TMP/final-status.txt
 cat > "$TMP/curl-stub.sh" <<EOF
 #!/usr/bin/env bash
@@ -64,6 +75,9 @@ case "\$args" in
     ;;
   *"/api/v1/jobs/77/builds"*)
     echo '{"buildId":4242,"buildNumber":1,"status":"QUEUED"}'
+    ;;
+  *"/api/v1/builds?limit="*)
+    cat "$TMP/latest-build.txt"
     ;;
   *"/api/v1/builds/4242"*)
     n=\$(cat "$TMP/poll-count.txt" 2>/dev/null || echo 0)
@@ -91,6 +105,8 @@ reset_state() {
   echo "SUCCESS" > "$TMP/final-status.txt"
   echo '{"id":77,"fullName":"rig-smoke-prewarm"}' > "$TMP/create-body.txt"
   echo "201" > "$TMP/create-code.txt"
+  # Default: rig built something 60s ago (recent activity → warm).
+  builds_page_ago 60 > "$TMP/latest-build.txt"
 }
 
 run_prewarm() { # extra env via caller
@@ -102,6 +118,12 @@ run_prewarm() { # extra env via caller
 
 iso_utc_ago() { # <seconds-ago> → docker-style RFC3339 timestamp
   date -u -d "@$(( $(date +%s) - $1 ))" +%Y-%m-%dT%H:%M:%S.000000000Z
+}
+
+builds_page_ago() { # <seconds-ago> → one-item /api/v1/builds page, finishedAt N seconds ago
+  local ts
+  ts=$(date -u -d "@$(( $(date +%s) - $1 ))" +%Y-%m-%dT%H:%M:%SZ)
+  printf '{"items":[{"id":9001,"status":"SUCCESS","queuedAt":"%s","startedAt":"%s","finishedAt":"%s"}],"total":1,"offset":0,"limit":1}\n' "$ts" "$ts" "$ts"
 }
 
 # ── Case 1: fresh worker (2min old) → pre-warm fires + waits terminal ──────
@@ -126,20 +148,59 @@ if [ "$POLLS" -lt 2 ]; then
 fi
 echo "ok: fresh worker → warm-up build fired, waited terminal, logged pre-warmed worker (Xs)"
 
-# ── Case 2: ADVERSARIAL — old worker (2h) → NO pre-warm, API untouched ─────
+# ── Case 2: ADVERSARIAL — old worker (2h) + recent build → NO pre-warm ─────
+# #153 contract: the script may query token + builds page to decide, but it
+# must NOT create the warm-up job nor trigger a build.
 reset_state
 iso_utc_ago 7200 > "$TMP/started.txt"
+builds_page_ago 60 > "$TMP/latest-build.txt"
 OUT=$(run_prewarm)
 if ! echo "$OUT" | grep -q 'no pre-warm needed'; then
-  echo "FAIL: old worker should log 'no pre-warm needed': $OUT" >&2
+  echo "FAIL: old worker + recent build should log 'no pre-warm needed': $OUT" >&2
   exit 1
 fi
-if [ -f "$TMP/curl-calls.log" ]; then
-  echo "FAIL: old worker must not touch the API; curl was called:" >&2
+if grep -q '/api/v1/jobs/77/builds' "$TMP/curl-calls.log" 2>/dev/null; then
+  echo "FAIL: old worker + recent build must not trigger a warm-up build:" >&2
   cat "$TMP/curl-calls.log" >&2
   exit 1
 fi
-echo "ok: ADVERSARIAL — old worker (2h) → no pre-warm, zero API calls"
+if grep -q -- '--data-binary' "$TMP/curl-calls.log" 2>/dev/null; then
+  echo "FAIL: old worker + recent build must not create the warm-up job:" >&2
+  cat "$TMP/curl-calls.log" >&2
+  exit 1
+fi
+echo "ok: ADVERSARIAL — old worker (2h) + recent build → no pre-warm, no job create, no build trigger"
+
+# ── Case 2b: #153 — old worker + IDLE rig (>30min since newest build) ───────
+reset_state
+iso_utc_ago 7200 > "$TMP/started.txt"
+builds_page_ago 8100 > "$TMP/latest-build.txt" # 2h15m — the observed miss pattern
+OUT=$(run_prewarm)
+if ! echo "$OUT" | grep -qE 'pre-warmed worker \([0-9]+s\)'; then
+  echo "FAIL: old worker + idle rig should pre-warm (#153): $OUT" >&2
+  exit 1
+fi
+if ! echo "$OUT" | grep -q '#153'; then
+  echo "FAIL: idle-cold pre-warm should name #153 as the reason: $OUT" >&2
+  exit 1
+fi
+if ! grep -q '/api/v1/jobs/77/builds' "$TMP/curl-calls.log"; then
+  echo "FAIL: idle-cold path did not trigger a warm-up build:" >&2
+  cat "$TMP/curl-calls.log" >&2
+  exit 1
+fi
+echo "ok: #153 — old worker + idle rig (2h15m) → warm-up build fired"
+
+# ── Case 2c: #153 — old worker + unknowable activity (empty page) → errs cold ─
+reset_state
+iso_utc_ago 7200 > "$TMP/started.txt"
+echo '{"items":[],"total":0,"offset":0,"limit":1}' > "$TMP/latest-build.txt"
+OUT=$(run_prewarm)
+if ! echo "$OUT" | grep -qE 'pre-warmed worker \([0-9]+s\)'; then
+  echo "FAIL: unknowable build activity must err toward warming (#153): $OUT" >&2
+  exit 1
+fi
+echo "ok: #153 — old worker + empty builds page → errs cold, warm-up build fired"
 
 # ── Case 3: skip env → nothing happens, docker never invoked ────────────────
 reset_state
