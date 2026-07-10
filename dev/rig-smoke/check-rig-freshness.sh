@@ -17,23 +17,42 @@
 #   on the label — the cheapest reliable oracle: no HTTP round-trip, no
 #   engine logic, works even when titan-server is unhealthy.
 #
+#   #153 extension — the WORKER can be stale while the server is fresh:
+#   rig/local/Dockerfile.titan-worker COPYs a pre-built fat jar and carries
+#   NO provenance label, so a recompose that rebuilds titan-server from
+#   source but cache-hits the worker's stale-jar COPY layer ships an old
+#   ENGINE half with a fresh-looking rig. This bit live on 2026-07-09/10:
+#   the deployed worker image (built 01:19 UTC) predated the #146
+#   wake-ADVANCE fix while titan-server carried the #148 sha — invisible to
+#   the server-only probe, costing +12s poll dead time on the triage canary
+#   (issue #153, task_archive-proven). Cheapest oracle needing no compose /
+#   Dockerfile changes: image-created-time skew. A healthy `task dev:titan`
+#   builds both images minutes apart (and the worker jar is not
+#   byte-reproducible, so its COPY layer misses cache on every real
+#   rebuild); the incident skew was 17.7h.
+#
 # Contract (consumed by run-golden.sh and `task rig:smoke`):
-#   - stdout: EXACTLY `true` (mismatch / unprovable provenance while a
-#     titan-server container is running) or `false` (fresh, or no rig to
-#     check). This feeds the `rigShaMismatch` telemetry field.
+#   - stdout: EXACTLY `true` (server label mismatch / unprovable provenance /
+#     worker image older than the server image by more than
+#     RIG_SMOKE_WORKER_SKEW_MAX_S, while the respective container is
+#     running) or `false` (fresh, or no rig to check). This feeds the
+#     `rigShaMismatch` telemetry field.
 #   - stderr: human-readable log lines, including the loud STALE RIG warning.
 #   - exit code: ALWAYS 0. A stale rig is a warning, not a hard fail —
 #     intentional drift is legitimate mid-bisect (#44).
 #
 # Env overrides (for tests — see tests/test_check_rig_freshness.sh):
-#   RIG_SMOKE_SKIP_FRESHNESS=1  skip entirely (emit `false`)
-#   RIG_SMOKE_DOCKER_CMD        command run instead of `docker`
-#   RIG_SMOKE_EXPECTED_SHA      expected sha (default: `git rev-parse HEAD`)
+#   RIG_SMOKE_SKIP_FRESHNESS=1   skip entirely (emit `false`)
+#   RIG_SMOKE_DOCKER_CMD         command run instead of `docker`
+#   RIG_SMOKE_EXPECTED_SHA       expected sha (default: `git rev-parse HEAD`)
+#   RIG_SMOKE_WORKER_SKEW_MAX_S  max tolerated worker-behind-server image-age
+#                                skew in seconds (default 3600; #153)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DOCKER="${RIG_SMOKE_DOCKER_CMD:-docker}"
 LABEL_KEY="org.opencontainers.image.revision"
+WORKER_SKEW_MAX_S="${RIG_SMOKE_WORKER_SKEW_MAX_S:-3600}"
 
 note() { echo "$*" >&2; }
 
@@ -104,5 +123,62 @@ if [ "$RUNNING_SHA" != "$EXPECTED_SHA" ]; then
 fi
 
 note "[rig-smoke] freshness: titan-server image matches checkout HEAD (${EXPECTED_SHA})"
+
+# ── #153: worker image-age skew check ────────────────────────────────────────
+# The worker image is label-less (COPYs a pre-built jar), so provenance can't
+# be compared to HEAD directly. Instead: a worker image created substantially
+# BEFORE the (just-proven-fresh) server image means the pair was not built
+# together — the recompose cache-hit a stale jar layer (the exact 2026-07-10
+# incident: worker 01:19 UTC vs server 18:59 UTC, shipping a pre-#146 engine).
+# Indeterminate lookups skip quietly — this probe must never invent staleness.
+# shellcheck disable=SC2086
+WORKER_CONTAINER=$($DOCKER ps --filter name=titan-worker --format '{{.Names}}' 2>/dev/null | head -n 1 || true)
+if [ -z "$WORKER_CONTAINER" ]; then
+  note "[rig-smoke] freshness: no titan-worker container running — skipping worker skew check"
+  echo "false"
+  exit 0
+fi
+
+SERVER_CREATED=""
+WORKER_CREATED=""
+# shellcheck disable=SC2086
+SERVER_IMG=$($DOCKER inspect --format '{{.Image}}' "$CONTAINER" 2>/dev/null || true)
+# shellcheck disable=SC2086
+WORKER_IMG=$($DOCKER inspect --format '{{.Image}}' "$WORKER_CONTAINER" 2>/dev/null || true)
+if [ -n "$SERVER_IMG" ]; then
+  # shellcheck disable=SC2086
+  SERVER_CREATED=$($DOCKER inspect --format '{{.Created}}' "$SERVER_IMG" 2>/dev/null || true)
+fi
+if [ -n "$WORKER_IMG" ]; then
+  # shellcheck disable=SC2086
+  WORKER_CREATED=$($DOCKER inspect --format '{{.Created}}' "$WORKER_IMG" 2>/dev/null || true)
+fi
+SERVER_CREATED_S=""
+WORKER_CREATED_S=""
+if [ -n "$SERVER_CREATED" ]; then
+  SERVER_CREATED_S=$(date -d "$SERVER_CREATED" +%s 2>/dev/null || true)
+fi
+if [ -n "$WORKER_CREATED" ]; then
+  WORKER_CREATED_S=$(date -d "$WORKER_CREATED" +%s 2>/dev/null || true)
+fi
+if [ -z "$SERVER_CREATED_S" ] || [ -z "$WORKER_CREATED_S" ]; then
+  note "[rig-smoke] freshness: cannot determine worker/server image ages — skipping worker skew check"
+  echo "false"
+  exit 0
+fi
+
+SKEW_S=$(( SERVER_CREATED_S - WORKER_CREATED_S ))
+if [ "$SKEW_S" -gt "$WORKER_SKEW_MAX_S" ]; then
+  stale_banner \
+    "titan-worker image (${WORKER_CONTAINER}) was built ${SKEW_S}s BEFORE the titan-server image (max tolerated skew ${WORKER_SKEW_MAX_S}s)" \
+    "the worker image COPYs a pre-built fat jar and carries no provenance label — it likely ships a stale ENGINE" \
+    "(#153: a pre-#146 wake-less worker ran undetected while the server looked fresh, +12s poll dead time on the triage canary)" \
+    "worker image created: ${WORKER_CREATED}" \
+    "server image created: ${SERVER_CREATED}"
+  echo "true"
+  exit 0
+fi
+
+note "[rig-smoke] freshness: titan-worker image age within ${WORKER_SKEW_MAX_S}s of titan-server (skew ${SKEW_S}s)"
 echo "false"
 exit 0
